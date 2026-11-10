@@ -100,11 +100,15 @@ def chat(base: str, model: str, system: str, prompt: str, json_mode: bool = Fals
 def loaded_size_gb(base: str, model: str) -> float | None:
     try:
         for m in ollama(base, "/api/ps").get("models", []):
-            if m.get("name") == model or m.get("model") == model:
+            if canonical(m.get("name", "")) == canonical(model) or canonical(m.get("model", "")) == canonical(model):
                 return round(m.get("size", 0) / 1e9, 1)
     except OSError:
         pass
     return None
+
+
+def canonical(name: str) -> str:
+    return name if ":" in name.split("/")[-1] else f"{name}:latest"
 
 
 def unload(base: str, model: str) -> None:
@@ -237,7 +241,8 @@ def load(role: str) -> list[dict]:
 
 
 def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
-    res = {"model": model, "roles": {}, "latencies": [], "tps": [], "size_gb": None, "errors": []}
+    res = {"model": model, "roles": {}, "latencies": [], "tps": [], "size_gb": None, "errors": [],
+           "evaluated_at": time.time()}
     for role in roles:
         scores, details, valid = [], [], []
         for case in load(role):

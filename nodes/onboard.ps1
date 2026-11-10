@@ -306,7 +306,9 @@ def boot_time():
             return float(re.search(r"sec = (\d+)", out).group(1))
         if os.name == "nt":
             import ctypes
-            return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
+            ticks = ctypes.windll.kernel32.GetTickCount64
+            ticks.restype = ctypes.c_ulonglong  # default int return type would truncate after ~49 days
+            return time.time() - ticks() / 1000.0
         if sys.platform.startswith("linux"):
             with open("/proc/stat", encoding="ascii") as handle:
                 for line in handle:

@@ -6,6 +6,35 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CODEX="$(command -v codex || echo /Applications/Codex.app/Contents/Resources/codex)"
 TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 
+# BEGIN launchd plist helper
+write_launchd_plist() {
+  python3 - "$@" <<'PY'
+import plistlib
+import sys
+
+path, label, run_at_load, keep_alive, interval, stdout, stderr, env_count, *items = sys.argv[1:]
+env_items = items[:int(env_count) * 2]
+program_arguments = items[int(env_count) * 2:]
+data = {"Label": label, "ProgramArguments": program_arguments}
+if env_items:
+    data["EnvironmentVariables"] = dict(zip(env_items[::2], env_items[1::2]))
+if run_at_load:
+    data["RunAtLoad"] = True
+if keep_alive:
+    data["KeepAlive"] = True
+if interval:
+    data["StartInterval"] = int(interval)
+if stdout:
+    data["StandardOutPath"] = stdout
+if stderr:
+    data["StandardErrorPath"] = stderr
+with open(path, "wb") as stream:
+    plistlib.dump(data, stream, fmt=plistlib.FMT_XML, sort_keys=False)
+PY
+}
+# END launchd plist helper
+
+command -v python3 >/dev/null || brew install python
 command -v uv >/dev/null || brew install uv
 UV="$(command -v uv)"
 
@@ -23,24 +52,13 @@ fi
 rm -f "$HERE/litellm/.vkey"
 
 # 3. Fleet controller as a login agent (dashboard: http://127.0.0.1:8700).
+mkdir -p "$HOME/Library/LaunchAgents"
 PLIST="$HOME/Library/LaunchAgents/local.ai-fleet.controller.plist"
-cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.controller</string>
-  <key>ProgramArguments</key><array>
-    <string>/bin/bash</string><string>-c</string>
-    <string>set -a; . "\$0/../litellm/.env"; set +a; exec "$UV" run --script "\$0/controller.py"</string>
-    <string>$HERE/controller</string>
-  </array>
-  <key>EnvironmentVariables</key><dict><key>TAILSCALE_BIN</key><string>$TS</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/ai-fleet-controller.log</string>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/ai-fleet-controller.log</string>
-</dict></plist>
-EOF
+write_launchd_plist "$PLIST" "local.ai-fleet.controller" 1 1 "" \
+  "$HOME/Library/Logs/ai-fleet-controller.log" "$HOME/Library/Logs/ai-fleet-controller.log" 1 \
+  TAILSCALE_BIN "$TS" \
+  "/bin/bash" "-c" 'set -a; . "$0/../litellm/.env"; set +a; exec "$1" run --script "$0/controller.py"' \
+  "$HERE/controller" "$UV"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
@@ -48,22 +66,13 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 mkdir -p "$HOME/.ai-fleet" && chmod 700 "$HOME/.ai-fleet"
 [ -f "$HOME/.ai-fleet/runner.json" ] || echo '{"max_mode": "auto-edit"}' > "$HOME/.ai-fleet/runner.json"
 RPLIST="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
-cat > "$RPLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.runner</string>
-  <key>ProgramArguments</key><array><string>$(command -v python3)</string><string>$HERE/../nodes/runner.py</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>RUNNER_BIND</key><string>127.0.0.1:11436</string>
-    <key>FLEET_DIR</key><string>$HOME/.ai-fleet</string>
-    <key>OLLAMA_URL</key><string>http://127.0.0.1:11434</string>
-    <key>PATH</key><string>$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/ai-fleet-runner.log</string>
-</dict></plist>
-EOF
+write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
+  "$HOME/Library/Logs/ai-fleet-runner.log" 4 \
+  RUNNER_BIND "127.0.0.1:11436" \
+  FLEET_DIR "$HOME/.ai-fleet" \
+  OLLAMA_URL "http://127.0.0.1:11434" \
+  PATH "$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
+  "$(command -v python3)" "$HERE/../nodes/runner.py"
 launchctl bootout "gui/$(id -u)" "$RPLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$RPLIST"
 

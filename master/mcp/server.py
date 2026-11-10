@@ -48,7 +48,7 @@ def _redact(text: str) -> str:
     return text
 
 
-def _chat(role: str, system: str, user: str, timeout: float = 600) -> str:
+def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> str:
     if not ROLE_RE.match(role):
         raise ValueError("role must be a role name like 'coder'; see fleet_status")
     user = _redact(user)
@@ -61,6 +61,8 @@ def _chat(role: str, system: str, user: str, timeout: float = 600) -> str:
             "model": role,
             "temperature": 0.2,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            # Constrained JSON output, the same setting evals/run_evals.py scores reviewers with.
+            **({"response_format": {"type": "json_object"}} if json_mode else {}),
         },
         timeout=timeout,
     )
@@ -88,7 +90,7 @@ def review_diff(diff: str, spec: str, role: str = "reviewer") -> str:
         '{"verdict":"approve|request_changes","issues":[{"severity":"high|medium|low",'
         '"file":"","line":0,"problem":"","fix":""}]}'
     )
-    raw = _chat(role, system, f"SPEC:\n{spec}\n\nDIFF:\n{diff}")
+    raw = _chat(role, system, f"SPEC:\n{spec}\n\nDIFF:\n{diff}", json_mode=True)
     match = re.search(r"\{[\s\S]*\}", raw)
     try:
         return json.dumps(json.loads(match.group(0)) if match else {}, indent=2)

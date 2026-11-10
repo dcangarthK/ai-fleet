@@ -114,9 +114,12 @@ async def refresh_master(client: httpx.AsyncClient) -> None:
                       (json.dumps(health), time.time(), tasks.MASTER_ID))
         else:
             c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (tasks.MASTER_ID,))
-        if found:  # listed for ollama tasks; never routed through LiteLLM (see desired_deployments)
-            c.execute("UPDATE nodes SET engine=?, port=?, models=? WHERE id=?",
+        # Same health bookkeeping as other nodes, so a stopped master Ollama drops out of its roles.
+        if found:
+            c.execute("UPDATE nodes SET engine=?, port=?, models=?, fails=0 WHERE id=?",
                       (found[0], found[1], json.dumps(found[2]), tasks.MASTER_ID))
+        else:
+            c.execute("UPDATE nodes SET fails=fails+1 WHERE id=?", (tasks.MASTER_ID,))
 
 
 async def refresh_nodes() -> None:

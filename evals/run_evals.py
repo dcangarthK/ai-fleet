@@ -9,13 +9,19 @@ reviewer: review a diff in the exact JSON shape the fleet's review_diff tool exp
           flagged with an issue naming the bug; clean diffs must be approved (false alarms cost points).
 fast:     one-line commit subjects and ticket labels (keywords, length and exact-label checks).
 
-Standard library only. Model-written code runs in a throwaway temp directory with a timeout: only run this on
-models you chose to install. Results: <out>/results.json and <out>/LEADERBOARD.md.
+Standard library only. Model-written code is untrusted: on macOS it runs under sandbox-exec (no network, no
+reads under /Users, writes only to its temp dir) with CPU/file/size limits and is killed as a process group on
+timeout; on Linux it runs in a throwaway Docker container (no network, read-only, memory/pid limits). Elsewhere it
+refuses unless you pass --unsafe-exec. Results: <out>/results.json and <out>/LEADERBOARD.md.
 """
 import argparse
 import json
 import os
+import platform
 import re
+import secrets
+import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -41,13 +47,29 @@ CODER_SYSTEM = ("You are a precise senior Python engineer. Reply with exactly on
                 "the complete implementation (imports included) and nothing else. No tests, no examples.")
 FAST_SYSTEM = "You are a terse assistant. Follow the format instructions exactly."
 
+# The nonce is read from stdin before the candidate is imported, so code that merely prints a fake result line
+# can't produce an accepted one. (Code that deliberately inspects the runner could; this guards against
+# accidents and sloppy models, not an adversary. The sandbox is what contains real damage.)
 TEST_RUNNER = """
-import json, sys, unittest
-sys.path.insert(0, ".")  # -I (isolated) leaves the temp dir off the import path
+import json, os, sys, unittest
+nonce = sys.stdin.readline().strip()
+sys.path.insert(0, ".")  # -I (isolated) leaves the work dir off the import path
 suite = unittest.defaultTestLoader.loadTestsFromName("test_solution")
-result = unittest.TextTestRunner(stream=open("/dev/null" if sys.platform != "win32" else "NUL", "w")).run(suite)
-print("EVAL_RESULT " + json.dumps({"run": result.testsRun, "failed": len(result.failures) + len(result.errors)}))
+result = unittest.TextTestRunner(stream=open(os.devnull, "w")).run(suite)
+sys.stdout.flush()
+os.write(1, ("\\nEVAL_RESULT " + nonce + " " + json.dumps({"run": result.testsRun,
+          "failed": len(result.failures) + len(result.errors)}) + "\\n").encode())
 """
+
+SANDBOX_PROFILE = """(version 1)
+(allow default)
+(deny network*)
+(deny file-read* (subpath "/Users"))
+(deny file-write*)
+(allow file-read* file-write* (subpath "{work}"))
+(allow file-write* (literal "/dev/null"))
+"""
+SANDBOX_MODE = "auto"  # set from --sandbox / --unsafe-exec in main()
 
 
 # ---------- Ollama ----------
@@ -94,43 +116,88 @@ def unload(base: str, model: str) -> None:
 
 # ---------- scoring (pure functions, unit-tested) ----------
 
-def extract_code(text: str) -> str:
-    """The python fenced block if there is one (the longest), else the whole reply."""
-    blocks = re.findall(r"```(?:python|py)?[ \t]*\n([\s\S]*?)```", text)
-    return max(blocks, key=len).strip() if blocks else text.strip()
+def extract_code(text: str, symbol: str | None = None) -> str:
+    """The fenced Python block that defines `symbol` (else the longest Python block), else the whole reply."""
+    blocks = [b.strip() for b in re.findall(r"```[ \t]*(?:python3?|py)?[ \t]*\n([\s\S]*?)```", text, re.I)]
+    if symbol:
+        defines = re.compile(rf"^(?:def|class)\s+{re.escape(symbol)}\b", re.M)
+        hits = [b for b in blocks if defines.search(b)]
+        if hits:
+            return max(hits, key=len)
+    return max(blocks, key=len) if blocks else text.strip()
+
+
+def _limits() -> None:  # runs in the child before exec
+    import resource
+    for lim, val in ((resource.RLIMIT_CPU, 30), (resource.RLIMIT_FSIZE, 10 * 2**20), (resource.RLIMIT_NOFILE, 64)):
+        try:
+            resource.setrlimit(lim, (val, val))
+        except (ValueError, OSError):
+            pass
+
+
+def _command(work: str) -> list[str]:
+    mode = SANDBOX_MODE
+    if mode == "auto":
+        mode = "macos" if platform.system() == "Darwin" and shutil.which("sandbox-exec") else \
+               "docker" if shutil.which("docker") else "refuse"
+    if mode == "macos":
+        profile = SANDBOX_PROFILE.format(work=os.path.realpath(work))
+        return ["sandbox-exec", "-p", profile, sys.executable, "-I", "runner.py"]
+    if mode == "docker":
+        return ["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--memory", "256m",
+                "--pids-limit", "64", "--cpus", "1", "--user", "65534:65534", "-v", f"{work}:/work:ro", "-w", "/work",
+                "python:3.12-slim", "python", "-I", "runner.py"]
+    if mode == "none":
+        return [sys.executable, "-I", "runner.py"]
+    raise SystemExit("No sandbox available for model code (need macOS sandbox-exec or Docker). "
+                     "Pass --unsafe-exec to run it unsandboxed at your own risk.")
 
 
 def run_code_tests(code: str, tests: str, timeout: float = 20) -> dict:
+    total = tests.count("def test_")
+    nonce = secrets.token_hex(16)
     with tempfile.TemporaryDirectory(prefix="fleet-eval-") as tmp:
         Path(tmp, "solution.py").write_text(code)
         Path(tmp, "test_solution.py").write_text(tests)
         Path(tmp, "runner.py").write_text(TEST_RUNNER)
+        proc = subprocess.Popen(_command(tmp), cwd=tmp, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True, preexec_fn=_limits,
+                                env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"})
         try:
-            p = subprocess.run([sys.executable, "-I", "runner.py"], cwd=tmp, capture_output=True, text=True,
-                               timeout=timeout, env={"PATH": os.environ.get("PATH", ""), "PYTHONHASHSEED": "0"})
+            out, err = proc.communicate(nonce + "\n", timeout=timeout)
         except subprocess.TimeoutExpired:
-            return {"passed": 0, "total": tests.count("def test_"), "error": "timeout"}
-    m = re.search(r"EVAL_RESULT (\{.*\})", p.stdout)
-    total = tests.count("def test_")
-    if not m:
-        return {"passed": 0, "total": total, "error": (p.stderr.strip().splitlines() or ["no result"])[-1][:200]}
+            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, including anything it spawned
+            proc.communicate()
+            return {"passed": 0, "total": total, "error": "timeout"}
+    m = re.search(rf"^EVAL_RESULT {nonce} (\{{.*\}})$", out, re.M)
+    if proc.returncode != 0 or not m:
+        why = (err.strip().splitlines() or [f"exit {proc.returncode}, no result"])[-1][:200]
+        return {"passed": 0, "total": total, "error": why}
     r = json.loads(m.group(1))
-    return {"passed": r["run"] - r["failed"], "total": r["run"] or total, "error": None}
+    if r["run"] != total or not 0 <= r["failed"] <= r["run"]:
+        return {"passed": 0, "total": total, "error": f"ran {r['run']} of {total} tests"}
+    return {"passed": r["run"] - r["failed"], "total": total, "error": None}
+
+
+SEVERITIES = ("high", "medium", "low")
 
 
 def parse_review(text: str) -> dict | None:
-    """The review JSON object, or None if the reply isn't the required shape."""
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        return None
+    """The review, or None unless the whole reply is exactly the review_diff JSON schema."""
     try:
-        data = json.loads(m.group(0))
+        data = json.loads(text.strip())
     except ValueError:
         return None
     if not isinstance(data, dict) or data.get("verdict") not in ("approve", "request_changes"):
         return None
-    if not isinstance(data.get("issues", []), list):
+    issues = data.get("issues")
+    if not isinstance(issues, list):
         return None
+    for i in issues:
+        if not (isinstance(i, dict) and i.get("severity") in SEVERITIES and isinstance(i.get("problem"), str)
+                and i["problem"].strip()):
+            return None
     return data
 
 
@@ -138,23 +205,28 @@ def score_review(case: dict, review: dict | None) -> dict:
     if review is None:
         return {"score": 0.0, "valid_json": False, "verdict_ok": False, "found_bug": False}
     verdict_ok = review["verdict"] == case["expect"]
+    serious = [i for i in review["issues"] if i["severity"] in ("high", "medium")]
     if case["expect"] == "approve":
         # Approving with only low-severity notes is fine; anything high/medium is a false alarm.
-        serious = [i for i in review.get("issues", []) if isinstance(i, dict) and i.get("severity") in ("high", "medium")]
         ok = verdict_ok and not serious
         return {"score": 1.0 if ok else 0.0, "valid_json": True, "verdict_ok": verdict_ok, "found_bug": None}
-    blob = json.dumps(review.get("issues", [])).lower()
-    found = any(k.lower() in blob for k in case["keywords"])
+    # Only the first 3 serious issues count, and only what they say is wrong / how to fix it: listing every
+    # keyword in a pile of issues doesn't earn credit.
+    said = " ".join(f"{i['problem']} {i.get('fix') or ''}" for i in serious[:3]).lower()
+    found = any(k.lower() in said for k in case["keywords"])
     score = (0.5 if verdict_ok else 0.0) + (0.5 if found else 0.0)
     return {"score": score, "valid_json": True, "verdict_ok": verdict_ok, "found_bug": found}
 
 
 def score_fast(case: dict, text: str) -> float:
-    line = text.strip().strip("`").strip().splitlines()[0].strip() if text.strip() else ""
+    reply = text.strip()
+    if not reply or "\n" in reply:
+        return 0.0  # asked for exactly one line
     if case["kind"] == "label":
-        return 1.0 if line.lower().strip(" .\"'") == case["expect"] else 0.0
-    checks = [len(line) <= case["max_chars"], bool(line) and not line.endswith(".")]
-    checks += [any(k in line.lower() for k in group) for group in case["keywords"]]
+        return 1.0 if reply.lower() == case["expect"] else 0.0
+    checks = [len(reply) <= case["max_chars"], not reply.endswith("."), not re.search(r"[\"'`]", reply),
+              len(reply.split()) >= 4]
+    checks += [any(k in reply.lower() for k in group) for group in case["keywords"]]
     return sum(checks) / len(checks)
 
 
@@ -173,7 +245,7 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
                 try:
                     if role == "coder":
                         out = chat(base, model, CODER_SYSTEM, case["prompt"])
-                        t = run_code_tests(extract_code(out["text"]), case["tests"])
+                        t = run_code_tests(extract_code(out["text"], case.get("symbol")), case["tests"])
                         s = t["passed"] / t["total"] if t["total"] else 0.0
                         details.append({"id": case["id"], "score": s, **t})
                     elif role == "reviewer":
@@ -238,7 +310,12 @@ def main() -> int:
     ap.add_argument("--ollama", default=os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434"))
     ap.add_argument("--out", default=str(HERE / "results"))
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("--sandbox", choices=["auto", "macos", "docker"], default="auto")
+    ap.add_argument("--unsafe-exec", action="store_true", help="run model code without a sandbox")
     args = ap.parse_args()
+    global SANDBOX_MODE
+    SANDBOX_MODE = "none" if args.unsafe_exec else args.sandbox
+    _command(tempfile.gettempdir())  # fail fast if no sandbox is available
     roles = [r for r in args.roles.split(",") if r]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

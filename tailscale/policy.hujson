@@ -1,0 +1,20 @@
+// Paste into Tailscale admin console -> Access controls. Deny by default: only what's granted works.
+{
+  "tagOwners": {
+    "tag:master":   ["autogroup:admin"], // Laptop 1: Claude, gateway, controller
+    "tag:llm-node": ["autogroup:admin"], // any machine serving models (Laptop 2, Box 3, ...)
+  },
+
+  "grants": [
+    // Master reaches node model servers (Ollama 11434, vLLM 8000, LM Studio 1234, llama.cpp 8080)
+    // and the node inventory published by the onboard script (11435).
+    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11434", "tcp:11435", "tcp:8000", "tcp:1234", "tcp:8080"]},
+    // Tailnet admins (you) can SSH to fleet machines for maintenance.
+    {"src": ["autogroup:admin"], "dst": ["tag:master", "tag:llm-node"], "ip": ["tcp:22"]},
+  ],
+
+  "tests": [
+    {"src": "tag:master", "accept": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:8000"], "deny": ["tag:llm-node:22"]},
+    {"src": "tag:llm-node", "deny": ["tag:master:4000", "tag:master:8700", "tag:llm-node:11434"]},
+  ],
+}

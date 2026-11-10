@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Fleet</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd;
+          --ok:#1f7a4d; --warn:#a15c00; --bad:#b42318; --accent:#2f5bd3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151514; --panel:#1f1f1d; --text:#ecebe6; --muted:#9a9993; --line:#33332f;
+            --ok:#4cc38a; --warn:#f0a43a; --bad:#f2675b; --accent:#7c9cff; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,system-ui,sans-serif }
+  main { max-width:1080px; margin:0 auto; padding:24px 16px 48px }
+  h1 { font-size:20px; margin:0 } h2 { font-size:15px; margin:28px 0 10px }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px }
+  .muted { color:var(--muted) }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow-x:auto }
+  table { width:100%; border-collapse:collapse }
+  th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
+  th { font-weight:600; color:var(--muted); font-size:12px }
+  tr:last-child td { border-bottom:0 }
+  .badge { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid currentColor }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
+  .chip { display:inline-block; margin:0 4px 4px 0; padding:1px 6px; border-radius:4px; background:var(--bg); font:12px ui-monospace,monospace }
+  button, select, input { font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:5px 10px }
+  button { cursor:pointer } button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
+  form { display:flex; flex-wrap:wrap; gap:8px; padding:12px }
+  #err { color:var(--bad); min-height:1.4em }
+  .inv { margin-top:4px; font-size:12px } .inv .chip { background:transparent; border:1px solid var(--line) }
+  .hint { color:var(--warn); font-size:12px }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>AI Fleet</h1><div class="muted" id="sub">Loading…</div></div>
+    <button id="refresh">Refresh now</button>
+  </header>
+  <div id="err"></div>
+
+  <h2>Nodes</h2>
+  <div class="panel"><table>
+    <thead><tr><th>Node</th><th>State</th><th>Engine</th><th>Models</th><th>Last seen</th><th></th></tr></thead>
+    <tbody id="nodes"></tbody>
+  </table></div>
+
+  <h2>Roles</h2>
+  <div class="panel">
+    <table>
+      <thead><tr><th>Role</th><th>Node</th><th>Model</th><th>Routing</th><th></th></tr></thead>
+      <tbody id="roles"></tbody>
+    </table>
+    <form id="assign">
+      <input id="role" list="role-list" placeholder="role (e.g. coder)" required pattern="[a-z][a-z0-9-]{1,31}">
+      <datalist id="role-list"><option>coder</option><option>reviewer</option><option>fast</option></datalist>
+      <select id="node" required></select>
+      <select id="model" required></select>
+      <button class="primary">Assign</button>
+    </form>
+  </div>
+</main>
+<script>
+let state = { nodes: [], assignments: [] };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, method = "GET", body) {
+  $("err").textContent = "";
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Fleet": "1" }, body: body && JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { $("err").textContent = data.detail || `HTTP ${r.status}`; throw new Error(data.detail); }
+  return data;
+}
+
+function ago(t) {
+  if (!t) return "never";
+  const s = Math.round(Date.now() / 1000 - t);
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+}
+
+function nodeState(n) {
+  if (n.status === "pending") return '<span class="badge warn">pending approval</span>';
+  if (n.status === "drained") return '<span class="badge muted">drained</span>';
+  return n.healthy ? '<span class="badge ok">healthy</span>' : `<span class="badge bad">offline (${n.fails} misses)</span>`;
+}
+
+function inventory(n) {
+  const inv = n.inventory;
+  if (!inv) return '<div class="inv muted">no inventory (run onboard script)</div>';
+  const hw = inv.hardware || {};
+  const parts = [`${hw.ram_gb ?? "?"}GB RAM`, hw.gpu || hw.cpu].filter(Boolean).map(esc).join(" · ");
+  const agents = (inv.agents || []).map((a) => `<span class="chip">${esc(a.name)}</span>`).join("");
+  const apps = (inv.apps || []).map((a) => `<span class="chip">${esc(a)}</span>`).join("");
+  const hints = (inv.servers || []).filter((s) => !s.reachable_from_master)
+    .map((s) => `<div class="hint">${esc(s.engine)} :${s.port} has ${s.models.length} models but is localhost-only</div>`).join("");
+  const files = (inv.model_files || []).length;
+  return `<div class="inv muted">${parts}</div>
+    ${agents ? `<div class="inv">Agents: ${agents}</div>` : ""}
+    ${apps ? `<div class="inv">Apps: ${apps}</div>` : ""}
+    ${files ? `<div class="inv muted">${files} model files on disk</div>` : ""}${hints}
+    <div class="inv muted">scanned ${ago(inv.scanned_at)}</div>`;
+}
+
+function render() {
+  const byId = Object.fromEntries(state.nodes.map((n) => [n.id, n]));
+  const healthy = state.nodes.filter((n) => n.healthy).length;
+  $("sub").textContent = `${state.nodes.length} nodes · ${healthy} healthy · ${state.assignments.length} role assignments`;
+
+  $("nodes").innerHTML = state.nodes.map((n) => `<tr>
+      <td><b>${esc(n.name)}</b><div class="muted">${esc(n.os)} · ${esc(n.ip)}</div>${inventory(n)}</td>
+      <td>${nodeState(n)}</td>
+      <td>${esc(n.engine || "—")}${n.port ? `<div class="muted">:${n.port}</div>` : ""}</td>
+      <td>${n.models.map((m) => `<span class="chip">${esc(m)}</span>`).join("") || '<span class="muted">none found</span>'}</td>
+      <td class="muted">${ago(n.last_seen)}</td>
+      <td>${n.status !== "approved"
+          ? `<button data-act="approve" data-node="${esc(n.id)}">Approve</button>`
+          : `<button data-act="drain" data-node="${esc(n.id)}">Drain</button>`}</td>
+    </tr>`).join("") || '<tr><td colspan="6" class="muted">No nodes yet. Run a join script on a machine tagged tag:llm-node.</td></tr>';
+
+  $("roles").innerHTML = state.assignments.map((a) => {
+    const live = byId[a.node_id]?.healthy && byId[a.node_id].models.includes(a.model);
+    return `<tr><td><b>${esc(a.role)}</b></td><td>${esc(a.node)}</td><td><span class="chip">${esc(a.model)}</span></td>
+      <td>${live ? '<span class="badge ok">live</span>' : '<span class="badge bad">not routed</span>'}</td>
+      <td><button data-act="unassign" data-role="${esc(a.role)}" data-node="${esc(a.node_id)}" data-model="${esc(a.model)}">Remove</button></td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="muted">No roles assigned.</td></tr>';
+
+  const sel = $("node").value;
+  const approved = state.nodes.filter((n) => n.status === "approved");
+  $("node").innerHTML = approved.map((n) => `<option value="${esc(n.id)}" ${n.id === sel ? "selected" : ""}>${esc(n.name)}</option>`).join("");
+  fillModels();
+}
+
+function fillModels() {
+  const n = state.nodes.find((x) => x.id === $("node").value);
+  const sel = $("model").value;
+  $("model").innerHTML = (n?.models || []).map((m) => `<option ${m === sel ? "selected" : ""}>${esc(m)}</option>`).join("");
+}
+
+async function load() { state = await api("/api/fleet"); render(); }
+
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const { act, node, role, model } = b.dataset;
+  b.disabled = true;
+  try {
+    state = act === "unassign"
+      ? await api("/api/roles", "DELETE", { role, node, model })
+      : await api(`/api/nodes/${encodeURIComponent(node)}/${act}`, "POST");
+    render();
+  } finally { b.disabled = false; }
+});
+$("node").addEventListener("change", fillModels);
+$("assign").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  state = await api("/api/roles", "POST", { role: $("role").value, node: $("node").value, model: $("model").value });
+  render();
+});
+$("refresh").addEventListener("click", async () => { state = await api("/api/refresh", "POST"); render(); });
+
+load(); setInterval(load, 10000);
+</script>
+</body>
+</html>

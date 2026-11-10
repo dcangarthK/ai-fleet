@@ -29,6 +29,58 @@ ask() { [ "$YES" = 1 ] && return 0; read -rp "$1 [Y/n] " a; [[ -z "$a" || "$a" =
 have() { command -v "$1" >/dev/null 2>&1; }
 mkdir -p "$FLEET_DIR/public"
 
+# BEGIN launchd plist helper
+write_launchd_plist() {
+  python3 - "$@" <<'PY'
+import plistlib
+import sys
+
+path, label, run_at_load, keep_alive, interval, stdout, stderr, env_count, *items = sys.argv[1:]
+env_items = items[:int(env_count) * 2]
+program_arguments = items[int(env_count) * 2:]
+data = {"Label": label, "ProgramArguments": program_arguments}
+if env_items:
+    data["EnvironmentVariables"] = dict(zip(env_items[::2], env_items[1::2]))
+if run_at_load:
+    data["RunAtLoad"] = True
+if keep_alive:
+    data["KeepAlive"] = True
+if interval:
+    data["StartInterval"] = int(interval)
+if stdout:
+    data["StandardOutPath"] = stdout
+if stderr:
+    data["StandardErrorPath"] = stderr
+with open(path, "wb") as stream:
+    plistlib.dump(data, stream, fmt=plistlib.FMT_XML, sort_keys=False)
+PY
+}
+# END launchd plist helper
+
+systemd_quote() {
+  local mode="$1"; shift
+  python3 - "$mode" "$@" <<'PY'
+import sys
+
+mode, *values = sys.argv[1:]
+escapes = {
+    "\a": r"\a", "\b": r"\b", "\f": r"\f", "\n": r"\n",
+    "\r": r"\r", "\t": r"\t", "\v": r"\v", "\\": r"\\",
+    '"': r'\"',
+}
+
+def quote(value):
+    value = value.replace("%", "%%")
+    if mode == "exec":
+        value = value.replace("$", "$$")
+    escaped = "".join(escapes.get(char, f"\\x{ord(char):02x}" if ord(char) < 32 or ord(char) == 127 else char) for char in value)
+    return f'"{escaped}"'
+
+rendered = " ".join(quote(value) for value in values)
+sys.stdout.buffer.write(rendered.encode("utf-8") + b"\n")
+PY
+}
+
 ram_gb() {
   if [ "$OS" = Darwin ]; then echo $(( $(sysctl -n hw.memsize) / 1073741824 ))
   else awk '/MemTotal/ {print int($2/1048576)}' /proc/meminfo; fi
@@ -106,31 +158,26 @@ recommended_models() {
 # Runs `ollama serve` from our own LaunchAgent so the tailnet bind survives logout and reboot
 # (launchctl setenv, what Ollama's FAQ suggests, is lost on reboot).
 run_ollama_mac() {
-  local ip="$1" bin la="$HOME/Library/LaunchAgents/local.ai-fleet.ollama.plist" extra=""
+  local ip="$1" bin la="$HOME/Library/LaunchAgents/local.ai-fleet.ollama.plist"
+  local env_vars=(
+    OLLAMA_HOST "$ip:11434"
+    OLLAMA_KEEP_ALIVE "10m"
+    OLLAMA_FLASH_ATTENTION "1"
+    OLLAMA_KV_CACHE_TYPE "q8_0"
+  )
   bin="$(command -v ollama || echo /Applications/Ollama.app/Contents/Resources/ollama)"
   brew services stop ollama >/dev/null 2>&1 || true
   osascript -e 'quit app "Ollama"' >/dev/null 2>&1 || true
   if [ "$(ram_gb)" -le 16 ]; then
-    extra="<key>OLLAMA_MAX_LOADED_MODELS</key><string>1</string><key>OLLAMA_NUM_PARALLEL</key><string>1</string><key>OLLAMA_CONTEXT_LENGTH</key><string>16384</string>"
+    env_vars+=(
+      OLLAMA_MAX_LOADED_MODELS "1"
+      OLLAMA_NUM_PARALLEL "1"
+      OLLAMA_CONTEXT_LENGTH "16384"
+    )
   fi
   mkdir -p "$HOME/Library/LaunchAgents"
-  cat > "$la" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.ollama</string>
-  <key>ProgramArguments</key><array><string>$bin</string><string>serve</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>OLLAMA_HOST</key><string>$ip:11434</string>
-    <key>OLLAMA_KEEP_ALIVE</key><string>10m</string>
-    <key>OLLAMA_FLASH_ATTENTION</key><string>1</string>
-    <key>OLLAMA_KV_CACHE_TYPE</key><string>q8_0</string>
-    $extra
-  </dict>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>$FLEET_DIR/ollama.log</string>
-</dict></plist>
-EOF
+  write_launchd_plist "$la" "local.ai-fleet.ollama" 1 1 "" "" "$FLEET_DIR/ollama.log" \
+    "$(( ${#env_vars[@]} / 2 ))" "${env_vars[@]}" "$bin" "serve"
   launchctl bootout "gui/$(id -u)" "$la" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$la"
   [ -d /Applications/Ollama.app ] && echo "Ollama.app was quit; remove it from Login Items so it doesn't start a second server."
@@ -146,15 +193,19 @@ configure_ollama() {
   if [ "$OS" = Darwin ]; then
     run_ollama_mac "$ip"
   else
+    local env_host env_keep_alive env_flash_attention
+    env_host="$(systemd_quote environment "OLLAMA_HOST=$ip:11434")"
+    env_keep_alive="$(systemd_quote environment "OLLAMA_KEEP_ALIVE=10m")"
+    env_flash_attention="$(systemd_quote environment "OLLAMA_FLASH_ATTENTION=1")"
     $SUDO mkdir -p /etc/systemd/system/ollama.service.d
     $SUDO tee /etc/systemd/system/ollama.service.d/fleet.conf >/dev/null <<EOF
 [Unit]
 After=tailscaled.service
 Wants=tailscaled.service
 [Service]
-Environment=OLLAMA_HOST=$ip:11434
-Environment=OLLAMA_KEEP_ALIVE=10m
-Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=$env_host
+Environment=$env_keep_alive
+Environment=$env_flash_attention
 Restart=always
 RestartSec=5
 EOF
@@ -357,40 +408,23 @@ install_services() {
   say "Publishing inventory on $ip:$INFO_PORT (tailnet only) and rescanning hourly"
   if [ "$OS" = Darwin ]; then
     local la="$HOME/Library/LaunchAgents"; mkdir -p "$la"
-    cat > "$la/local.ai-fleet.info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.info</string>
-  <key>ProgramArguments</key><array>
-    <string>$py</string><string>-m</string><string>http.server</string><string>$INFO_PORT</string>
-    <string>--bind</string><string>$ip</string><string>--directory</string><string>$FLEET_DIR/public</string>
-  </array>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/dev/null</string>
-</dict></plist>
-EOF
-    cat > "$la/local.ai-fleet.scan.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.scan</string>
-  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$self</string><string>--scan-only</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>FLEET_DIR</key><string>$FLEET_DIR</string>
-  </dict>
-  <key>StartInterval</key><integer>3600</integer>
-  <key>StandardOutPath</key><string>$FLEET_DIR/scan.log</string>
-  <key>StandardErrorPath</key><string>$FLEET_DIR/scan.log</string>
-</dict></plist>
-EOF
+    write_launchd_plist "$la/local.ai-fleet.info.plist" "local.ai-fleet.info" 1 1 "" "" "/dev/null" 0 \
+      "$py" "-m" "http.server" "$INFO_PORT" "--bind" "$ip" "--directory" "$FLEET_DIR/public"
+    write_launchd_plist "$la/local.ai-fleet.scan.plist" "local.ai-fleet.scan" "" "" 3600 \
+      "$FLEET_DIR/scan.log" "$FLEET_DIR/scan.log" 2 \
+      PATH "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
+      FLEET_DIR "$FLEET_DIR" \
+      "/bin/bash" "$self" "--scan-only"
     for job in info scan; do
       launchctl bootout "gui/$(id -u)" "$la/local.ai-fleet.$job.plist" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$la/local.ai-fleet.$job.plist"
     done
   else
-    local user; user="$(id -un)"
+    local user info_exec scan_exec scan_fleet_env
+    user="$(id -un)"
+    info_exec="$(systemd_quote exec "$py" "-m" "http.server" "$INFO_PORT" "--bind" "$ip" "--directory" "$FLEET_DIR/public")"
+    scan_exec="$(systemd_quote exec "/bin/bash" "$self" "--scan-only")"
+    scan_fleet_env="$(systemd_quote environment "FLEET_DIR=$FLEET_DIR")"
     $SUDO tee /etc/systemd/system/ai-fleet-info.service >/dev/null <<EOF
 [Unit]
 Description=AI fleet node inventory (tailnet only)
@@ -398,7 +432,7 @@ After=tailscaled.service
 Wants=tailscaled.service
 [Service]
 User=$user
-ExecStart=$py -m http.server $INFO_PORT --bind $ip --directory $FLEET_DIR/public
+ExecStart=$info_exec
 Restart=always
 RestartSec=5
 [Install]
@@ -410,8 +444,8 @@ Description=AI fleet node rescan
 [Service]
 Type=oneshot
 User=$user
-Environment=FLEET_DIR=$FLEET_DIR
-ExecStart=/bin/bash $self --scan-only
+Environment=$scan_fleet_env
+ExecStart=$scan_exec
 EOF
     $SUDO tee /etc/systemd/system/ai-fleet-scan.timer >/dev/null <<EOF
 [Unit]
@@ -1283,26 +1317,22 @@ install_runner() {
   local path_dirs="$HOME/.local/bin:$HOME/.claude/local:$HOME/.npm-global/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
   if [ "$OS" = Darwin ]; then
     local la="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
-    cat > "$la" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>local.ai-fleet.runner</string>
-  <key>ProgramArguments</key><array><string>$py</string><string>$FLEET_DIR/runner.py</string></array>
-  <key>EnvironmentVariables</key><dict>
-    <key>RUNNER_BIND</key><string>$ip:11436</string>
-    <key>FLEET_DIR</key><string>$FLEET_DIR</string>
-    <key>OLLAMA_URL</key><string>http://$ip:11434</string>
-    <key>PATH</key><string>$path_dirs</string>
-  </dict>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>$FLEET_DIR/runner.log</string>
-</dict></plist>
-EOF
+    write_launchd_plist "$la" "local.ai-fleet.runner" 1 1 "" "" "$FLEET_DIR/runner.log" 4 \
+      RUNNER_BIND "$ip:11436" \
+      FLEET_DIR "$FLEET_DIR" \
+      OLLAMA_URL "http://$ip:11434" \
+      PATH "$path_dirs" \
+      "$py" "$FLEET_DIR/runner.py"
     launchctl bootout "gui/$(id -u)" "$la" 2>/dev/null || true
     launchctl bootstrap "gui/$(id -u)" "$la"
   else
-    local user; user="$(id -un)"
+    local user runner_exec runner_bind_env runner_fleet_env runner_ollama_env runner_path_env
+    user="$(id -un)"
+    runner_exec="$(systemd_quote exec "$py" "$FLEET_DIR/runner.py")"
+    runner_bind_env="$(systemd_quote environment "RUNNER_BIND=$ip:11436")"
+    runner_fleet_env="$(systemd_quote environment "FLEET_DIR=$FLEET_DIR")"
+    runner_ollama_env="$(systemd_quote environment "OLLAMA_URL=http://$ip:11434")"
+    runner_path_env="$(systemd_quote environment "PATH=$path_dirs")"
     $SUDO tee /etc/systemd/system/ai-fleet-runner.service >/dev/null <<EOF
 [Unit]
 Description=AI fleet agent runner (tailnet only)
@@ -1310,11 +1340,11 @@ After=tailscaled.service
 Wants=tailscaled.service
 [Service]
 User=$user
-Environment=RUNNER_BIND=$ip:11436
-Environment=FLEET_DIR=$FLEET_DIR
-Environment=OLLAMA_URL=http://$ip:11434
-Environment=PATH=$path_dirs
-ExecStart=$py $FLEET_DIR/runner.py
+Environment=$runner_bind_env
+Environment=$runner_fleet_env
+Environment=$runner_ollama_env
+Environment=$runner_path_env
+ExecStart=$runner_exec
 Restart=always
 RestartSec=5
 KillMode=process

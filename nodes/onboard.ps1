@@ -12,6 +12,12 @@ New-Item -ItemType Directory -Force -Path (Join-Path $FleetDir "public") | Out-N
 function Say($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Ask($q) { if ($Yes) { return $true }; $a = Read-Host "$q [Y/n]"; return ($a -eq "" -or $a -match "^[Yy]") }
 function Have($c) { [bool](Get-Command $c -ErrorAction SilentlyContinue) }
+function Write-Utf8File($Path, $Content) {
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+function Quote-WindowsPath($Path) { return '"' + $Path + '"' }
+function Escape-CmdValue($Value) { return ([string]$Value).Replace("%", "%%") }
 function RamGB { [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) }
 function GpuGB {
   if (Have nvidia-smi) { $v = nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | Sort-Object { [int]$_ } | Select-Object -Last 1; return [int]([int]$v / 1024) }
@@ -60,7 +66,8 @@ function Configure-Ollama($ip) {
   $env:OLLAMA_HOST = "${ip}:11434"
   Get-Process "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force
   # Launch through Explorer so Ollama runs as the normal user, not with this elevated token.
-  Start-Process explorer.exe -ArgumentList "`"$env:LOCALAPPDATA\Programs\Ollama\ollama app.exe`""
+  $ollamaApp = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
+  Start-Process explorer.exe -ArgumentList (Quote-WindowsPath $ollamaApp)
   for ($i = 0; $i -lt 30; $i++) { if (GetJson "http://${ip}:11434/api/tags") { break }; Start-Sleep 1 }
 
   $count = @((GetJson "http://${ip}:11434/api/tags").models).Count
@@ -161,30 +168,35 @@ function Scan($ip) {
 function Install-Services($ip) {
   Say "Publishing inventory on ${ip}:$InfoPort (tailnet only) and rescanning hourly"
   $self = Join-Path $FleetDir "onboard.ps1"
-  if ($PSCommandPath -ne $self) { Copy-Item $PSCommandPath $self -Force }
+  if ($PSCommandPath -ne $self) { Copy-Item -LiteralPath $PSCommandPath -Destination $self -Force }
   $server = Join-Path $FleetDir "serve-info.ps1"
-  @"
+  $serverSource = @"
 `$l = New-Object System.Net.HttpListener
 `$l.Prefixes.Add("http://${ip}:$InfoPort/")
+`$fleetJson = Join-Path `$PSScriptRoot "public\fleet.json"
 `$l.Start()
 while (`$l.IsListening) {
   `$c = `$l.GetContext()
   if (`$c.Request.Url.AbsolutePath -eq "/fleet.json") {
-    `$b = [IO.File]::ReadAllBytes("$FleetDir\public\fleet.json"); `$c.Response.ContentType = "application/json"
+    `$b = [IO.File]::ReadAllBytes(`$fleetJson); `$c.Response.ContentType = "application/json"
   } else { `$b = [byte[]]@(); `$c.Response.StatusCode = 404 }
   `$c.Response.OutputStream.Write(`$b, 0, `$b.Length); `$c.Response.Close()
 }
-"@ | Set-Content $server -Encoding UTF8
+"@
+  Write-Utf8File $server $serverSource
 
   $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-  $info = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$server`""
+  $infoArgs = "-NoProfile -ExecutionPolicy Bypass -File " + (Quote-WindowsPath $server)
+  $info = New-ScheduledTaskAction -Execute $ps -Argument $infoArgs
   $boot = New-ScheduledTaskTrigger -AtStartup
   $settings = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0 `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
   Register-ScheduledTask -TaskName "AI Fleet Info" -Action $info -Trigger $boot -Settings $settings -User "SYSTEM" -RunLevel Highest -Force | Out-Null
   Start-ScheduledTask -TaskName "AI Fleet Info"
 
-  $scan = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -ScanOnly -FleetDir `"$FleetDir`""
+  $scanArgs = "-NoProfile -ExecutionPolicy Bypass -File " + (Quote-WindowsPath $self) +
+    " -ScanOnly -FleetDir " + (Quote-WindowsPath $FleetDir)
+  $scan = New-ScheduledTaskAction -Execute $ps -Argument $scanArgs
   $hourly = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Hours 1)
   $scanSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
   Register-ScheduledTask -TaskName "AI Fleet Scan" -Action $scan -Trigger $hourly -Settings $scanSettings -User $env:USERNAME -Force | Out-Null
@@ -1046,19 +1058,24 @@ function Install-Runner($ip) {
     winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
     $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
   }
-  Set-Content -Path (Join-Path $FleetDir "runner.py") -Value $RunnerSource -Encoding UTF8
+  $runnerPath = Join-Path $FleetDir "runner.py"
+  Write-Utf8File $runnerPath $RunnerSource
   $cfg = Join-Path $FleetDir "runner.json"
-  if (-not (Test-Path $cfg)) { '{"max_mode": "auto-edit"}' | Set-Content $cfg -Encoding ASCII }
+  if (-not (Test-Path -LiteralPath $cfg)) { Write-Utf8File $cfg '{"max_mode": "auto-edit"}' }
   $cmd = Join-Path $FleetDir "runner.cmd"
-  @"
+  $cmdPython = Escape-CmdValue $py
+  $cmdFleetDir = Escape-CmdValue $FleetDir
+  $cmdSource = @"
 @echo off
-set RUNNER_BIND=${ip}:11436
-set FLEET_DIR=$FleetDir
-set OLLAMA_URL=http://${ip}:11434
-"$py" "$FleetDir\runner.py"
-"@ | Set-Content $cmd -Encoding ASCII
+chcp 65001 >nul
+set "RUNNER_BIND=${ip}:11436"
+set "FLEET_DIR=$cmdFleetDir"
+set "OLLAMA_URL=http://${ip}:11434"
+"$cmdPython" "%~dp0runner.py"
+"@
+  Write-Utf8File $cmd $cmdSource
   Say "Installing the agent runner on ${ip}:11436 (runs as $env:USERNAME at logon)"
-  $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$cmd`""
+  $action = New-ScheduledTaskAction -Execute $cmd
   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
   $settings = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0 `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable

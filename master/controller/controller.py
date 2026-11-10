@@ -42,6 +42,7 @@ POLL_SECONDS = float(os.environ.get("FLEET_POLL_SECONDS", "30"))
 MAX_FAILS = 3
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 FLEET_PREFIX = "fleet--"
+MASTER_MODEL_HOST = os.environ.get("FLEET_MASTER_MODEL_HOST", "")  # e.g. host.docker.internal
 INFO_PORT = 11435  # onboard script publishes /fleet.json here (hardware, agents, model files)
 
 # (engine, port, path): first that answers wins.
@@ -171,13 +172,15 @@ def desired_deployments() -> dict[str, dict]:
     desired = {}
     for a in rows:
         n = nodes.get(a["node"])
-        # The master's local Ollama is only reachable as 127.0.0.1, which LiteLLM's container can't use.
-        if not n or n["id"] == tasks.MASTER_ID or not healthy(n) or a["model"] not in json.loads(n["models"]):
+        # The master's own Ollama listens on 127.0.0.1, which LiteLLM's container can't reach; it can only
+        # serve roles when FLEET_MASTER_MODEL_HOST names the host as seen from LiteLLM (host.docker.internal).
+        if not n or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST) or not healthy(n) or a["model"] not in json.loads(n["models"]):
             continue
+        host = MASTER_MODEL_HOST if n["id"] == tasks.MASTER_ID else n["ip"]
         if n["engine"] == "ollama":
-            params = {"model": f"ollama_chat/{a['model']}", "api_base": f"http://{n['ip']}:{n['port']}"}
+            params = {"model": f"ollama_chat/{a['model']}", "api_base": f"http://{host}:{n['port']}"}
         else:
-            params = {"model": f"openai/{a['model']}", "api_base": f"http://{n['ip']}:{n['port']}/v1",
+            params = {"model": f"openai/{a['model']}", "api_base": f"http://{host}:{n['port']}/v1",
                       "api_key": "none"}
         params["timeout"] = 600
         desired[deployment_id(a["role"], a["node"], a["model"])] = {

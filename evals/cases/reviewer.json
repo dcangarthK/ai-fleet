@@ -1,0 +1,79 @@
+[
+  {
+    "id": "off_by_one_pagination",
+    "expect": "request_changes",
+    "keywords": ["off-by-one", "off by one", "page - 1", "page-1", "skip", "first page", "offset"],
+    "spec": "Return items for a 1-based page number.",
+    "diff": "--- a/api/pagination.py\n+++ b/api/pagination.py\n@@ -1,6 +1,6 @@\n def paginate(items, page, per_page=20):\n-    \"\"\"page is 1-based.\"\"\"\n-    start = (page - 1) * per_page\n+    \"\"\"page is 1-based.\"\"\"\n+    start = page * per_page\n     end = start + per_page\n     return items[start:end]\n"
+  },
+  {
+    "id": "sql_injection",
+    "expect": "request_changes",
+    "keywords": ["injection", "parameter", "placeholder", "f-string", "format", "sanitiz", "escape"],
+    "spec": "Look up a user by email.",
+    "diff": "--- a/db/users.py\n+++ b/db/users.py\n@@ -3,5 +3,5 @@ import sqlite3\n def find_user(conn, email):\n     cur = conn.cursor()\n-    cur.execute(\"SELECT id, name FROM users WHERE email = ?\", (email,))\n+    cur.execute(f\"SELECT id, name FROM users WHERE email = '{email}'\")\n     return cur.fetchone()\n"
+  },
+  {
+    "id": "missing_none_check",
+    "expect": "request_changes",
+    "keywords": ["none", "null", "not found", "missing", "attributeerror", "nonetype"],
+    "spec": "Return the display name of a user, or 'Unknown' if the user does not exist.",
+    "diff": "--- a/users/display.py\n+++ b/users/display.py\n@@ -1,6 +1,5 @@\n def display_name(repo, user_id):\n     user = repo.get(user_id)  # returns None when the user does not exist\n-    if user is None:\n-        return \"Unknown\"\n-    return user.first_name + \" \" + user.last_name\n+    full = user.first_name + \" \" + user.last_name\n+    return full.strip() or \"Unknown\"\n"
+  },
+  {
+    "id": "wrong_comparison_operator",
+    "expect": "request_changes",
+    "keywords": [">=", "<=", "boundary", "equal", "inclusive", "exactly", "limit"],
+    "spec": "Users may upload files up to and including 10 MB.",
+    "diff": "--- a/uploads/limits.py\n+++ b/uploads/limits.py\n@@ -1,5 +1,5 @@\n MAX_BYTES = 10 * 1024 * 1024\n \n def check_size(size_bytes):\n-    if size_bytes > MAX_BYTES:\n+    if size_bytes >= MAX_BYTES:\n         raise ValueError(\"file too large\")\n"
+  },
+  {
+    "id": "resource_leak",
+    "expect": "request_changes",
+    "keywords": ["close", "leak", "with ", "context manager", "file handle", "descriptor"],
+    "spec": "Count lines in many log files.",
+    "diff": "--- a/logs/count.py\n+++ b/logs/count.py\n@@ -1,6 +1,6 @@\n def count_lines(paths):\n     total = 0\n     for path in paths:\n-        with open(path) as f:\n-            total += sum(1 for _ in f)\n+        f = open(path)\n+        total += sum(1 for _ in f)\n     return total\n"
+  },
+  {
+    "id": "race_condition_counter",
+    "expect": "request_changes",
+    "keywords": ["race", "lock", "thread", "atomic", "concurren", "synchroniz"],
+    "spec": "A request counter incremented from many worker threads.",
+    "diff": "--- a/metrics/counter.py\n+++ b/metrics/counter.py\n@@ -1,12 +1,9 @@\n import threading\n \n class Counter:\n     def __init__(self):\n         self.value = 0\n-        self._lock = threading.Lock()\n \n     def increment(self):\n-        with self._lock:\n-            self.value += 1\n+        self.value += 1\n"
+  },
+  {
+    "id": "swallowed_exception",
+    "expect": "request_changes",
+    "keywords": ["swallow", "silent", "except", "bare", "hide", "ignor", "log", "re-raise", "reraise"],
+    "spec": "Charge a customer; failures must be reported to the caller.",
+    "diff": "--- a/billing/charge.py\n+++ b/billing/charge.py\n@@ -1,7 +1,8 @@\n def charge(gateway, customer_id, amount_cents):\n-    result = gateway.charge(customer_id, amount_cents)\n-    return result.id\n+    try:\n+        result = gateway.charge(customer_id, amount_cents)\n+        return result.id\n+    except Exception:\n+        return None\n"
+  },
+  {
+    "id": "path_traversal",
+    "expect": "request_changes",
+    "keywords": ["traversal", "..", "path", "escape", "outside", "resolve", "sanitiz", "directory"],
+    "spec": "Serve files only from the public uploads directory.",
+    "diff": "--- a/web/files.py\n+++ b/web/files.py\n@@ -1,9 +1,6 @@\n from pathlib import Path\n UPLOADS = Path('/srv/uploads').resolve()\n \n def read_upload(name):\n-    path = (UPLOADS / name).resolve()\n-    if UPLOADS not in path.parents:\n-        raise PermissionError(name)\n-    return path.read_bytes()\n+    return (UPLOADS / name).read_bytes()\n"
+  },
+  {
+    "id": "clean_rename",
+    "expect": "approve",
+    "keywords": [],
+    "spec": "Rename the helper for clarity; behaviour must not change.",
+    "diff": "--- a/utils/text.py\n+++ b/utils/text.py\n@@ -1,6 +1,6 @@\n-def f(s):\n+def normalize_whitespace(s):\n     \"\"\"Collapse runs of whitespace into single spaces.\"\"\"\n     return \" \".join(s.split())\n"
+  },
+  {
+    "id": "clean_bugfix",
+    "expect": "approve",
+    "keywords": [],
+    "spec": "Average of a list; an empty list must return 0.0 instead of crashing.",
+    "diff": "--- a/stats/mean.py\n+++ b/stats/mean.py\n@@ -1,3 +1,5 @@\n def mean(values):\n+    if not values:\n+        return 0.0\n     return sum(values) / len(values)\n"
+  },
+  {
+    "id": "clean_test_added",
+    "expect": "approve",
+    "keywords": [],
+    "spec": "Add a test for the existing add() function.",
+    "diff": "--- a/tests/test_math.py\n+++ b/tests/test_math.py\n@@ -1,6 +1,10 @@\n import unittest\n from mathlib import add\n \n class AddTests(unittest.TestCase):\n     def test_add(self):\n         self.assertEqual(add(2, 3), 5)\n+\n+    def test_add_negative(self):\n+        self.assertEqual(add(-2, -3), -5)\n"
+  }
+]

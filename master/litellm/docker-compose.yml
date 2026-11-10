@@ -10,6 +10,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@db:5432/litellm
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # lets roles use the master's own Ollama (FLEET_MASTER_MODEL_HOST)
     depends_on:
       db:
         condition: service_healthy

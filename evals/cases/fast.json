@@ -1,0 +1,44 @@
+[
+  {
+    "id": "commit_summary_auth",
+    "kind": "summary",
+    "max_chars": 72,
+    "keywords": [["token", "jwt"], ["expir", "refresh"]],
+    "prompt": "Write a one-line git commit subject (max 72 characters, no quotes, no trailing period) for this change:\n\n- auth/middleware.py: reject JWTs whose exp claim is in the past instead of only logging a warning\n- auth/refresh.py: issue a new access token when a valid refresh token is presented\n- tests: cover expired and refreshed tokens"
+  },
+  {
+    "id": "commit_summary_perf",
+    "kind": "summary",
+    "max_chars": 72,
+    "keywords": [["cache", "caching"], ["product", "catalog"]],
+    "prompt": "Write a one-line git commit subject (max 72 characters, no quotes, no trailing period) for this change:\n\n- catalog/service.py: cache product listings in Redis for 5 minutes\n- catalog/service.py: invalidate the cache when a product is updated\n- p95 latency of GET /products dropped from 900ms to 120ms"
+  },
+  {
+    "id": "classify_bug",
+    "kind": "label",
+    "labels": ["bug", "feature", "question", "security", "docs"],
+    "expect": "bug",
+    "prompt": "Classify this ticket with exactly one label from: bug, feature, question, security, docs. Reply with the label only.\n\nTicket: After upgrading to 2.3 the export button produces an empty CSV file for reports with more than 1,000 rows."
+  },
+  {
+    "id": "classify_security",
+    "kind": "label",
+    "labels": ["bug", "feature", "question", "security", "docs"],
+    "expect": "security",
+    "prompt": "Classify this ticket with exactly one label from: bug, feature, question, security, docs. Reply with the label only.\n\nTicket: Any logged-in user can view other customers' invoices by changing the invoice id in the URL."
+  },
+  {
+    "id": "classify_feature",
+    "kind": "label",
+    "labels": ["bug", "feature", "question", "security", "docs"],
+    "expect": "feature",
+    "prompt": "Classify this ticket with exactly one label from: bug, feature, question, security, docs. Reply with the label only.\n\nTicket: It would be great if we could schedule reports to be emailed every Monday morning."
+  },
+  {
+    "id": "classify_docs",
+    "kind": "label",
+    "labels": ["bug", "feature", "question", "security", "docs"],
+    "expect": "docs",
+    "prompt": "Classify this ticket with exactly one label from: bug, feature, question, security, docs. Reply with the label only.\n\nTicket: The README still says to run `make setup`, but that target was removed; it should say `make bootstrap`."
+  }
+]

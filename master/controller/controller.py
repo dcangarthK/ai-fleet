@@ -4,11 +4,13 @@
 # ///
 """Fleet controller for the master node.
 
-Agentless: finds nodes via `tailscale status` (devices tagged tag:llm-node),
-probes their model servers over the tailnet, and keeps LiteLLM's role groups
-(coder/reviewer/fast/...) in sync with the role assignments and node health.
+Finds nodes via `tailscale status` (devices tagged tag:llm-node), probes their model servers,
+inventory and agent runner over the tailnet, keeps LiteLLM's role groups (coder/reviewer/fast/...)
+in sync with role assignments and node health, and runs agent tasks (tasks.py).
 
-Run: uv run --script controller.py   (dashboard on http://127.0.0.1:8700)
+Run:    uv run --script controller.py              (dashboard on http://127.0.0.1:8700)
+Tokens: uv run --script controller.py token create operate phone
+        uv run --script controller.py token list | token revoke <id>
 """
 import asyncio
 import json
@@ -17,20 +19,26 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
-DB_PATH = Path(os.environ.get("FLEET_DB", Path(__file__).with_name("fleet.db")))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import auth  # noqa: E402
+import events  # noqa: E402
+import tasks  # noqa: E402
+from store import db, init_db  # noqa: E402
+
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://127.0.0.1:4000").rstrip("/")
 MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 NODE_TAG = "tag:llm-node"
-POLL_SECONDS = int(os.environ.get("FLEET_POLL_SECONDS", "30"))
+POLL_SECONDS = float(os.environ.get("FLEET_POLL_SECONDS", "30"))
 MAX_FAILS = 3
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 FLEET_PREFIX = "fleet--"
@@ -39,28 +47,6 @@ INFO_PORT = 11435  # onboard script publishes /fleet.json here (hardware, agents
 # (engine, port, path): first that answers wins.
 PROBES = [("ollama", 11434, "/api/tags"), ("openai", 8000, "/v1/models"), ("openai", 1234, "/v1/models"),
           ("openai", 8080, "/v1/models")]
-
-
-# ---------- storage ----------
-
-def db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db() -> None:
-    with db() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS nodes (
-            id TEXT PRIMARY KEY, name TEXT, ip TEXT, os TEXT, engine TEXT, port INTEGER,
-            models TEXT DEFAULT '[]', status TEXT DEFAULT 'pending',
-            fails INTEGER DEFAULT 0, last_seen REAL, inventory TEXT);
-        CREATE TABLE IF NOT EXISTS assignments (
-            role TEXT, node TEXT, model TEXT, PRIMARY KEY (role, node, model));
-        """)
-        if "inventory" not in [r[1] for r in c.execute("PRAGMA table_info(nodes)")]:
-            c.execute("ALTER TABLE nodes ADD COLUMN inventory TEXT")
 
 
 def healthy(row: sqlite3.Row) -> bool:
@@ -115,7 +101,26 @@ async def fetch_inventory(client: httpx.AsyncClient, ip: str) -> dict | None:
         return None
 
 
+async def refresh_master(client: httpx.AsyncClient) -> None:
+    """The master's own runner is a node too (id 'master'), so its Claude/Codex/Ollama can take tasks."""
+    health = await tasks.runner_health(client, tasks.LOCAL_RUNNER)
+    found = await probe(client, "127.0.0.1")
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO nodes (id, name, ip, os, status) VALUES (?, 'master', '127.0.0.1', ?, 'approved')",
+                  (tasks.MASTER_ID, sys.platform))
+        if health:
+            c.execute("UPDATE nodes SET runner=?, runner_fails=0, last_seen=? WHERE id=?",
+                      (json.dumps(health), time.time(), tasks.MASTER_ID))
+        else:
+            c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (tasks.MASTER_ID,))
+        if found:  # listed for ollama tasks; never routed through LiteLLM (see desired_deployments)
+            c.execute("UPDATE nodes SET engine=?, port=?, models=? WHERE id=?",
+                      (found[0], found[1], json.dumps(found[2]), tasks.MASTER_ID))
+
+
 async def refresh_nodes() -> None:
+    async with httpx.AsyncClient(trust_env=False) as client:
+        await refresh_master(client)
     try:
         seen = await asyncio.to_thread(tailnet_nodes)
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
@@ -125,14 +130,21 @@ async def refresh_nodes() -> None:
     async with httpx.AsyncClient(trust_env=False) as client:  # tailnet only: never via a proxy
         results = await asyncio.gather(*(probe(client, n["ip"]) for n in online))
         inventories = await asyncio.gather(*(fetch_inventory(client, n["ip"]) for n in online))
+        runners = await asyncio.gather(*(tasks.runner_health(client, f"http://{n['ip']}:{tasks.RUNNER_PORT}")
+                                         for n in online))
     probed = dict(zip([n["id"] for n in online], results))
     inventory = dict(zip([n["id"] for n in online], inventories))
+    runner = dict(zip([n["id"] for n in online], runners))
     with db() as c:
         for n in seen:
             c.execute("INSERT OR IGNORE INTO nodes (id) VALUES (?)", (n["id"],))
             c.execute("UPDATE nodes SET name=?, ip=?, os=? WHERE id=?", (n["name"], n["ip"], n["os"], n["id"]))
             if inventory.get(n["id"]):
                 c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory[n["id"]]), n["id"]))
+            if runner.get(n["id"]):
+                c.execute("UPDATE nodes SET runner=?, runner_fails=0 WHERE id=?", (json.dumps(runner[n["id"]]), n["id"]))
+            else:
+                c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (n["id"],))
             found = probed.get(n["id"])
             if found:
                 engine, port, models = found
@@ -140,9 +152,10 @@ async def refresh_nodes() -> None:
                           (engine, port, json.dumps(models), time.time(), n["id"]))
             else:
                 c.execute("UPDATE nodes SET fails=fails+1 WHERE id=?", (n["id"],))
-        ids = [n["id"] for n in seen]
+        ids = [n["id"] for n in seen] + [tasks.MASTER_ID]
         # Nodes that left the tailnet (or lost the tag) count as failing too.
-        c.execute(f"UPDATE nodes SET fails=fails+1 WHERE id NOT IN ({','.join('?' * len(ids))})", ids)
+        c.execute(f"UPDATE nodes SET fails=fails+1, runner_fails=runner_fails+1 "
+                  f"WHERE id NOT IN ({','.join('?' * len(ids))})", ids)
 
 
 # ---------- LiteLLM reconciliation ----------
@@ -158,7 +171,8 @@ def desired_deployments() -> dict[str, dict]:
     desired = {}
     for a in rows:
         n = nodes.get(a["node"])
-        if not n or not healthy(n) or a["model"] not in json.loads(n["models"]):
+        # The master's local Ollama is only reachable as 127.0.0.1, which LiteLLM's container can't use.
+        if not n or n["id"] == tasks.MASTER_ID or not healthy(n) or a["model"] not in json.loads(n["models"]):
             continue
         if n["engine"] == "ollama":
             params = {"model": f"ollama_chat/{a['model']}", "api_base": f"http://{n['ip']}:{n['port']}"}
@@ -205,6 +219,8 @@ _tick_lock = asyncio.Lock()
 async def tick() -> dict:
     async with _tick_lock:  # periodic and API-triggered ticks must not interleave LiteLLM edits
         await refresh_nodes()
+        if not MASTER_KEY:
+            return {"skipped": "no LITELLM_MASTER_KEY: model roles are not synced"}
         try:
             return await reconcile()
         except httpx.HTTPError as e:
@@ -226,25 +242,16 @@ async def loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    task = asyncio.create_task(loop())
+    events.bind_loop(asyncio.get_running_loop())
+    background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop())]
     yield
-    task.cancel()
+    for t in background:
+        t.cancel()
 
 
 app = FastAPI(title="fleet", lifespan=lifespan)
-ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
-
-
-@app.middleware("http")
-async def local_only(request: Request, call_next):
-    # Block DNS rebinding (foreign Host) and cross-site writes: browsers can't add a
-    # custom header cross-origin without a CORS preflight, which this server never grants.
-    host = (request.headers.get("host") or "").rsplit(":", 1)[0]
-    if host not in ALLOWED_HOSTS:
-        return JSONResponse({"detail": "forbidden host"}, status_code=403)
-    if request.method != "GET" and request.headers.get("x-fleet") != "1":
-        return JSONResponse({"detail": "missing X-Fleet header"}, status_code=403)
-    return await call_next(request)
+app.middleware("http")(auth.access_control)
+app.include_router(tasks.router)
 
 
 class Assignment(BaseModel):
@@ -261,7 +268,11 @@ def fleet_state() -> dict:
         roles = [dict(r) for r in c.execute(
             "SELECT a.role, a.model, a.node AS node_id, n.name AS node FROM assignments a "
             "LEFT JOIN nodes n ON n.id = a.node ORDER BY a.role, n.name")]
-    return {"nodes": nodes, "assignments": roles, "max_fails": MAX_FAILS}
+    for n in nodes:
+        n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
+        n["runner_ok"] = bool(n["runner"]) and (n.get("runner_fails") or 0) < MAX_FAILS
+        n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
+    return {"nodes": nodes, "assignments": roles, "max_fails": MAX_FAILS, "modes": tasks.MODES}
 
 
 @app.get("/api/fleet")
@@ -330,8 +341,39 @@ def dashboard() -> str:
     return Path(__file__).with_name("dashboard.html").read_text()
 
 
+@app.get("/login")
+def login(token: str) -> RedirectResponse:
+    """Remote sign-in: open https://<master>.ts.net/login?token=... once per device."""
+    if not auth.token_scope(token):
+        raise HTTPException(403, "unknown token")
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(auth.COOKIE, token, httponly=True, secure=True, samesite="strict", max_age=90 * 86400)
+    return resp
+
+
+def token_cli(args: list[str]) -> None:
+    init_db()
+    if args[:1] == ["create"] and len(args) >= 2:
+        token = auth.create_token(args[1], " ".join(args[2:]) or "unnamed")
+        host = auth.PUBLIC_HOST or "<FLEET_PUBLIC_HOST>"
+        print(f"{args[1]} token (shown once): {token}\nSign in on a device: https://{host}/login?token={token}")
+    elif args[:1] == ["list"]:
+        with db() as c:
+            for r in c.execute("SELECT id, scope, label, created_at, last_used FROM tokens ORDER BY created_at"):
+                used = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["last_used"])) if r["last_used"] else "never"
+                print(f"{r['id']}  {r['scope']:<8} {r['label']:<20} last used {used}")
+    elif args[:1] == ["revoke"] and len(args) == 2:
+        with db() as c:
+            print("revoked" if c.execute("DELETE FROM tokens WHERE id=?", (args[1],)).rowcount else "no such token")
+    else:
+        raise SystemExit("usage: controller.py token create <view|operate|admin> [label] | token list | token revoke <id>")
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["token"]:
+        token_cli(sys.argv[2:])
+        raise SystemExit(0)
     import uvicorn
     if not MASTER_KEY:
-        raise SystemExit("LITELLM_MASTER_KEY not set (source master/litellm/.env)")
+        print("LITELLM_MASTER_KEY not set: tasks work, but model roles won't sync to LiteLLM")
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("FLEET_PORT", "8700")))

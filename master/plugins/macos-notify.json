@@ -1,0 +1,5 @@
+{
+  "description": "macOS notification when a task needs you or finishes",
+  "events": ["task.awaiting_approval", "task.blocked", "task.review", "task.failed", "task.interrupted"],
+  "command": ["/bin/sh", "macos-notify.sh"]
+}

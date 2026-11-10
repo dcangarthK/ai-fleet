@@ -526,6 +526,9 @@ def boot_time():
         if sys.platform == "darwin":
             out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=3).stdout
             return float(re.search(r"sec = (\d+)", out).group(1))
+        if os.name == "nt":
+            import ctypes
+            return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
         if sys.platform.startswith("linux"):
             with open("/proc/stat", encoding="ascii") as handle:
                 for line in handle:
@@ -1013,13 +1016,20 @@ class JobManager:
                 raise HttpError(409, "job is running")
             if job.get("worktree") and Path(job["cwd"]).exists():
                 # Keep the agent's uncommitted work on its branch before the worktree goes away.
+                # Any git failure aborts the cleanup: never force-remove a worktree we couldn't save.
                 git = ["git", "-C", job["cwd"], "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost"]
-                if subprocess.run(git + ["status", "--porcelain"], capture_output=True, text=True).stdout.strip():
-                    subprocess.run(git + ["add", "-A"], capture_output=True)
-                    snap = subprocess.run(git + ["commit", "--no-verify", "-m", "fleet: work from task " + job["id"]],
-                                          capture_output=True, text=True)
-                    if snap.returncode:
-                        raise HttpError(500, trim(snap.stderr or "could not save the task's changes"))
+
+                def run_git(*args):
+                    out = subprocess.run(git + list(args), capture_output=True, text=True, timeout=120)
+                    if out.returncode:
+                        raise HttpError(500, trim(out.stderr or "git %s failed; worktree kept" % args[0]))
+                    return out.stdout
+
+                if run_git("status", "--porcelain").strip():
+                    run_git("add", "-A")
+                    run_git("commit", "--no-verify", "-m", "fleet: work from task " + job["id"])
+                    if run_git("status", "--porcelain").strip():
+                        raise HttpError(500, "worktree still has unsaved changes; kept it")
                 removed = subprocess.run(
                     ["git", "-C", job["repo"], "worktree", "remove", "--force", job["cwd"]],
                     capture_output=True, text=True, timeout=60,

@@ -70,10 +70,12 @@ Updates are pushed live. macOS notifications fire when a task needs you or finis
 **Plugins:** drop `master/plugins/<name>.json` with `{"events": ["task.review", ...], "command": [...]}`; the
 command gets the event as JSON on stdin. Events: `task.<state>`, `task.approved`, `task.unreachable`, `node.ceiling`.
 
-**From your phone:** on the master run `tailscale serve --bg --https=8443 http://127.0.0.1:8700`, start the
-controller with `FLEET_PUBLIC_HOST=<master>.<tailnet>.ts.net`, then
+**From your phone:** the controller also listens on `127.0.0.1:8701`, where every request needs a token.
+On the master run `tailscale serve --bg --https=8443 http://127.0.0.1:8701` (never point it at 8700, which
+trusts all local callers), set `FLEET_PUBLIC_HOST=<master>.<tailnet>.ts.net` for nicer sign-in links, then
 `uv run --script master/controller/controller.py token create admin phone` and open the printed link on the phone.
 Scopes: `view` (read), `operate` (start/steer/cancel tasks), `admin` (approvals, nodes, roles, ceilings).
+Revoke with `token list` / `token revoke <id>`.
 
 **Editing the runner:** change `nodes/runner.py`, then `python3 nodes/build.py` to re-embed it into the onboard scripts.
 

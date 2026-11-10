@@ -9,6 +9,7 @@ everything that also touches a runner holds the task's lock, so approvals, messa
 poller can't overwrite each other.
 """
 import asyncio
+import datetime
 import json
 import os
 import secrets
@@ -176,10 +177,12 @@ def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
     now = time.time()
     if state == "working":
         fields.setdefault("run_started_at", now)
-    elif task["state"] == "working" and state in SETTLED:
-        # Agent time counts only while a run is going, not while a human reviews.
-        fields["agent_seconds"] = (task.get("agent_seconds") or 0) + max(0, now - (task.get("run_started_at") or now))
-        fields.setdefault("ended_at", now)
+    elif state in SETTLED:
+        if task["state"] in ACTIVE:
+            fields.setdefault("ended_at", now)
+        if task.get("run_started_at") and "agent_seconds" not in fields:
+            # Agent time counts only while a run is going, not while a human reviews.
+            fields.update(close_run(task, now))
     fields["updated_at"] = now
     cols = ", ".join(f"{k}=?" for k in fields)
     marks = ",".join("?" * len(expected))
@@ -190,6 +193,19 @@ def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
     return moved
+
+
+def close_run(task: dict, end: float) -> dict:
+    """Fields that add the current run's duration to agent_seconds and mark the run closed."""
+    start = task.get("run_started_at")
+    return {"agent_seconds": (task.get("agent_seconds") or 0) + max(0, end - start), "run_started_at": None}
+
+
+def iso_epoch(value) -> float | None:
+    try:
+        return datetime.datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def job_fields(job: dict) -> dict:
@@ -223,13 +239,17 @@ async def start(task: dict) -> None:
 async def recover() -> None:
     """After a controller restart: finish starting tasks that were mid-start or never started."""
     with db() as c:
-        pending = [task_view(r) for r in c.execute("SELECT * FROM tasks WHERE state IN ('queued','starting')")]
-    for task in pending:
-        async with _locks[task["id"]]:
-            task = get_task(task["id"])
+        pending = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('queued','starting')")]
+
+    async def one(task_id: str) -> None:
+        async with _locks[task_id]:
+            task = get_task(task_id)
             if task["state"] == "queued" and not transition(task, {"queued"}, "starting"):
-                continue
-            await start(get_task(task["id"]))
+                return
+            if get_task(task_id)["state"] == "starting":
+                await start(get_task(task_id))
+
+    await asyncio.gather(*(one(i) for i in pending), return_exceptions=True)
 
 
 # ---------- polling runners ----------
@@ -268,22 +288,29 @@ async def poll_task(task_id: str) -> None:
                 emit(task_id, "task.unreachable", {"title": task["title"], "node": task["node_id"]})
             return
         new = outcome(task, job)
+        fields = job_fields(job)
+        agent_end = iso_epoch(job.get("ended_at"))
+        if agent_end and task.get("run_started_at"):
+            fields.update(close_run(task, agent_end))  # the gate's run time isn't agent time
         if new == "working":
-            update(task_id, **job_fields(job))
+            update(task_id, **fields)
         else:
-            transition(task, {"working"}, new, **job_fields(job))
+            transition(task, {"working"}, new, **fields)
 
 
 async def poll_loop() -> None:
-    await recover()
+    recovering: asyncio.Task | None = None
     while True:
         try:
+            # Recovery retries can wait on unreachable runners; run them beside polling, one round at a time.
+            if recovering is None or recovering.done():
+                recovering = asyncio.create_task(recover())
             with db() as c:
                 ids = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state='working'")]
+                finished = {r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('done','cancelled')")}
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
-            with db() as c:
-                if c.execute("SELECT 1 FROM tasks WHERE state='starting' LIMIT 1").fetchone():
-                    await recover()
+            for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
+                _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens
             print(f"task poll failed: {e!r}")
         await asyncio.sleep(POLL_SECONDS)
@@ -390,7 +417,7 @@ def read_task(task_id: str) -> dict:
 @router.get("/api/tasks/{task_id}/log")
 async def task_log(task_id: str, offset: int = 0) -> dict:
     task = get_task(task_id)
-    if task["state"] in ("queued", "awaiting_approval"):
+    if task["state"] in ("queued", "awaiting_approval", "starting"):
         return {"offset": 0, "text": ""}
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/log?offset={offset}")
 

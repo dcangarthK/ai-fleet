@@ -264,6 +264,22 @@ class ControllerTests(unittest.TestCase):
         t = self.task()
         self.assertEqual(self.c.post(f"/api/tasks/{t['id']}/complete", headers=W).status_code, 409)
 
+    def test_agent_time_stops_when_agent_exits_not_after_gate(self):
+        import datetime
+        t = self.task(gate="pytest")
+        started = self.c.get(f"/api/tasks/{t['id']}").json()["run_started_at"]
+        agent_end = datetime.datetime.fromtimestamp(started + 2, datetime.timezone.utc).isoformat()
+        FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, ended_at=agent_end,
+                                        gate={"state": "running"})
+        wait_for(lambda: self.c.get(f"/api/tasks/{t['id']}").json()["run_started_at"] is None)
+        FakeRunner.jobs[t["id"]]["gate"] = {"state": "passed"}
+        wait_for(lambda: self.state(t["id"]) == "review")
+        self.assertAlmostEqual(self.c.get(f"/api/tasks/{t['id']}").json()["agent_seconds"], 2, delta=0.01)
+
+    def test_reject_sets_ended_at(self):
+        t = self.task(mode="supervised")
+        self.assertIsNotNone(self.c.post(f"/api/tasks/{t['id']}/reject", headers=W).json()["ended_at"])
+
     def test_usage(self):
         self.task()
         rows = self.c.get("/api/usage").json()

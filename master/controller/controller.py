@@ -369,13 +369,18 @@ def token_cli(args: list[str]) -> None:
         raise SystemExit("usage: controller.py token create <view|operate|admin> [label] | token list | token revoke <id>")
 
 
-async def serve() -> None:
-    """Two listeners on 127.0.0.1: the local one (full access) and the public one for `tailscale serve`
-    (tokens always required). auth.access_control tells them apart by port."""
+def serve() -> None:
+    """One server, two sockets on 127.0.0.1: the local port (full access) and the public port for
+    `tailscale serve` (tokens always required). auth.access_control tells them apart by port."""
+    import socket
     import uvicorn
-    local = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=int(os.environ.get("FLEET_PORT", "8700"))))
-    public = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=auth.PUBLIC_PORT, lifespan="off"))
-    await asyncio.gather(local.serve(), public.serve())
+    sockets = []
+    for port in (int(os.environ.get("FLEET_PORT", "8700")), auth.PUBLIC_PORT):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        sockets.append(s)
+    uvicorn.Server(uvicorn.Config(app)).run(sockets=sockets)
 
 
 if __name__ == "__main__":
@@ -384,4 +389,4 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if not MASTER_KEY:
         print("LITELLM_MASTER_KEY not set: tasks work, but model roles won't sync to LiteLLM")
-    asyncio.run(serve())
+    serve()

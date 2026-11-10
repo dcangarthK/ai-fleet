@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2", "httpx>=0.27"]
+# dependencies = ["mcp>=1.2,<2", "httpx>=0.27"]
 # ///
 """MCP bridge on the master node: lets Claude use fleet roles (coder/reviewer/fast/...)
 through LiteLLM, and manage the fleet (nodes, roles) through the controller.

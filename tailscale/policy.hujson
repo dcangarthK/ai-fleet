@@ -7,14 +7,14 @@
 
   "grants": [
     // Master reaches node model servers (Ollama 11434, vLLM 8000, LM Studio 1234, llama.cpp 8080)
-    // and the node inventory published by the onboard script (11435).
-    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11434", "tcp:11435", "tcp:8000", "tcp:1234", "tcp:8080"]},
+    // the node inventory published by the onboard script (11435), and the agent runner (11436).
+    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11434", "tcp:11435", "tcp:11436", "tcp:8000", "tcp:1234", "tcp:8080"]},
     // Tailnet admins (you) can SSH to fleet machines for maintenance.
     {"src": ["autogroup:admin"], "dst": ["tag:master", "tag:llm-node"], "ip": ["tcp:22"]},
   ],
 
   "tests": [
-    {"src": "tag:master", "accept": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:8000"], "deny": ["tag:llm-node:22"]},
-    {"src": "tag:llm-node", "deny": ["tag:master:4000", "tag:master:8700", "tag:llm-node:11434"]},
+    {"src": "tag:master", "accept": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:11436", "tag:llm-node:8000"], "deny": ["tag:llm-node:22"]},
+    {"src": "tag:llm-node", "deny": ["tag:master:4000", "tag:master:8700", "tag:llm-node:11434", "tag:llm-node:11436"]},
   ],
 }

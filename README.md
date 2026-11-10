@@ -47,6 +47,36 @@ Servers other than Ollama that only listen on localhost are flagged "localhost-o
 Bind them to the machine's Tailscale IP (`tailscale ip -4`) on port 8000, 1234 or 8080 to use them; the controller then picks them up.
 Agent CLIs on nodes are listed for visibility; Claude can only call agents on the master for now.
 
+## Agent tasks
+Claude delegates work to agents across the fleet with the MCP task tools (see `CLAUDE.md`):
+the controller picks a node, the node's **runner** (port 11436, installed by setup/onboard) starts the agent
+CLI as that machine's user, in its own git worktree, and reports back. Agents keep running if the runner,
+the controller or your connection restarts; after a reboot the task shows **interrupted** and can resume its session.
+
+| State | Meaning |
+|---|---|
+| needs approval | supervised/full mode: approve in the dashboard |
+| working | agent running (gate runs after it) |
+| blocked | agent was denied tools; approve to grant them and resume |
+| ready for review | finished and the gate passed: read the diff, then merge |
+| failed / interrupted | agent or gate failed / process lost: message it to retry |
+
+**Permission modes:** `read-only` < `supervised` < `auto-edit` (default) < `full`. Each node has a ceiling
+(dashboard) and the node owner caps it again in `~/.ai-fleet/runner.json` (`max_mode`). The stricter one wins.
+
+**Dashboard:** http://127.0.0.1:8700 shows what needs you, tasks by state with live activity, diffs, nodes and usage.
+Updates are pushed live. macOS notifications fire when a task needs you or finishes (`master/plugins/`).
+
+**Plugins:** drop `master/plugins/<name>.json` with `{"events": ["task.review", ...], "command": [...]}`; the
+command gets the event as JSON on stdin. Events: `task.<state>`, `task.approved`, `task.unreachable`, `node.ceiling`.
+
+**From your phone:** on the master run `tailscale serve --bg --https=8443 http://127.0.0.1:8700`, start the
+controller with `FLEET_PUBLIC_HOST=<master>.<tailnet>.ts.net`, then
+`uv run --script master/controller/controller.py token create admin phone` and open the printed link on the phone.
+Scopes: `view` (read), `operate` (start/steer/cancel tasks), `admin` (approvals, nodes, roles, ceilings).
+
+**Editing the runner:** change `nodes/runner.py`, then `python3 nodes/build.py` to re-embed it into the onboard scripts.
+
 ## Model picks by memory
 | Node memory | coder | reviewer | fast |
 |---|---|---|---|
@@ -58,5 +88,5 @@ Agent CLIs on nodes are listed for visibility; Claude can only call agents on th
 - Several nodes on one role = LiteLLM load-balances between them.
 - A node that misses 3 checks (~90s) leaves routing; it returns automatically when it answers again.
 - **Drain** takes a node out of routing but keeps its role assignments.
-- Nodes can't reach each other or the master; only the master can reach node model ports.
+- Nodes can't reach each other or the master; only the master can reach node model, inventory and runner ports.
 - The controller and dashboard listen on 127.0.0.1 only and have no login, so anyone with access to the master laptop can use them.

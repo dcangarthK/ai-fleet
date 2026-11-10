@@ -16,6 +16,16 @@ Roles marked "not routed" are unavailable; if a role you need is down, use Codex
 Small nodes hold one model at a time: batch work per role, don't ping-pong roles on the same node.
 Change role assignments or drain nodes only when the user asks. Node approval is the user's job (dashboard).
 
+## Delegating to agents (fleet tasks)
+Use the `local-llm` MCP task tools instead of running other agents by hand:
+- `spawn_task(agent="codex"|"claude"|"ollama", prompt, repo=<abs path>, gate="<test cmd>", mode=...)` starts work in
+  its own worktree/branch (`fleet/<task-id>`) on the least-busy eligible node and returns at once.
+- Start independent tasks together, then `wait_tasks([...])` (don't poll). `any_of=True` to react to the first.
+- Review with `task_diff` and `task_log`; steer with `message_task` (same session, keeps context).
+- `blocked` / `awaiting_approval` = the user must act in the dashboard. Tell them; never try to approve.
+- After merging a branch: `complete_task`, then `cleanup_task`.
+- Default mode `auto-edit`. Ask for `supervised` on unfamiliar repos; `full` only when the user says so.
+
 ## Pipeline (every feature or fix)
 1. **Spec.** Write acceptance criteria and test cases. Get the user's OK before building.
 2. **Tests first.** Write failing tests from the spec.

@@ -5,45 +5,75 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Fleet</title>
 <style>
-  :root { --bg:#f7f7f5; --panel:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd;
-          --ok:#1f7a4d; --warn:#a15c00; --bad:#b42318; --accent:#2f5bd3; }
+  :root { --bg:#f7f7f5; --panel:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd; --soft:#f0efeb;
+          --ok:#1f7a4d; --warn:#a15c00; --bad:#b42318; --accent:#2f5bd3; --info:#5b4bc4; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#151514; --panel:#1f1f1d; --text:#ecebe6; --muted:#9a9993; --line:#33332f;
-            --ok:#4cc38a; --warn:#f0a43a; --bad:#f2675b; --accent:#7c9cff; }
+    :root { --bg:#151514; --panel:#1f1f1d; --text:#ecebe6; --muted:#9a9993; --line:#33332f; --soft:#262624;
+            --ok:#4cc38a; --warn:#f0a43a; --bad:#f2675b; --accent:#7c9cff; --info:#a99bff; }
   }
   * { box-sizing:border-box }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system,system-ui,sans-serif }
-  main { max-width:1080px; margin:0 auto; padding:24px 16px 48px }
-  h1 { font-size:20px; margin:0 } h2 { font-size:15px; margin:28px 0 10px }
-  header { display:flex; justify-content:space-between; align-items:center; gap:12px }
-  .muted { color:var(--muted) }
+  main { max-width:1120px; margin:0 auto; padding:20px 16px 64px }
+  h1 { font-size:20px; margin:0 } h2 { font-size:15px; margin:28px 0 10px; display:flex; gap:8px; align-items:center }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap }
+  .muted { color:var(--muted) } .small { font-size:12px }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow-x:auto }
   table { width:100%; border-collapse:collapse }
   th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top }
   th { font-weight:600; color:var(--muted); font-size:12px }
   tr:last-child td { border-bottom:0 }
-  .badge { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid currentColor }
-  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)}
-  .chip { display:inline-block; margin:0 4px 4px 0; padding:1px 6px; border-radius:4px; background:var(--bg); font:12px ui-monospace,monospace }
-  button, select, input { font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:5px 10px }
-  button { cursor:pointer } button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
-  form { display:flex; flex-wrap:wrap; gap:8px; padding:12px }
+  tr.click { cursor:pointer } tr.click:hover td { background:var(--soft) }
+  .badge { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid currentColor; white-space:nowrap }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .info{color:var(--info)} .acc{color:var(--accent)}
+  .chip { display:inline-block; margin:0 4px 4px 0; padding:1px 6px; border-radius:4px; background:var(--soft); font:12px ui-monospace,monospace }
+  button, select, input, textarea { font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:5px 10px }
+  textarea { width:100%; min-height:90px; resize:vertical }
+  button { cursor:pointer } button:disabled { opacity:.5 }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff }
+  button.danger { color:var(--bad) }
+  form.row, .row { display:flex; flex-wrap:wrap; gap:8px; padding:12px; align-items:center }
   #err { color:var(--bad); min-height:1.4em }
-  .inv { margin-top:4px; font-size:12px } .inv .chip { background:transparent; border:1px solid var(--line) }
-  .hint { color:var(--warn); font-size:12px }
+  .cards { display:grid; gap:10px; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)) }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px }
+  .card h3 { margin:0 0 4px; font-size:14px }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap } .tabs button.on { border-color:var(--accent); color:var(--accent) }
+  .count { font-size:12px; color:var(--muted) }
+  .inv { margin-top:4px; font-size:12px } .hint { color:var(--warn); font-size:12px }
+  dialog { width:min(920px,100vw - 24px); max-height:90vh; border:1px solid var(--line); border-radius:12px;
+           background:var(--panel); color:var(--text); padding:0 }
+  dialog::backdrop { background:rgba(0,0,0,.4) }
+  .dhead { position:sticky; top:0; background:var(--panel); padding:14px 16px; border-bottom:1px solid var(--line);
+           display:flex; justify-content:space-between; gap:8px; align-items:start }
+  .dbody { padding:14px 16px }
+  pre { background:var(--soft); padding:10px; border-radius:8px; overflow:auto; max-height:340px; white-space:pre-wrap;
+        word-break:break-word; font:12px/1.45 ui-monospace,monospace; margin:6px 0 14px }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:4px 10px; font-size:13px; margin-bottom:12px }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); margin-right:6px }
+  .dot.live { background:var(--ok) }
+  @media (max-width: 640px) { .kv { grid-template-columns:90px 1fr } th.hide-sm, td.hide-sm { display:none } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>AI Fleet</h1><div class="muted" id="sub">Loading…</div></div>
-    <button id="refresh">Refresh now</button>
+    <div><h1>AI Fleet</h1><div class="muted small" id="sub"><span class="dot" id="live"></span>Loading…</div></div>
+    <div class="row" style="padding:0"><button id="new">New task</button><button id="refresh">Refresh nodes</button></div>
   </header>
   <div id="err"></div>
 
+  <h2>Needs you <span class="count" id="inbox-count"></span></h2>
+  <div class="cards" id="inbox"></div>
+
+  <h2>Tasks</h2>
+  <div class="tabs" id="tabs"></div>
+  <div class="panel" style="margin-top:8px"><table>
+    <thead><tr><th>Task</th><th>State</th><th class="hide-sm">Agent · node</th><th class="hide-sm">Mode</th><th>Updated</th></tr></thead>
+    <tbody id="tasks"></tbody>
+  </table></div>
+
   <h2>Nodes</h2>
   <div class="panel"><table>
-    <thead><tr><th>Node</th><th>State</th><th>Engine</th><th>Models</th><th>Last seen</th><th></th></tr></thead>
+    <thead><tr><th>Node</th><th>State</th><th class="hide-sm">Agents · models</th><th>Ceiling</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
   </table></div>
 
@@ -53,7 +83,7 @@
       <thead><tr><th>Role</th><th>Node</th><th>Model</th><th>Routing</th><th></th></tr></thead>
       <tbody id="roles"></tbody>
     </table>
-    <form id="assign">
+    <form id="assign" class="row">
       <input id="role" list="role-list" placeholder="role (e.g. coder)" required pattern="[a-z][a-z0-9-]{1,31}">
       <datalist id="role-list"><option>coder</option><option>reviewer</option><option>fast</option></datalist>
       <select id="node" required></select>
@@ -61,107 +91,291 @@
       <button class="primary">Assign</button>
     </form>
   </div>
+
+  <h2>Usage <span class="count">last 24h</span></h2>
+  <div class="panel"><table>
+    <thead><tr><th>Node</th><th>Agent</th><th>Tasks</th><th>Running</th><th>Failed</th><th>Agent time</th></tr></thead>
+    <tbody id="usage"></tbody>
+  </table></div>
 </main>
+
+<dialog id="detail"><div class="dhead"><div><b id="d-title"></b><div class="small muted" id="d-sub"></div></div>
+  <button id="d-close">Close</button></div><div class="dbody" id="d-body"></div></dialog>
+
+<dialog id="create"><div class="dhead"><b>New task</b><button id="c-close">Close</button></div>
+  <form class="dbody" id="c-form">
+    <div class="row" style="padding:0 0 10px">
+      <label>Agent <select id="c-agent"><option>codex</option><option>claude</option><option>ollama</option></select></label>
+      <label>Mode <select id="c-mode"></select></label>
+      <label>Node <select id="c-node"><option value="">auto</option></select></label>
+      <input id="c-model" placeholder="model (ollama)" style="display:none">
+    </div>
+    <div class="row" style="padding:0 0 10px">
+      <input id="c-repo" placeholder="repo path on the node (optional)" style="flex:2;min-width:220px">
+      <input id="c-gate" placeholder="gate, e.g. pytest -q" style="flex:1;min-width:160px">
+    </div>
+    <textarea id="c-prompt" placeholder="What should the agent do?" required></textarea>
+    <div class="row" style="padding:10px 0 0"><button class="primary">Start task</button>
+      <span class="small muted">Supervised and full modes wait for your approval.</span></div>
+  </form>
+</dialog>
+
 <script>
-let state = { nodes: [], assignments: [] };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let fleet = { nodes: [], assignments: [], modes: [] }, tasks = [], tab = "active", openTask = null, logOffset = 0;
+
+const STATE = {
+  queued: ["muted", "queued"], awaiting_approval: ["warn", "needs approval"], working: ["acc", "working"],
+  blocked: ["warn", "blocked"], review: ["info", "ready for review"], failed: ["bad", "failed"],
+  interrupted: ["bad", "interrupted"], done: ["ok", "done"], cancelled: ["muted", "cancelled"],
+};
+const TABS = { active: ["queued", "working"], review: ["review"], problems: ["failed", "interrupted"],
+               finished: ["done", "cancelled"], all: null };
+const badge = (s) => `<span class="badge ${STATE[s]?.[0] || "muted"}">${esc(STATE[s]?.[1] || s)}</span>`;
 
 async function api(path, method = "GET", body) {
   $("err").textContent = "";
-  const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Fleet": "1" }, body: body && JSON.stringify(body) });
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-Fleet": "1" },
+                                body: body && JSON.stringify(body) });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { $("err").textContent = data.detail || `HTTP ${r.status}`; throw new Error(data.detail); }
+  if (!r.ok) {
+    const msg = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || `HTTP ${r.status}`);
+    $("err").textContent = msg; throw new Error(msg);
+  }
   return data;
 }
 
 function ago(t) {
   if (!t) return "never";
   const s = Math.round(Date.now() / 1000 - t);
-  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+}
+const dur = (s) => !s ? "—" : s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+const nodeName = (id) => fleet.nodes.find((n) => n.id === id)?.name || id;
+
+// ---------- inbox ----------
+function renderInbox() {
+  const items = tasks.filter((t) => t.state === "awaiting_approval" || t.state === "blocked");
+  $("inbox-count").textContent = items.length ? `${items.length} waiting` : "";
+  $("inbox").innerHTML = items.map((t) => {
+    const why = t.state === "awaiting_approval"
+      ? `Wants to start in <b>${esc(t.mode)}</b> mode on ${esc(nodeName(t.node_id))}.`
+      : `Was denied: ${t.denials.map((d) => `<span class="chip">${esc(d.tool_name || d.tool)}</span>`).join("")}`;
+    return `<div class="card"><h3>${esc(t.title)}</h3><div class="small muted">${esc(t.agent)} · ${badge(t.state)}</div>
+      <p class="small">${why}</p>
+      <div class="row" style="padding:0"><button class="primary" data-act="approve" data-id="${t.id}">Approve</button>
+      <button class="danger" data-act="reject" data-id="${t.id}">Reject</button>
+      <button data-open="${t.id}">Details</button></div></div>`;
+  }).join("") || '<div class="muted small">Nothing needs you right now.</div>';
+}
+
+// ---------- tasks ----------
+function renderTasks() {
+  $("tabs").innerHTML = Object.keys(TABS).map((k) => {
+    const n = TABS[k] ? tasks.filter((t) => TABS[k].includes(t.state)).length : tasks.length;
+    return `<button class="${k === tab ? "on" : ""}" data-tab="${k}">${k} <span class="count">${n}</span></button>`;
+  }).join("");
+  const shown = TABS[tab] ? tasks.filter((t) => TABS[tab].includes(t.state)) : tasks;
+  $("tasks").innerHTML = shown.map((t) => `<tr class="click" data-open="${t.id}">
+      <td><b>${esc(t.title)}</b><div class="small muted">${t.id}${t.parent_id ? ` · child of ${esc(t.parent_id)}` : ""}${t.error ? ` · <span class="bad">${esc(t.error)}</span>` : ""}</div></td>
+      <td>${badge(t.state)}</td>
+      <td class="hide-sm">${esc(t.agent)}${t.model ? ` (${esc(t.model)})` : ""} · ${esc(nodeName(t.node_id))}</td>
+      <td class="hide-sm">${esc(t.mode)}</td><td class="muted small">${ago(t.updated_at)}</td></tr>`).join("")
+    || `<tr><td colspan="5" class="muted">No ${tab === "all" ? "" : tab + " "}tasks.</td></tr>`;
+}
+
+async function showTask(id, refreshOnly = false) {
+  const t = await api(`/api/tasks/${id}`);
+  openTask = id;
+  $("d-title").textContent = t.title;
+  $("d-sub").innerHTML = `${t.id} · ${badge(t.state)} · ${esc(t.agent)} on ${esc(nodeName(t.node_id))} · ${esc(t.mode)}`;
+  const gate = t.gate_result ? `${esc(t.gate_result.cmd || t.gate)} → <b>${esc(t.gate_result.state)}</b>` : esc(t.gate || "none");
+  const actions = [];
+  if (["awaiting_approval", "blocked"].includes(t.state))
+    actions.push(`<button class="primary" data-act="approve" data-id="${t.id}">Approve</button><button class="danger" data-act="reject" data-id="${t.id}">Reject</button>`);
+  if (t.state === "working") actions.push(`<button class="danger" data-act="cancel" data-id="${t.id}">Cancel</button>`);
+  if (["review", "failed", "interrupted", "blocked"].includes(t.state)) actions.push(`<button data-act="complete" data-id="${t.id}">Mark done</button>`);
+  if (["done", "cancelled", "review", "failed", "interrupted"].includes(t.state) && t.branch) actions.push(`<button data-act="cleanup" data-id="${t.id}">Remove worktree</button>`);
+  if (t.branch) actions.push(`<button data-diff="${t.id}">Show diff</button>`);
+  const canMessage = ["review", "failed", "blocked", "interrupted"].includes(t.state);
+  const body = `
+    <div class="kv"><span class="muted">Branch</span><span>${esc(t.branch || "—")}</span>
+      <span class="muted">Worktree</span><span class="small">${esc(t.cwd || "—")}</span>
+      <span class="muted">Gate</span><span>${gate}</span>
+      <span class="muted">Runs</span><span>${t.runs || 0}${t.exit_code != null ? ` · exit ${t.exit_code}` : ""}</span>
+      <span class="muted">Session</span><span class="small">${esc(t.session_id || "—")}</span></div>
+    <div class="row" style="padding:0 0 12px">${actions.join("")}</div>
+    ${t.denials.length ? `<b>Denied tools</b><pre>${esc(JSON.stringify(t.denials, null, 2))}</pre>` : ""}
+    <b>Prompt</b><pre>${esc(t.prompt)}</pre>
+    ${t.result ? `<b>Result</b><pre>${esc(t.result)}</pre>` : ""}
+    ${t.gate_result?.output_tail ? `<b>Gate output</b><pre>${esc(t.gate_result.output_tail)}</pre>` : ""}
+    <div id="d-diff"></div>
+    <b>Activity</b><pre id="d-log">${refreshOnly ? esc($("d-log")?.textContent || "") : ""}</pre>
+    ${canMessage ? `<form id="d-msg" class="row" style="padding:0"><input id="d-text" placeholder="Follow-up instructions (resumes the same session)" style="flex:1;min-width:220px" required><button class="primary">Send</button></form>` : ""}`;
+  $("d-body").innerHTML = body;
+  if (!refreshOnly) { logOffset = 0; $("detail").showModal(); }
+  pollLog();
+}
+
+async function pollLog() {
+  if (!openTask || !$("detail").open) return;
+  try {
+    const r = await api(`/api/tasks/${openTask}/log?offset=${logOffset}`);
+    if (r.text) { const pre = $("d-log"); pre.textContent += r.text; pre.scrollTop = pre.scrollHeight; }
+    logOffset = r.offset;
+  } catch { /* runner may be offline; keep the dialog usable */ }
+}
+setInterval(pollLog, 2000);
+
+// ---------- nodes / roles / usage ----------
+function inventory(n) {
+  const inv = n.inventory;
+  if (!inv) return "";
+  const hw = inv.hardware || {};
+  const parts = [`${hw.ram_gb ?? "?"}GB RAM`, hw.gpu || hw.cpu].filter(Boolean).map(esc).join(" · ");
+  const hints = (inv.servers || []).filter((s) => !s.reachable_from_master && n.id !== "master")
+    .map((s) => `<div class="hint">${esc(s.engine)} :${s.port}: ${esc(s.hint)}</div>`).join("");
+  return `<div class="inv muted">${parts} · scanned ${ago(inv.scanned_at)}</div>${hints}`;
 }
 
 function nodeState(n) {
   if (n.status === "pending") return '<span class="badge warn">pending approval</span>';
   if (n.status === "drained") return '<span class="badge muted">drained</span>';
-  return n.healthy ? '<span class="badge ok">healthy</span>' : `<span class="badge bad">offline (${n.fails} misses)</span>`;
+  const models = n.healthy ? '<span class="badge ok">models ok</span>' : n.engine ? '<span class="badge bad">models offline</span>' : "";
+  const runner = n.runner_ok ? '<span class="badge ok">runner ok</span>' : '<span class="badge muted">no runner</span>';
+  return `${models} ${runner}`;
 }
 
-function inventory(n) {
-  const inv = n.inventory;
-  if (!inv) return '<div class="inv muted">no inventory (run onboard script)</div>';
-  const hw = inv.hardware || {};
-  const parts = [`${hw.ram_gb ?? "?"}GB RAM`, hw.gpu || hw.cpu].filter(Boolean).map(esc).join(" · ");
-  const agents = (inv.agents || []).map((a) => `<span class="chip">${esc(a.name)}</span>`).join("");
-  const apps = (inv.apps || []).map((a) => `<span class="chip">${esc(a)}</span>`).join("");
-  const hints = (inv.servers || []).filter((s) => !s.reachable_from_master)
-    .map((s) => `<div class="hint">${esc(s.engine)} :${s.port} has ${s.models.length} models but is localhost-only</div>`).join("");
-  const files = (inv.model_files || []).length;
-  return `<div class="inv muted">${parts}</div>
-    ${agents ? `<div class="inv">Agents: ${agents}</div>` : ""}
-    ${apps ? `<div class="inv">Apps: ${apps}</div>` : ""}
-    ${files ? `<div class="inv muted">${files} model files on disk</div>` : ""}${hints}
-    <div class="inv muted">scanned ${ago(inv.scanned_at)}</div>`;
+function renderNodes() {
+  $("nodes").innerHTML = fleet.nodes.map((n) => {
+    const agents = Object.keys(n.runner?.agents || {}).map((a) => `<span class="chip">${esc(a)}</span>`).join("");
+    const extra = (n.inventory?.agents || []).filter((a) => !(n.runner?.agents || {})[a.cli])
+      .map((a) => `<span class="chip muted" title="installed, not runnable">${esc(a.cli)}</span>`).join("");
+    const models = n.models.slice(0, 8).map((m) => `<span class="chip">${esc(m)}</span>`).join("");
+    const ceilingSel = n.status === "approved" ? `<select data-ceiling="${esc(n.id)}">${fleet.modes.map((m) =>
+      `<option ${m === (n.ceiling || "auto-edit") ? "selected" : ""}>${m}</option>`).join("")}</select>
+      ${n.effective_ceiling && n.effective_ceiling !== (n.ceiling || "auto-edit") ? `<div class="small muted">runner caps at ${esc(n.effective_ceiling)}</div>` : ""}` : "";
+    const act = n.id === "master" ? "" : n.status !== "approved"
+      ? `<button data-node-act="approve" data-node="${esc(n.id)}">Approve</button>`
+      : `<button data-node-act="drain" data-node="${esc(n.id)}">Drain</button>`;
+    return `<tr><td><b>${esc(n.name)}</b><div class="muted small">${esc(n.os)} · ${esc(n.ip)} · seen ${ago(n.last_seen)}</div>${inventory(n)}</td>
+      <td>${nodeState(n)}</td><td class="hide-sm">${agents}${extra}<div>${models}</div></td><td>${ceilingSel}</td><td>${act}</td></tr>`;
+  }).join("") || '<tr><td colspan="5" class="muted">No nodes yet. Run nodes/onboard.sh on a machine.</td></tr>';
 }
 
-function render() {
-  const byId = Object.fromEntries(state.nodes.map((n) => [n.id, n]));
-  const healthy = state.nodes.filter((n) => n.healthy).length;
-  $("sub").textContent = `${state.nodes.length} nodes · ${healthy} healthy · ${state.assignments.length} role assignments`;
-
-  $("nodes").innerHTML = state.nodes.map((n) => `<tr>
-      <td><b>${esc(n.name)}</b><div class="muted">${esc(n.os)} · ${esc(n.ip)}</div>${inventory(n)}</td>
-      <td>${nodeState(n)}</td>
-      <td>${esc(n.engine || "—")}${n.port ? `<div class="muted">:${n.port}</div>` : ""}</td>
-      <td>${n.models.map((m) => `<span class="chip">${esc(m)}</span>`).join("") || '<span class="muted">none found</span>'}</td>
-      <td class="muted">${ago(n.last_seen)}</td>
-      <td>${n.status !== "approved"
-          ? `<button data-act="approve" data-node="${esc(n.id)}">Approve</button>`
-          : `<button data-act="drain" data-node="${esc(n.id)}">Drain</button>`}</td>
-    </tr>`).join("") || '<tr><td colspan="6" class="muted">No nodes yet. Run a join script on a machine tagged tag:llm-node.</td></tr>';
-
-  $("roles").innerHTML = state.assignments.map((a) => {
+function renderRoles() {
+  const byId = Object.fromEntries(fleet.nodes.map((n) => [n.id, n]));
+  $("roles").innerHTML = fleet.assignments.map((a) => {
     const live = byId[a.node_id]?.healthy && byId[a.node_id].models.includes(a.model);
     return `<tr><td><b>${esc(a.role)}</b></td><td>${esc(a.node)}</td><td><span class="chip">${esc(a.model)}</span></td>
       <td>${live ? '<span class="badge ok">live</span>' : '<span class="badge bad">not routed</span>'}</td>
-      <td><button data-act="unassign" data-role="${esc(a.role)}" data-node="${esc(a.node_id)}" data-model="${esc(a.model)}">Remove</button></td></tr>`;
+      <td><button data-unassign="1" data-role="${esc(a.role)}" data-node="${esc(a.node_id)}" data-model="${esc(a.model)}">Remove</button></td></tr>`;
   }).join("") || '<tr><td colspan="5" class="muted">No roles assigned.</td></tr>';
-
   const sel = $("node").value;
-  const approved = state.nodes.filter((n) => n.status === "approved");
-  $("node").innerHTML = approved.map((n) => `<option value="${esc(n.id)}" ${n.id === sel ? "selected" : ""}>${esc(n.name)}</option>`).join("");
+  $("node").innerHTML = fleet.nodes.filter((n) => n.status === "approved" && n.id !== "master")
+    .map((n) => `<option value="${esc(n.id)}" ${n.id === sel ? "selected" : ""}>${esc(n.name)}</option>`).join("");
   fillModels();
 }
 
 function fillModels() {
-  const n = state.nodes.find((x) => x.id === $("node").value);
+  const n = fleet.nodes.find((x) => x.id === $("node").value);
   const sel = $("model").value;
   $("model").innerHTML = (n?.models || []).map((m) => `<option ${m === sel ? "selected" : ""}>${esc(m)}</option>`).join("");
 }
 
-async function load() { state = await api("/api/fleet"); render(); }
+async function renderUsage() {
+  const rows = await api("/api/usage");
+  $("usage").innerHTML = rows.map((r) => `<tr><td>${esc(nodeName(r.node_id))}</td><td>${esc(r.agent)}</td><td>${r.tasks}</td>
+    <td>${r.running}</td><td>${r.failed ? `<span class="bad">${r.failed}</span>` : 0}</td><td>${dur(r.seconds)}</td></tr>`).join("")
+    || '<tr><td colspan="6" class="muted">No tasks today.</td></tr>';
+}
 
+// ---------- loading ----------
+async function load() {
+  [fleet, tasks] = await Promise.all([api("/api/fleet"), api("/api/tasks?limit=300")]);
+  const working = tasks.filter((t) => t.state === "working").length;
+  const nodesUp = fleet.nodes.filter((n) => n.runner_ok || n.healthy).length;
+  $("sub").innerHTML = `<span class="dot ${live ? "live" : ""}" id="live"></span>${fleet.nodes.length} nodes · ${nodesUp} up · ${working} tasks working`;
+  renderInbox(); renderTasks(); renderNodes(); renderRoles(); renderUsage();
+  if (openTask && $("detail").open) showTask(openTask, true);
+}
+
+let live = false, reloadTimer = null;
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { live = true; $("live")?.classList.add("live"); };
+  es.onmessage = () => { clearTimeout(reloadTimer); reloadTimer = setTimeout(load, 250); };
+  es.onerror = () => { live = false; $("live")?.classList.remove("live"); };
+}
+
+// ---------- actions ----------
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-act]");
-  if (!b) return;
-  const { act, node, role, model } = b.dataset;
-  b.disabled = true;
+  const el = e.target.closest("[data-act],[data-open],[data-tab],[data-node-act],[data-unassign],[data-diff]");
+  if (!el) return;
+  if (el.dataset.tab) { tab = el.dataset.tab; return renderTasks(); }
+  if (el.dataset.open && !e.target.closest("button[data-act]")) return showTask(el.dataset.open);
+  el.disabled = true;
   try {
-    state = act === "unassign"
-      ? await api("/api/roles", "DELETE", { role, node, model })
-      : await api(`/api/nodes/${encodeURIComponent(node)}/${act}`, "POST");
-    render();
-  } finally { b.disabled = false; }
+    if (el.dataset.act) {
+      if (el.dataset.act === "cleanup" && !confirm("Remove this task's worktree? Its branch is kept.")) return;
+      await api(`/api/tasks/${el.dataset.id}/${el.dataset.act}`, "POST");
+      if ($("detail").open) await showTask(el.dataset.id, true);
+    } else if (el.dataset.nodeAct) {
+      await api(`/api/nodes/${encodeURIComponent(el.dataset.node)}/${el.dataset.nodeAct}`, "POST");
+    } else if (el.dataset.unassign) {
+      await api("/api/roles", "DELETE", { role: el.dataset.role, node: el.dataset.node, model: el.dataset.model });
+    } else if (el.dataset.diff) {
+      const d = await api(`/api/tasks/${el.dataset.diff}/diff`);
+      $("d-diff").innerHTML = `<b>Diff</b><pre>${esc(d.stat)}\n\n${esc(d.diff)}</pre>`;
+    }
+    await load();
+  } finally { el.disabled = false; }
 });
+
+document.addEventListener("change", async (e) => {
+  if (e.target.dataset.ceiling) {
+    await api(`/api/nodes/${encodeURIComponent(e.target.dataset.ceiling)}/ceiling`, "POST", { mode: e.target.value });
+    await load();
+  }
+});
+
+document.addEventListener("submit", async (e) => {
+  if (e.target.id !== "d-msg") return;
+  e.preventDefault();
+  await api(`/api/tasks/${openTask}/message`, "POST", { text: $("d-text").value });
+  await showTask(openTask, true); await load();
+});
+
 $("node").addEventListener("change", fillModels);
 $("assign").addEventListener("submit", async (e) => {
   e.preventDefault();
-  state = await api("/api/roles", "POST", { role: $("role").value, node: $("node").value, model: $("model").value });
-  render();
+  fleet = await api("/api/roles", "POST", { role: $("role").value, node: $("node").value, model: $("model").value });
+  await load();
 });
-$("refresh").addEventListener("click", async () => { state = await api("/api/refresh", "POST"); render(); });
+$("refresh").addEventListener("click", async () => { await api("/api/refresh", "POST"); await load(); });
+$("d-close").addEventListener("click", () => { $("detail").close(); openTask = null; });
+$("detail").addEventListener("close", () => { openTask = null; });
 
-load(); setInterval(load, 10000);
+$("new").addEventListener("click", () => {
+  $("c-mode").innerHTML = fleet.modes.map((m) => `<option ${m === "auto-edit" ? "selected" : ""}>${m}</option>`).join("");
+  $("c-node").innerHTML = '<option value="">auto</option>' + fleet.nodes.filter((n) => n.runner_ok && n.status === "approved")
+    .map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`).join("");
+  $("create").showModal();
+});
+$("c-agent").addEventListener("change", () => { $("c-model").style.display = $("c-agent").value === "ollama" ? "" : "none"; });
+$("c-close").addEventListener("click", () => $("create").close());
+$("c-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = { agent: $("c-agent").value, mode: $("c-mode").value, prompt: $("c-prompt").value };
+  for (const [k, id] of [["node", "c-node"], ["repo", "c-repo"], ["gate", "c-gate"], ["model", "c-model"]])
+    if ($(id).value) body[k] = $(id).value;
+  const t = await api("/api/tasks", "POST", body);
+  $("create").close(); $("c-prompt").value = ""; tab = "all";
+  await load(); showTask(t.id);
+});
+
+load(); connect(); setInterval(load, 30000);
 </script>
 </body>
 </html>

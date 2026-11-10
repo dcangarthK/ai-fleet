@@ -140,10 +140,102 @@ def unassign_role(role: str, node: str, model: str) -> str:
 @mcp.tool()
 def drain_node(node: str) -> str:
     """Take a node out of routing (keeps its assignments for later). Only when the user asked."""
-    return _controller("POST", f"/api/nodes/{quote(node, safe='')}/drain")
+    return _controller("POST", f"/api/nodes/{_q(node)}/drain")
 
 
-# Approving new nodes is deliberately not exposed: a human approves joins in the dashboard.
+# Approving new nodes, approving tasks and raising ceilings are deliberately not exposed:
+# a human does those in the dashboard.
+
+
+# ---------- agent tasks ----------
+
+def _q(value: str) -> str:
+    return quote(value, safe="")
+
+
+@mcp.tool()
+def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: str = "auto-edit",
+               gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True) -> str:
+    """Delegate work to an agent on the fleet and return immediately with the task.
+    agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
+    repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
+    mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
+          | 'full' (user approval required). gate: shell command that must pass, e.g. 'pytest -q'.
+    node: optional; otherwise the least-busy eligible node is picked. parent_id links sub-tasks.
+    Then use wait_tasks; don't poll."""
+    body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
+    for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node, "parent_id": parent_id}.items():
+        if v:
+            body[k] = v
+    return _controller("POST", "/api/tasks", body)
+
+
+@mcp.tool()
+def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False) -> str:
+    """Block until the tasks settle (review/failed/blocked/interrupted/done/cancelled), or until any one does
+    with any_of=True. Returns each task's state and final result text. Max timeout 1800s."""
+    params = f"ids={','.join(_q(i) for i in ids)}&timeout={timeout_seconds}&mode={'any' if any_of else 'all'}"
+    try:
+        r = httpx.get(f"{CONTROLLER}/api/tasks/wait?{params}", timeout=timeout_seconds + 30)
+    except httpx.HTTPError as e:
+        return f"controller unreachable ({e.__class__.__name__})"
+    return json.dumps(r.json(), indent=2)
+
+
+@mcp.tool()
+def list_tasks(state: str = "", parent_id: str = "") -> str:
+    """List tasks, newest first. state: comma-separated filter, e.g. 'working,blocked'."""
+    params = "&".join(f"{k}={_q(v)}" for k, v in {"state": state, "parent_id": parent_id}.items() if v)
+    return _controller("GET", f"/api/tasks?{params}")
+
+
+@mcp.tool()
+def task_status(task_id: str) -> str:
+    """Full task record: state, node, branch/worktree, result, denied tools, gate result."""
+    return _controller("GET", f"/api/tasks/{_q(task_id)}")
+
+
+@mcp.tool()
+def task_log(task_id: str, offset: int = 0) -> str:
+    """Readable activity log (assistant text, tool calls). Pass the returned offset to read on."""
+    return _controller("GET", f"/api/tasks/{_q(task_id)}/log?offset={offset}")
+
+
+@mcp.tool()
+def task_diff(task_id: str) -> str:
+    """The task's changes in its worktree (diffstat + diff, untracked files included). Review before accepting."""
+    return _controller("GET", f"/api/tasks/{_q(task_id)}/diff")
+
+
+@mcp.tool()
+def message_task(task_id: str, text: str) -> str:
+    """Send follow-up instructions to a finished, failed, blocked or interrupted task; the agent resumes
+    its same session (keeps context)."""
+    return _controller("POST", f"/api/tasks/{_q(task_id)}/message", {"text": text})
+
+
+@mcp.tool()
+def cancel_task(task_id: str) -> str:
+    """Stop a task (kills the agent process)."""
+    return _controller("POST", f"/api/tasks/{_q(task_id)}/cancel")
+
+
+@mcp.tool()
+def complete_task(task_id: str) -> str:
+    """Mark a reviewed task as done (accepted)."""
+    return _controller("POST", f"/api/tasks/{_q(task_id)}/complete")
+
+
+@mcp.tool()
+def cleanup_task(task_id: str) -> str:
+    """Remove a settled task's worktree (its branch is kept for merging)."""
+    return _controller("POST", f"/api/tasks/{_q(task_id)}/cleanup")
+
+
+@mcp.tool()
+def fleet_usage(days: int = 1) -> str:
+    """Tasks, failures and agent time per node and agent over the last N days."""
+    return _controller("GET", f"/api/usage?days={days}")
 
 
 if __name__ == "__main__":

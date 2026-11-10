@@ -44,7 +44,30 @@ EOF
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
-# 4. Claude Code: Codex as a sub-agent, fleet bridge for local models + fleet management.
+# 4. The master's own agent runner (localhost only): lets tasks use this Mac's Claude Code, Codex, Ollama.
+mkdir -p "$HOME/.ai-fleet" && chmod 700 "$HOME/.ai-fleet"
+[ -f "$HOME/.ai-fleet/runner.json" ] || echo '{"max_mode": "auto-edit"}' > "$HOME/.ai-fleet/runner.json"
+RPLIST="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
+cat > "$RPLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>local.ai-fleet.runner</string>
+  <key>ProgramArguments</key><array><string>$(command -v python3)</string><string>$HERE/../nodes/runner.py</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>RUNNER_BIND</key><string>127.0.0.1:11436</string>
+    <key>FLEET_DIR</key><string>$HOME/.ai-fleet</string>
+    <key>OLLAMA_URL</key><string>http://127.0.0.1:11434</string>
+    <key>PATH</key><string>$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/ai-fleet-runner.log</string>
+</dict></plist>
+EOF
+launchctl bootout "gui/$(id -u)" "$RPLIST" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$RPLIST"
+
+# 5. Claude Code: Codex as a sub-agent, fleet bridge for local models + fleet management + tasks.
 claude mcp remove --scope user codex >/dev/null 2>&1 || true
 claude mcp remove --scope user local-llm >/dev/null 2>&1 || true
 claude mcp add --scope user codex -- "$CODEX" mcp-server

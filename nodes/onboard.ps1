@@ -326,8 +326,14 @@ def find_agents(ollama_url):
     codex = shutil.which("codex", path=search)
     if not codex and os.path.isfile(codex_bundled) and os.access(codex_bundled, os.X_OK):
         codex = codex_bundled
+    claude = shutil.which("claude", path=search)
+    if not claude:
+        # Claude Code bundled with the Claude desktop app (newest install first).
+        bundled = glob.glob(str(Path.home() / "Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"))
+        bundled = [p for p in bundled if os.access(p, os.X_OK)]
+        claude = max(bundled, key=os.path.getmtime) if bundled else None
     agents = {
-        "claude": shutil.which("claude", path=search),
+        "claude": claude,
         "codex": codex,
         "ollama": None,
     }
@@ -820,10 +826,13 @@ class JobManager:
                 if item.get("type") == "agent_message" and item.get("text"):
                     lines.append(str(item["text"]))
                 elif item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):
-                    label = item.get("command") or item.get("name") or item.get("server") or item.get("type")
-                    lines.append("tool: " + str(label))
-                    if item.get("aggregated_output"):
-                        lines.append(str(item["aggregated_output"]))
+                    # Codex reports each tool call when it starts and again when it completes:
+                    # show the call once, then its output.
+                    if event_type == "item.started":
+                        label = item.get("command") or item.get("name") or item.get("server") or item.get("type")
+                        lines.append("tool: " + str(label))
+                    elif event_type == "item.completed" and item.get("aggregated_output"):
+                        lines.append(str(item["aggregated_output"]).rstrip()[-4000:])
             elif event_type == "error":
                 lines.append("error: " + str(event.get("message") or event))
             elif event_type == "ollama.result":

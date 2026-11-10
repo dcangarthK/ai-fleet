@@ -52,9 +52,14 @@ def _swap() -> None:
     old.set()
 
 
-async def changed(timeout: float) -> None:
+def snapshot() -> asyncio.Event:
+    """Take this BEFORE reading state; anything emitted afterwards sets it, so no wakeup is lost."""
+    return _changed
+
+
+async def changed(since: asyncio.Event, timeout: float) -> None:
     try:
-        await asyncio.wait_for(_changed.wait(), timeout)
+        await asyncio.wait_for(since.wait(), timeout)
     except asyncio.TimeoutError:
         pass
 

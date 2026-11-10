@@ -17,7 +17,7 @@ FAKE_TS.write_text("#!/bin/sh\necho '{\"Peer\":{}}'\n")
 FAKE_TS.chmod(0o755)
 os.environ.update({"FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_TS),
                    "FLEET_POLL_SECONDS": "0.3", "FLEET_TASK_POLL_SECONDS": "0.2",
-                   "FLEET_PUBLIC_HOST": "master.tail.ts.net", "LITELLM_MASTER_KEY": ""})
+                   "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": ""})
 
 
 class FakeRunner(BaseHTTPRequestHandler):
@@ -38,7 +38,7 @@ class FakeRunner(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self._send(200, {"ok": True, "version": "1", "max_mode": FakeRunner.max_mode, "running": 0,
-                                    "agents": {"claude": "/x/claude", "codex": "/x/codex", "ollama": "http://o"}})
+                                    "agents": {"claude": "/x/claude", "codex": None, "ollama": "http://o"}})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
             return self._send(404, {"detail": "no job"})
@@ -52,6 +52,8 @@ class FakeRunner(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         FakeRunner.calls.append((self.path, body))
         if self.path == "/jobs":
+            if body["id"] in self.jobs:
+                return self._send(409, {"detail": "duplicate job id"})
             job = {"id": body["id"], "agent": body["agent"], "mode": body["mode"], "state": "running",
                    "exit_code": None, "session_id": "s-1", "cwd": "/w", "worktree": "/w", "branch": f"fleet/{body['id']}",
                    "result": None, "denials": [], "gate": None, "runs": 1}
@@ -126,12 +128,12 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(r["tasks"][0]["state"], "review")
         self.assertEqual(r["tasks"][0]["result"], "done!")
         types = [e["type"] for e in self.c.get("/api/events/list").json() if e["task_id"] == t["id"]]
-        self.assertEqual(types, ["task.queued", "task.working", "task.review"])
+        self.assertEqual(types, ["task.queued", "task.starting", "task.working", "task.review"])
         self.assertEqual(self.c.get(f"/api/tasks/{t['id']}/diff").json()["diff"], "+hello")
         self.assertEqual(self.c.post(f"/api/tasks/{t['id']}/complete", headers=W).json()["state"], "done")
 
     def test_gate_failure_fails_task(self):
-        t = self.task()
+        t = self.task(gate="pytest")
         FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, gate={"state": "failed", "exit_code": 1})
         wait_for(lambda: self.state(t["id"]) == "failed")
 
@@ -191,8 +193,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
 
     def test_remote_tokens_and_scopes(self):
-        remote = TestClient(controller.app, base_url="https://master.tail.ts.net")
+        remote = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
         self.assertEqual(remote.get("/api/tasks").status_code, 403)
+        # Claiming to be localhost on the public port doesn't skip the token.
+        spoof = TestClient(controller.app, base_url="http://localhost:8701")
+        self.assertEqual(spoof.get("/api/tasks").status_code, 403)
         self.assertEqual(TestClient(controller.app, base_url="http://evil.example").get("/api/tasks").status_code, 403)
         view, op, admin = (auth.create_token(s, s) for s in ("view", "operate", "admin"))
         h = lambda tok: {"Authorization": f"Bearer {tok}", **W}  # noqa: E731
@@ -219,6 +224,45 @@ class ControllerTests(unittest.TestCase):
             wait_for(lambda: out.exists() and t["id"] in out.read_text())
         finally:
             events.PLUGINS.pop()
+
+    def test_validation_and_eligibility(self):
+        bad = lambda body: self.c.post("/api/tasks", json=body, headers=W)  # noqa: E731
+        self.assertEqual(bad({"agent": "claude", "prompt": "   "}).status_code, 422)
+        r = bad({"agent": "claude", "prompt": "x", "mode": "read-only", "gate": "true"})
+        self.assertEqual(r.status_code, 400)
+        r = bad({"agent": "codex", "prompt": "x"})  # runner reports codex: null
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("no codex", r.text)
+        r = bad({"agent": "ollama", "model": "nope:1b", "prompt": "x"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_requested_gate_must_pass(self):
+        t = self.task(gate="pytest")
+        FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, gate={"state": "skipped"})
+        wait_for(lambda: self.state(t["id"]) == "failed")
+
+    def test_wait_all_times_out_if_some_still_active(self):
+        a, b = self.task(), self.task()
+        FakeRunner.jobs[a["id"]].update(state="exited", exit_code=0)
+        wait_for(lambda: self.state(a["id"]) == "review")
+        r = self.c.get(f"/api/tasks/wait?ids={a['id']},{b['id']}&timeout=1").json()
+        self.assertTrue(r["timed_out"])
+        r = self.c.get(f"/api/tasks/wait?ids={a['id']},{b['id']}&timeout=1&mode=any").json()
+        self.assertFalse(r["timed_out"])
+
+    def test_start_adopts_existing_runner_job(self):
+        import tasks as T
+        t = self.task(mode="supervised")
+        # Simulate a crash after the runner accepted the job but before the controller recorded it.
+        FakeRunner.jobs[t["id"]] = {"id": t["id"], "state": "running", "exit_code": None, "session_id": "s-9",
+                                    "branch": "b", "cwd": "/w", "denials": [], "gate": None, "result": None}
+        T.update(t["id"], state="starting")
+        wait_for(lambda: self.state(t["id"]) == "working")
+        self.assertEqual(self.c.get(f"/api/tasks/{t['id']}").json()["session_id"], "s-9")
+
+    def test_complete_cant_override_running_task(self):
+        t = self.task()
+        self.assertEqual(self.c.post(f"/api/tasks/{t['id']}/complete", headers=W).status_code, 409)
 
     def test_usage(self):
         self.task()

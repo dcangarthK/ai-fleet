@@ -3,19 +3,24 @@
 A task is one piece of delegated work for an agent (claude, codex) or a model (ollama) on some node.
 The controller decides where it runs and what state it is in; the node's runner owns the process.
 See docs/SPEC-agent-tasks.md for the lifecycle and permission modes.
+
+State changes are compare-and-swap (they only apply if the task is still in the expected state) and
+everything that also touches a runner holds the task's lock, so approvals, messages, cancels and the
+poller can't overwrite each other.
 """
 import asyncio
 import json
 import os
 import secrets
 import time
+from collections import defaultdict
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from events import changed, emit, events_after, last_event_id
+from events import changed, emit, events_after, last_event_id, snapshot
 from store import db
 
 RUNNER_PORT = 11436
@@ -28,10 +33,12 @@ MODES = ["read-only", "supervised", "auto-edit", "full"]
 DEFAULT_MODE = "auto-edit"
 NEEDS_APPROVAL = {"supervised", "full"}
 AGENTS = {"claude", "codex", "ollama"}
-ACTIVE = {"queued", "awaiting_approval", "working"}
+ACTIVE = {"queued", "awaiting_approval", "starting", "working"}
 SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled"}
+RESUMABLE = {"review", "failed", "blocked", "interrupted"}
 
 router = APIRouter()
+_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def rank(mode: str) -> int:
@@ -44,13 +51,20 @@ def runner_url(node: dict) -> str:
     return LOCAL_RUNNER if node["id"] == MASTER_ID else f"http://{node['ip']}:{RUNNER_PORT}"
 
 
+class RunnerError(HTTPException):
+    pass
+
+
 async def runner_call(node: dict, method: str, path: str, body: dict | None = None, timeout: float = 20) -> dict:
     headers = {"X-Runner-Token": RUNNER_TOKEN} if RUNNER_TOKEN else {}
-    async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
-        r = await client.request(method, runner_url(node) + path, json=body, headers=headers)
+    try:
+        async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
+            r = await client.request(method, runner_url(node) + path, json=body, headers=headers)
+    except httpx.HTTPError as e:
+        raise RunnerError(502, f"runner unreachable: {e.__class__.__name__}")
     if r.is_error:
         detail = r.json().get("detail", r.text) if r.content else r.reason_phrase
-        raise HTTPException(502 if r.status_code >= 500 else r.status_code, f"runner: {detail}")
+        raise RunnerError(502 if r.status_code >= 500 else r.status_code, f"runner: {detail}")
     return r.json()
 
 
@@ -70,7 +84,8 @@ async def runner_health(client: httpx.AsyncClient, base: str) -> dict | None:
 def node_rows() -> list[dict]:
     with db() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM nodes")]
-        running = dict(c.execute("SELECT node_id, COUNT(*) FROM tasks WHERE state='working' GROUP BY node_id").fetchall())
+        running = dict(c.execute(
+            "SELECT node_id, COUNT(*) FROM tasks WHERE state IN ('starting','working') GROUP BY node_id").fetchall())
     for n in rows:
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
         n["models"] = json.loads(n["models"] or "[]")
@@ -92,9 +107,9 @@ def eligible(node: dict, agent: str, model: str | None, mode: str) -> str | None
         return "not approved"
     if not node["runner"] or (node.get("runner_fails") or 0) >= 3:
         return "runner offline"
-    if agent not in (node["runner"].get("agents") or {}):
+    if not (node["runner"].get("agents") or {}).get(agent):
         return f"no {agent} on this node"
-    if agent == "ollama" and model and node["models"] and model not in node["models"]:
+    if agent == "ollama" and model not in node["models"]:
         return f"model {model} not on this node"
     if rank(mode) > rank(ceiling(node)):
         return f"mode {mode} is above this node's ceiling ({ceiling(node)})"
@@ -108,9 +123,11 @@ def ram(node: dict) -> int:
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None) -> dict:
     nodes = node_rows()
     if wanted:
-        match = [n for n in nodes if wanted in (n["id"], n["name"])]
+        match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
         if not match:
             raise HTTPException(404, f"unknown node {wanted}")
+        if len(match) > 1:
+            raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
         why = eligible(match[0], agent, model, mode)
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
@@ -154,26 +171,65 @@ def update(task_id: str, **fields) -> None:
         c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
 
 
-def set_state(task: dict, state: str, **fields) -> None:
-    if state in SETTLED and task["state"] in ACTIVE:
-        fields.setdefault("ended_at", time.time())
-    update(task["id"], state=state, **fields)
-    if state != task["state"]:
+def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
+    """Move the task to `state` only if it is still in one of `expected`. Returns whether it moved."""
+    now = time.time()
+    if state == "working":
+        fields.setdefault("run_started_at", now)
+    elif task["state"] == "working" and state in SETTLED:
+        # Agent time counts only while a run is going, not while a human reviews.
+        fields["agent_seconds"] = (task.get("agent_seconds") or 0) + max(0, now - (task.get("run_started_at") or now))
+        fields.setdefault("ended_at", now)
+    fields["updated_at"] = now
+    cols = ", ".join(f"{k}=?" for k in fields)
+    marks = ",".join("?" * len(expected))
+    with db() as c:
+        moved = c.execute(f"UPDATE tasks SET state=?, {cols} WHERE id=? AND state IN ({marks})",
+                          (state, *fields.values(), task["id"], *expected)).rowcount == 1
+    if moved and state != task["state"]:
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
+    return moved
+
+
+def job_fields(job: dict) -> dict:
+    return {"session_id": job.get("session_id"), "result": job.get("result"),
+            "denials": json.dumps(job.get("denials") or []), "exit_code": job.get("exit_code"),
+            "gate_result": json.dumps(job["gate"]) if job.get("gate") else None,
+            "branch": job.get("branch"), "cwd": job.get("cwd"), "error": None}
 
 
 async def start(task: dict) -> None:
+    """Start (or adopt) the runner job. Caller holds the task lock and has moved it to 'starting'."""
     node = node_of(task)
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
             "gate": task["gate"], "allowed_tools": [], "resume_session": None}
     try:
         job = await runner_call(node, "POST", "/jobs", body)
-    except (HTTPException, httpx.HTTPError) as e:
-        set_state(task, "failed", error=f"could not start: {getattr(e, 'detail', e)}")
-        return
-    set_state(task, "working", started_at=time.time(), runs=1, branch=job.get("branch"), cwd=job.get("cwd"))
+    except RunnerError as e:
+        if e.status_code == 409:  # the runner already has it (e.g. we crashed mid-start): adopt it
+            job = await runner_call(node, "GET", f"/jobs/{task['id']}")
+        elif e.status_code == 502:
+            update(task["id"], error=str(e.detail))  # stays 'starting'; recover() retries it
+            return
+        else:
+            transition(task, {"starting"}, "failed", error=f"could not start: {e.detail}")
+            return
+    transition(task, {"starting"}, "working", started_at=time.time(), runs=max(task["runs"] or 0, 1),
+               **job_fields(job))
+
+
+async def recover() -> None:
+    """After a controller restart: finish starting tasks that were mid-start or never started."""
+    with db() as c:
+        pending = [task_view(r) for r in c.execute("SELECT * FROM tasks WHERE state IN ('queued','starting')")]
+    for task in pending:
+        async with _locks[task["id"]]:
+            task = get_task(task["id"])
+            if task["state"] == "queued" and not transition(task, {"queued"}, "starting"):
+                continue
+            await start(get_task(task["id"]))
 
 
 # ---------- polling runners ----------
@@ -191,38 +247,43 @@ def outcome(task: dict, job: dict) -> str:
         return "blocked"
     if job.get("exit_code") != 0:
         return "failed"
-    gate = job.get("gate") or {}
-    if gate.get("state") in ("pending", "running"):
+    if not task["gate"]:
+        return "review"
+    gate = (job.get("gate") or {}).get("state")
+    if gate in ("pending", "running"):
         return "working"
-    return "failed" if gate.get("state") == "failed" else "review"
+    return "review" if gate == "passed" else "failed"  # a requested gate must actually pass
 
 
-async def poll_task(task: dict) -> None:
-    node = node_of(task)
-    try:
-        job = await runner_call(node, "GET", f"/jobs/{task['id']}", timeout=5)
-    except (HTTPException, httpx.HTTPError) as e:
-        if not task["error"]:
-            update(task["id"], error=f"runner unreachable: {getattr(e, 'detail', e)}")
-            emit(task["id"], "task.unreachable", {"title": task["title"], "node": task["node_id"]})
-        return
-    fields = {"session_id": job.get("session_id"), "result": job.get("result"),
-              "denials": json.dumps(job.get("denials") or []), "exit_code": job.get("exit_code"),
-              "gate_result": json.dumps(job["gate"]) if job.get("gate") else None,
-              "branch": job.get("branch"), "cwd": job.get("cwd"), "error": None}
-    new = outcome(task, job)
-    if new == "working":
-        update(task["id"], **fields)
-    else:
-        set_state(task, new, **fields)
+async def poll_task(task_id: str) -> None:
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] != "working":
+            return
+        try:
+            job = await runner_call(node_of(task), "GET", f"/jobs/{task_id}", timeout=5)
+        except HTTPException as e:
+            if not task["error"]:
+                update(task_id, error=str(e.detail))
+                emit(task_id, "task.unreachable", {"title": task["title"], "node": task["node_id"]})
+            return
+        new = outcome(task, job)
+        if new == "working":
+            update(task_id, **job_fields(job))
+        else:
+            transition(task, {"working"}, new, **job_fields(job))
 
 
 async def poll_loop() -> None:
+    await recover()
     while True:
         try:
             with db() as c:
-                active = [task_view(r) for r in c.execute("SELECT * FROM tasks WHERE state='working'")]
-            await asyncio.gather(*(poll_task(t) for t in active), return_exceptions=True)
+                ids = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state='working'")]
+            await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
+            with db() as c:
+                if c.execute("SELECT 1 FROM tasks WHERE state='starting' LIMIT 1").fetchone():
+                    await recover()
         except Exception as e:  # keep polling whatever happens
             print(f"task poll failed: {e!r}")
         await asyncio.sleep(POLL_SECONDS)
@@ -241,6 +302,13 @@ class TaskIn(BaseModel):
     gate: str | None = None
     node: str | None = None
     parent_id: str | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("prompt is empty")
+        return v
 
 
 class MessageIn(BaseModel):
@@ -288,7 +356,10 @@ async def create_task(t: TaskIn) -> dict:
                    t.gate, node["id"], state, now, now))
     emit(task_id, f"task.{state}", {"title": title, "node": node["id"], "agent": t.agent, "mode": t.mode})
     if state == "queued":
-        await start(get_task(task_id))
+        async with _locks[task_id]:
+            task = get_task(task_id)
+            if transition(task, {"queued"}, "starting"):
+                await start(get_task(task_id))
     return get_task(task_id)
 
 
@@ -300,13 +371,15 @@ async def wait(ids: str, timeout: float = 300, mode: str = "all") -> dict:
         get_task(i)
     deadline = time.monotonic() + min(max(timeout, 1), 1800)
     while True:
+        since = snapshot()  # before reading state, so an event in between still wakes us
         tasks = [get_task(i) for i in wanted]
-        settled = [t for t in tasks if t["state"] not in ACTIVE]
-        if (mode == "any" and settled) or len(settled) == len(tasks) or time.monotonic() >= deadline:
-            return {"timed_out": time.monotonic() >= deadline and not settled,
+        n_settled = sum(t["state"] not in ACTIVE for t in tasks)
+        done = n_settled > 0 if mode == "any" else n_settled == len(tasks)
+        if done or time.monotonic() >= deadline:
+            return {"timed_out": not done,
                     "tasks": [{k: t[k] for k in ("id", "title", "state", "agent", "node_id", "exit_code", "error")}
                               | {"result": (t["result"] or "")[:2000]} for t in tasks]}
-        await changed(min(30, deadline - time.monotonic()))
+        await changed(since, min(30, deadline - time.monotonic()))
 
 
 @router.get("/api/tasks/{task_id}")
@@ -317,6 +390,8 @@ def read_task(task_id: str) -> dict:
 @router.get("/api/tasks/{task_id}/log")
 async def task_log(task_id: str, offset: int = 0) -> dict:
     task = get_task(task_id)
+    if task["state"] in ("queued", "awaiting_approval"):
+        return {"offset": 0, "text": ""}
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/log?offset={offset}")
 
 
@@ -326,77 +401,83 @@ async def task_diff(task_id: str) -> dict:
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/diff")
 
 
-@router.post("/api/tasks/{task_id}/message")
-async def message(task_id: str, m: MessageIn) -> dict:
-    task = get_task(task_id)
-    if task["state"] not in ("review", "failed", "blocked", "interrupted"):
-        raise HTTPException(409, f"can't message a task that is {task['state']}")
-    await resume(task, m.text, [])
-    return get_task(task_id)
-
-
 async def resume(task: dict, text: str, allowed_tools: list[str]) -> None:
+    """Caller holds the task lock."""
     await runner_call(node_of(task), "POST", f"/jobs/{task['id']}/message",
                       {"text": text, "allowed_tools": allowed_tools, "mode": None})
-    set_state(task, "working", runs=(task["runs"] or 0) + 1, ended_at=None, denials="[]")
+    transition(task, RESUMABLE, "working", runs=(task["runs"] or 0) + 1, ended_at=None, denials="[]", error=None)
+
+
+@router.post("/api/tasks/{task_id}/message")
+async def message(task_id: str, m: MessageIn) -> dict:
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] not in RESUMABLE:
+            raise HTTPException(409, f"can't message a task that is {task['state']}")
+        await resume(task, m.text, [])
+    return get_task(task_id)
 
 
 @router.post("/api/tasks/{task_id}/approve")
 async def approve(task_id: str) -> dict:
     """User-only (dashboard): start an awaiting task, or grant a blocked task the tools it was denied."""
-    task = get_task(task_id)
-    if task["state"] == "awaiting_approval":
-        emit(task_id, "task.approved", {"title": task["title"]})
-        await start(task)
-    elif task["state"] == "blocked":
-        tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None})
-        emit(task_id, "task.approved", {"title": task["title"], "tools": tools})
-        await resume(task, "The user approved the tools you were denied: " + ", ".join(tools)
-                     + ". Continue the task.", tools)
-    else:
-        raise HTTPException(409, f"nothing to approve: task is {task['state']}")
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] == "awaiting_approval":
+            if transition(task, {"awaiting_approval"}, "starting"):
+                emit(task_id, "task.approved", {"title": task["title"]})
+                await start(get_task(task_id))
+        elif task["state"] == "blocked":
+            tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None, ""})
+            emit(task_id, "task.approved", {"title": task["title"], "tools": tools})
+            await resume(task, "The user approved the tools you were denied: " + ", ".join(tools)
+                         + ". Continue the task.", tools)
+        else:
+            raise HTTPException(409, f"nothing to approve: task is {task['state']}")
     return get_task(task_id)
 
 
 @router.post("/api/tasks/{task_id}/reject")
 async def reject(task_id: str) -> dict:
-    task = get_task(task_id)
-    if task["state"] not in ("awaiting_approval", "blocked"):
-        raise HTTPException(409, f"nothing to reject: task is {task['state']}")
-    set_state(task, "cancelled", error="rejected by user")
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if not transition(task, {"awaiting_approval", "blocked"}, "cancelled", error="rejected by user"):
+            raise HTTPException(409, f"nothing to reject: task is {task['state']}")
     return get_task(task_id)
 
 
 @router.post("/api/tasks/{task_id}/cancel")
 async def cancel(task_id: str) -> dict:
-    task = get_task(task_id)
-    if task["state"] in ("done", "cancelled"):
-        return task
-    if task["state"] == "working":
-        try:
-            await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cancel")
-        except HTTPException as e:
-            if e.status_code != 404:
-                raise
-    set_state(task, "cancelled")
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] in ("done", "cancelled"):
+            return task
+        if task["state"] in ("starting", "working"):
+            try:
+                await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cancel")
+            except HTTPException as e:
+                if e.status_code != 404:
+                    raise
+        transition(task, ACTIVE | RESUMABLE, "cancelled")
     return get_task(task_id)
 
 
 @router.post("/api/tasks/{task_id}/complete")
-def complete(task_id: str) -> dict:
-    task = get_task(task_id)
-    if task["state"] not in ("review", "failed", "interrupted", "blocked"):
-        raise HTTPException(409, f"can't complete a task that is {task['state']}")
-    set_state(task, "done")
+async def complete(task_id: str) -> dict:
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if not transition(task, RESUMABLE, "done"):
+            raise HTTPException(409, f"can't complete a task that is {task['state']}")
     return get_task(task_id)
 
 
 @router.post("/api/tasks/{task_id}/cleanup")
 async def cleanup(task_id: str) -> dict:
-    task = get_task(task_id)
-    if task["state"] in ACTIVE:
-        raise HTTPException(409, "task is still active")
-    out = await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cleanup")
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] in ACTIVE:
+            raise HTTPException(409, "task is still active")
+        out = await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cleanup")
     emit(task_id, "task.cleaned_up", {"title": task["title"]})
     return out
 
@@ -420,15 +501,17 @@ def set_ceiling(node: str, m: ModeIn) -> dict:
 
 @router.get("/api/usage")
 def usage(days: int = 1) -> list[dict]:
-    """Tasks and agent time per node and agent, to spot overloaded machines and heavy subscriptions."""
-    since = time.time() - days * 86400
+    """Tasks and agent run time per node and agent (time waiting on humans isn't counted)."""
+    now = time.time()
     with db() as c:
         rows = c.execute("""SELECT node_id, agent, COUNT(*) AS tasks,
                                    SUM(state='working') AS running,
                                    SUM(state IN ('failed','interrupted')) AS failed,
-                                   CAST(SUM(COALESCE(ended_at, ?) - COALESCE(started_at, ?)) AS INTEGER) AS seconds
+                                   CAST(SUM(COALESCE(agent_seconds, 0)
+                                            + CASE WHEN state='working' THEN ? - COALESCE(run_started_at, ?) ELSE 0 END)
+                                        AS INTEGER) AS seconds
                             FROM tasks WHERE created_at >= ? GROUP BY node_id, agent ORDER BY tasks DESC""",
-                         (time.time(), time.time(), since)).fetchall()
+                         (now, now, now - days * 86400)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -441,10 +524,11 @@ async def event_stream(request: Request, after: int | None = None) -> StreamingR
         nonlocal cursor
         yield "retry: 3000\n\n"
         while not await request.is_disconnected():
+            since = snapshot()
             for e in events_after(cursor):
                 cursor = e["id"]
                 yield f"id: {e['id']}\ndata: {json.dumps(e)}\n\n"
-            await changed(15)
+            await changed(since, 15)
             yield ": keepalive\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

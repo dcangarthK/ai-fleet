@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     state TEXT, created_at REAL, updated_at REAL, started_at REAL, ended_at REAL,
     session_id TEXT, result TEXT, denials TEXT DEFAULT '[]', gate_result TEXT,
     exit_code INTEGER, branch TEXT, cwd TEXT, runs INTEGER DEFAULT 0, error TEXT,
-    pending_message TEXT);
+    pending_message TEXT, agent_seconds REAL DEFAULT 0, run_started_at REAL);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, type TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS tokens (
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 MIGRATIONS = {
     "nodes": {"inventory": "TEXT", "ceiling": "TEXT DEFAULT 'auto-edit'", "runner": "TEXT",
               "runner_fails": "INTEGER DEFAULT 0"},
+    "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL"},
 }
 
 

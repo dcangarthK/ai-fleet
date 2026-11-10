@@ -31,7 +31,11 @@ import time
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 resume = "--resume" in args or (name == "codex" and "resume" in args)
-prompt = args[-1] if args else ""
+prompt = sys.stdin.read()  # the runner sends prompts on stdin, never argv
+if "-" in args:
+    args.remove("-")
+if prompt and prompt in sys.argv:
+    sys.exit("prompt leaked into argv")
 session = "claude-session-1"
 if name == "claude" and "--resume" in args:
     session = args[args.index("--resume") + 1]
@@ -419,6 +423,20 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         branches = self.git("branch", "--list", "fleet/cancel-main").stdout
         self.assertIn("fleet/cancel-main", branches)
+
+    def test_05b_cleanup_keeps_uncommitted_work_and_gates_need_write_modes(self):
+        status, _ = self.create("keep-main", prompt="edit", repo=str(self.repo), worktree=True)
+        self.assertEqual(200, status)
+        self.wait_job("keep-main")
+        status, _ = self.request("POST", "/jobs/keep-main/cleanup", {})
+        self.assertEqual(200, status)
+        files = self.git("show", "--stat", "--format=%s", "fleet/keep-main").stdout
+        self.assertIn("fleet: work from task keep-main", files)
+        self.assertIn("untracked.txt", files)
+
+        status, body = self.create("gate-readonly", mode="read-only", gate="true")
+        self.assertEqual(400, status)
+        self.assertIn("gate", body["detail"])
 
     def test_06_detached_survives_restart_then_lost_is_detected(self):
         status, _ = self.create("restart-main", prompt="sleep")

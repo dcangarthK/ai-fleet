@@ -272,6 +272,8 @@ async def create_task(t: TaskIn) -> dict:
         raise HTTPException(400, f"mode must be one of {MODES}")
     if t.agent == "ollama" and not t.model:
         raise HTTPException(400, "ollama tasks need a model")
+    if t.gate and rank(t.mode) < rank("auto-edit"):
+        raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.parent_id:
         get_task(t.parent_id)
     node = pick_node(t.agent, t.model, t.mode, t.node)

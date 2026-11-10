@@ -5,6 +5,9 @@ CLI note: the installed Codex CLI (checked 2026-11-10) accepts ``-s`` on
 ``codex exec`` but not on ``codex exec resume``.  Resumes therefore use the
 equivalent ``-c sandbox_mode=...`` setting.  Claude was not installed on the
 development machine; its print/stream-json flags follow the runner spec.
+
+Prompts go to agents on stdin (a 0600 file), never argv: argv is visible to every local user
+via ps, and Claude's variadic --allowedTools would otherwise swallow a trailing prompt.
 """
 
 import datetime
@@ -81,6 +84,29 @@ def process_alive(pid):
         return False
 
 
+def boot_time():
+    """Seconds since the epoch when this machine booted, or None if unknown."""
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=3).stdout
+            return float(re.search(r"sec = (\d+)", out).group(1))
+        if sys.platform.startswith("linux"):
+            with open("/proc/stat", encoding="ascii") as handle:
+                for line in handle:
+                    if line.startswith("btime "):
+                        return float(line.split()[1])
+    except (OSError, AttributeError, ValueError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def started_epoch(job):
+    try:
+        return datetime.datetime.fromisoformat(job["started_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def agent_search_path():
     home = Path.home()
     dirs = [
@@ -149,7 +175,15 @@ class JobManager:
             if not isinstance(job, dict) or not JOB_ID.match(str(job.get("id", ""))):
                 continue
             self.jobs[job["id"]] = job
+        booted = boot_time()
         for job in list(self.jobs.values()):
+            # After a reboot the saved pid may belong to an unrelated process: the job is lost.
+            started = started_epoch(job)
+            if (job.get("state") == "running" and booted and started and started < booted
+                    and not (self._job_dir(job) / job.get("exit_file", "exit_code")).exists()):
+                job.update({"state": "lost", "ended_at": now()})
+                self._parse_events(job)
+                self._save(job)
             self.refresh(job)
             if job["state"] == "running":
                 self._start_monitor(job)
@@ -326,6 +360,9 @@ class JobManager:
             raise HttpError(400, "prompt is required")
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
+        if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
+            # The gate is a shell command outside the agent's sandbox; read-only modes must not run one.
+            raise HttpError(400, "a gate needs auto-edit or full mode")
         if not self.agents.get(agent):
             raise HttpError(400, "%s agent is unavailable" % agent)
         with self.lock:
@@ -400,8 +437,7 @@ class JobManager:
                 cmd += ["--allowedTools", ",".join(str(item) for item in allowed_tools)]
             if job.get("model"):
                 cmd += ["--model", job["model"]]
-            cmd.append(prompt)
-            return cmd
+            return cmd  # prompt arrives on stdin
         if agent == "codex":
             sandbox = "read-only" if mode in ("read-only", "supervised") else "workspace-write"
             if resume:
@@ -412,7 +448,7 @@ class JobManager:
                     cmd += ["-c", 'sandbox_mode="%s"' % sandbox]
                 if job.get("model"):
                     cmd += ["--model", job["model"]]
-                cmd += [job["session_id"], prompt]
+                cmd += [job["session_id"], "-"]  # "-": prompt from stdin
             else:
                 cmd = [self.agents[agent], "exec", "--json"]
                 if mode == "full":
@@ -421,7 +457,7 @@ class JobManager:
                     cmd += ["-s", sandbox]
                 if job.get("model"):
                     cmd += ["--model", job["model"]]
-                cmd.append(prompt)
+                cmd.append("-")  # "-": prompt from stdin
             return cmd
         request_path = self._job_dir(job) / ("ollama-request.%d.json" % job["runs"])
         atomic_json(request_path, {
@@ -433,6 +469,11 @@ class JobManager:
         cmd = self._command(job, prompt, allowed_tools, resume)
         job_dir = self._job_dir(job)
         exit_path = job_dir / job["exit_file"]
+        prompt_path = job_dir / ("prompt.%d.txt" % job["runs"])
+        fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(prompt)
+        prompt_in = open(prompt_path, "rb")
         raw = open(job_dir / "events.jsonl", "ab", buffering=0)
         env = os.environ.copy()
         env["PATH"] = agent_search_path()
@@ -449,7 +490,7 @@ class JobManager:
                 flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
                 process = subprocess.Popen(
                     ["cmd.exe", "/d", "/c", str(wrapper_path), *cmd],
-                    cwd=job["cwd"], env=env, stdin=subprocess.DEVNULL, stdout=raw,
+                    cwd=job["cwd"], env=env, stdin=prompt_in, stdout=raw,
                     stderr=subprocess.STDOUT, creationflags=flags, close_fds=True,
                 )
             else:
@@ -458,11 +499,12 @@ class JobManager:
                 )
                 process = subprocess.Popen(
                     ["/bin/sh", "-c", wrapper], cwd=job["cwd"], env=env,
-                    stdin=subprocess.DEVNULL, stdout=raw, stderr=subprocess.STDOUT,
+                    stdin=prompt_in, stdout=raw, stderr=subprocess.STDOUT,
                     start_new_session=True, close_fds=True,
                 )
         finally:
             raw.close()
+            prompt_in.close()
         job["pid"] = process.pid
         self._save(job)
         self._start_monitor(job, process)
@@ -528,6 +570,14 @@ class JobManager:
             if job["state"] == "running":
                 raise HttpError(409, "job is running")
             if job.get("worktree") and Path(job["cwd"]).exists():
+                # Keep the agent's uncommitted work on its branch before the worktree goes away.
+                git = ["git", "-C", job["cwd"], "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost"]
+                if subprocess.run(git + ["status", "--porcelain"], capture_output=True, text=True).stdout.strip():
+                    subprocess.run(git + ["add", "-A"], capture_output=True)
+                    snap = subprocess.run(git + ["commit", "--no-verify", "-m", "fleet: work from task " + job["id"]],
+                                          capture_output=True, text=True)
+                    if snap.returncode:
+                        raise HttpError(500, trim(snap.stderr or "could not save the task's changes"))
                 removed = subprocess.run(
                     ["git", "-C", job["repo"], "worktree", "remove", "--force", job["cwd"]],
                     capture_output=True, text=True, timeout=60,

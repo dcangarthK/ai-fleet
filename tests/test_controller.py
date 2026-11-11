@@ -20,11 +20,38 @@ os.environ.update({"FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_
                    "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": ""})
 
 
+class FakeRegistry(BaseHTTPRequestHandler):
+    sizes = {"library/qwen3/manifests/8b": 5_200_000_000, "library/tiny/manifests/1b": 800_000_000}
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        key = self.path.split("/v2/", 1)[-1]
+        if key not in FakeRegistry.sizes:
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = json.dumps({"config": {"size": 0, "digest": "sha256:cfg"}, "layers": [{"size": FakeRegistry.sizes[key]}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+registry = ThreadingHTTPServer(("127.0.0.1", 0), FakeRegistry)
+threading.Thread(target=registry.serve_forever, daemon=True).start()
+os.environ["FLEET_OLLAMA_REGISTRY"] = f"http://127.0.0.1:{registry.server_address[1]}/v2"
+
+
 class FakeRunner(BaseHTTPRequestHandler):
     jobs: dict = {}
     calls: list = []
     max_mode = "auto-edit"
     tokens: list = []  # X-Runner-Token header of every request
+    models: dict = {"fake-model:1b": False}  # name -> managed
+    ops: dict = {}
+    op_script: list = []  # states an ensure op goes through on successive polls; default ready
 
     def log_message(self, *a):
         pass
@@ -38,9 +65,27 @@ class FakeRunner(BaseHTTPRequestHandler):
 
     def do_GET(self):
         FakeRunner.tokens.append(self.headers.get("X-Runner-Token"))
+        if self.path == "/models":
+            return self._send(200, {"engine": "ollama", "version": "0.17.7", "free_disk_gb": 100, "ram_gb": 48,
+                                    "models": [{"name": n, "size_gb": 1.0, "digest": "d", "managed": m}
+                                               for n, m in FakeRunner.models.items()], "loaded": []})
+        if self.path.startswith("/operations/"):
+            op = FakeRunner.ops.get(self.path.split("/")[2])
+            if not op:
+                return self._send(404, {"detail": "no op"})
+            if op["script"]:
+                op["state"] = op["script"].pop(0)
+                if op["state"] == "ready":
+                    FakeRunner.models[op["ref"]] = True
+                    if op.get("derived"):
+                        FakeRunner.models[op["derived"]] = True
+                if op["state"] == "removed":
+                    FakeRunner.models.pop(op["ref"], None)
+            return self._send(200, {k: v for k, v in op.items() if k != "script"})
         if self.path == "/health":
             return self._send(200, {"ok": True, "version": "2", "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
+                                    "models": {"remote_management": True, "disk_reserve_gb": 8},
                                     "agents": {"claude": "/x/claude", "codex": None, "ollama": "http://o"}})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
@@ -55,6 +100,15 @@ class FakeRunner(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         FakeRunner.tokens.append(self.headers.get("X-Runner-Token"))
         FakeRunner.calls.append((self.path, body))
+        if self.path in ("/models/ensure", "/models/remove"):
+            oid = f"op-{len(FakeRunner.ops) + 1}"
+            kind = self.path.rsplit("/", 1)[1]
+            script = list(FakeRunner.op_script) if kind == "ensure" and FakeRunner.op_script else (
+                ["pulling", "ready"] if kind == "ensure" else ["removed"])
+            FakeRunner.ops[oid] = {"id": oid, "kind": kind, "ref": body["ref"], "derived": body.get("derived"),
+                                   "state": "checking", "reason": None, "progress": {"completed": 1, "total": 2},
+                                   "script": script}
+            return self._send(200, {k: v for k, v in FakeRunner.ops[oid].items() if k != "script"})
         if self.path == "/jobs":
             if body["id"] in self.jobs:
                 return self._send(409, {"detail": "duplicate job id"})
@@ -263,6 +317,102 @@ class ControllerTests(unittest.TestCase):
         FakeRunner.tokens.clear()
         self.task()
         self.assertNotIn("tok-master-123", FakeRunner.tokens)
+
+    # ---------- phase 5b: catalog, installs, roles that wait ----------
+
+    def models(self):
+        r = self.c.get("/api/models")
+        self.assertEqual(r.status_code, 200, r.text)
+        return {m["id"]: m for m in r.json()}
+
+    def wait_install(self, model_id, state, node="master"):
+        return wait_for(lambda: (self.models().get(model_id, {}).get("nodes", {}).get(node, {}).get("state") == state)
+                        and self.models()[model_id]["nodes"][node], timeout=10)
+
+    def test_catalog_add_validates_against_registry(self):
+        r = self.c.post("/api/models", json={"reference": "qwen3:8b", "display_name": "Qwen3 8B",
+                                              "defaults": {"num_ctx": 8192, "think": False}}, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        m = self.models()["qwen3-8b"]
+        self.assertEqual(m["reference"], "qwen3:8b")
+        self.assertAlmostEqual(m["download_gb"], 5.2, places=1)
+        self.assertEqual(m["defaults"]["num_ctx"], 8192)
+        self.assertIn(m["nodes"]["master"]["fit"], ("fits", "tight", "wont_fit", "unknown"))
+        r = self.c.post("/api/models", json={"reference": "ghost:9b"}, headers=W)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("isn't in the registry", r.text)
+        for bad in ("Qwen3:8b", "qwen3:8b; rm -rf /", "../x"):
+            self.assertIn(self.c.post("/api/models", json={"reference": bad}, headers=W).status_code, (400, 422), bad)
+
+    def test_install_on_node_and_remove(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        FakeRunner.calls.clear()
+        r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "present", "params": {"temperature": 0.1}},
+                       headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        row = self.wait_install("tiny-1b", "ready")
+        self.assertEqual(row["ownership"], "fleet-managed")
+        sent = [b for p, b in FakeRunner.calls if p == "/models/ensure"]
+        self.assertEqual(sent[0]["ref"], "tiny:1b")
+        self.assertEqual(sent[0]["derived"], "fleet-tiny-1b")
+        self.assertEqual(sent[0]["params"], {"temperature": 0.1})
+        types = [e["type"] for e in self.c.get("/api/events/list").json()]
+        self.assertIn("model.state", types)
+        # Can't drop it from the catalog while a node should have it.
+        self.assertEqual(self.c.delete("/api/models/tiny-1b", headers=W).status_code, 409)
+        self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent"}, headers=W)
+        self.wait_install("tiny-1b", "removed")
+        self.assertTrue([b for p, b in FakeRunner.calls if p == "/models/remove" and b["ref"] == "tiny:1b"])
+        self.assertEqual(self.c.delete("/api/models/tiny-1b", headers=W).status_code, 200)
+
+    def test_blocked_install_shows_reason(self):
+        self.c.post("/api/models", json={"reference": "qwen3:8b"}, headers=W)
+        FakeRunner.op_script = ["blocked"]
+        try:
+            FakeRunner.ops.clear()
+            self.c.put("/api/nodes/master/models/qwen3-8b", json={"desired": "present"}, headers=W)
+            self.wait_install("qwen3-8b", "blocked")
+        finally:
+            FakeRunner.op_script = []
+            self.c.put("/api/nodes/master/models/qwen3-8b", json={"desired": "absent"}, headers=W)
+
+    def test_role_waits_for_install(self):
+        self.c.post("/api/models", json={"reference": "qwen3:8b"}, headers=W)
+        FakeRunner.models.pop("qwen3:8b", None)
+        FakeRunner.op_script = ["pulling", "pulling", "verifying", "ready"]
+        try:
+            r = self.c.post("/api/roles", json={"role": "reviewer", "node": "master", "model": "qwen3:8b"}, headers=W)
+            self.assertEqual(r.status_code, 400)  # old behaviour without ensure_model
+            r = self.c.post("/api/roles", json={"role": "reviewer", "node": "master", "model": "qwen3:8b",
+                                                 "ensure_model": True}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            a = [x for x in r.json()["assignments"] if x["role"] == "reviewer" and x["model"] == "qwen3:8b"][0]
+            self.assertEqual(a["state"], "pending_install")
+            wait_for(lambda: [x for x in self.c.get("/api/fleet").json()["assignments"]
+                              if x["role"] == "reviewer" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=10)
+        finally:
+            FakeRunner.op_script = []
+
+    def test_catalog_is_seeded_from_evals(self):
+        evals = Path(__file__).resolve().parent.parent / "evals" / "results" / "results.json"
+        if not evals.exists():
+            self.skipTest("no eval results")
+        first = json.loads(evals.read_text())[0]
+        ref = first["model"] if ":" in first["model"] else first["model"] + ":latest"
+        found = [m for m in self.models().values() if m["reference"] == ref]
+        self.assertTrue(found, ref)
+        self.assertTrue(found[0]["evals"])
+
+    def test_preexisting_model_is_marked(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        FakeRunner.models["tiny:1b"] = False  # on the node before the fleet managed it
+        try:
+            self.c.post("/api/refresh", headers=W)
+            row = wait_for(lambda: self.models()["tiny-1b"]["nodes"]["master"].get("installed")
+                           and self.models()["tiny-1b"]["nodes"]["master"])
+            self.assertEqual(row["ownership"], "pre-existing")
+        finally:
+            FakeRunner.models.pop("tiny:1b", None)
 
     def test_requested_gate_must_pass(self):
         t = self.task(gate="pytest")

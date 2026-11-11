@@ -40,6 +40,7 @@ import auth  # noqa: E402
 import events  # noqa: E402
 import evaluations  # noqa: E402
 import grounding  # noqa: E402
+import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
 import skills as fleet_skills  # noqa: E402
@@ -478,6 +479,7 @@ async def loop() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     fleet_skills.import_repo()
+    fleet_instructions.import_repo()
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
@@ -1330,6 +1332,14 @@ def _pipeline_events(p: dict, history_start: int) -> None:
                                                         "round": item["round"], "note": item.get("note")})
 
 
+def auto_trusted_roles() -> list[str]:
+    """Roles trusted from benchmark data: every model assigned to the role is a trusted reviewer (G2)."""
+    with db() as c:
+        assignments = [dict(row) for row in c.execute("SELECT role,model,catalog_id,params FROM assignments")]
+        catalog = [dict(row) for row in c.execute("SELECT id,reference FROM model_catalog")]
+    return evaluations.trusted_roles(assignments, catalog, evaluations.trusted_reviewer_references())
+
+
 async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
     for action in actions:
         if action["do"] == "spawn_build":
@@ -1350,7 +1360,8 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
                 raw, reason, fallback = await role_review(reviewer["role"], p["spec"], diff)
                 p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
                                                        "raw": raw, "diff": diff, "reason": reason,
-                                                       "fallback": fallback})
+                                                       "fallback": fallback,
+                                                       "trusted_roles": auto_trusted_roles()})
             else:
                 builder = tasks.get_task(p["build_task"])
                 try:
@@ -1598,8 +1609,13 @@ def catalog_view() -> list[dict]:
         catalog = [dict(row) for row in c.execute("SELECT * FROM model_catalog ORDER BY display_name,id")]
         nodes = [dict(row) for row in c.execute("SELECT * FROM nodes ORDER BY name")]
         states = {(row["node"], row["catalog_id"]): dict(row) for row in c.execute("SELECT * FROM node_models")}
+    trusted = evaluations.trusted_reviewer_references()
     output = []
     for item in catalog:
+        # Same identities pipelines judge: the base model, and the derived model a role with settings routes.
+        item["trusted_reviewer"] = evaluations.is_trusted_reference(item["reference"] or "", trusted)
+        item["derived_model"] = evaluations.derived_model(item["id"])
+        item["derived_trusted_reviewer"] = evaluations.is_trusted_reference(item["derived_model"], trusted)
         for key, fallback in (("defaults", {}), ("suggested_roles", []), ("evals", {})):
             item[key] = _json(item.get(key), fallback)
         cells = {}

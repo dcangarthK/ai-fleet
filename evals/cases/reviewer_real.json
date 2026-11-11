@@ -2,6 +2,7 @@
  {
   "id": "erase_running_install_op",
   "expect": "request_changes",
+  "split": "holdout",
   "keywords": [
    "op_id=null",
    "op_id",
@@ -21,6 +22,7 @@
  {
   "id": "ready_before_derived_model",
   "expect": "request_changes",
+  "split": "dev",
   "keywords": [
    "derived",
    "fleet-",
@@ -37,6 +39,7 @@
  {
   "id": "check_then_write_race",
   "expect": "request_changes",
+  "split": "holdout",
   "keywords": [
    "race",
    "atomic",
@@ -55,6 +58,7 @@
  {
   "id": "weak_idempotency_key",
   "expect": "request_changes",
+  "split": "dev",
   "keywords": [
    "params",
    "derived",
@@ -72,6 +76,7 @@
  {
   "id": "role_routes_base_not_derived",
   "expect": "request_changes",
+  "split": "holdout",
   "keywords": [
    "derived",
    "fleet-",
@@ -88,6 +93,7 @@
  {
   "id": "reviewer_repo_in_denied_dir",
   "expect": "request_changes",
+  "split": "dev",
   "keywords": [
    "fleet_dir",
    ".ai-fleet",
@@ -106,6 +112,7 @@
  {
   "id": "ownership_flips_on_ready",
   "expect": "request_changes",
+  "split": "holdout",
   "keywords": [
    "pre-existing",
    "preexisting",
@@ -121,6 +128,7 @@
  {
   "id": "cwd_git_dir_unchecked",
   "expect": "request_changes",
+  "split": "dev",
   "keywords": [
    "git",
    "common dir",
@@ -137,6 +145,7 @@
  {
   "id": "token_echoed_on_terminal",
   "expect": "request_changes",
+  "split": "holdout",
   "keywords": [
    "echo",
    "getpass",
@@ -153,6 +162,7 @@
  {
   "id": "token_file_truncate_race",
   "expect": "request_changes",
+  "split": "dev",
   "keywords": [
    "race",
    "o_excl",
@@ -170,6 +180,7 @@
  {
   "id": "model_ref_matches_spec",
   "expect": "approve",
+  "split": "holdout",
   "keywords": [],
   "spec": "`ref` must match ^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$",
   "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -40,0 +41,1 @@\n+MODEL_REF = re.compile(r\"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$\")\n",
@@ -179,6 +190,7 @@
  {
   "id": "policy_errors_are_400",
   "expect": "approve",
+  "split": "holdout",
   "keywords": [],
   "spec": "An invalid task policy is a 400, not a 500.",
   "diff": "--- a/master/controller/tasks.py\n+++ b/master/controller/tasks.py\n@@ -490,6 +490,11 @@ async def create_task(t: TaskIn) -> dict:\n+    try:\n+        if t.policy is not None:\n+            fleet_policy.validate(t.policy)\n+        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy)\n+    except ValueError as exc:\n+        raise HTTPException(400, str(exc))\n",
@@ -188,6 +200,7 @@
  {
   "id": "network_deny_wins",
   "expect": "approve",
+  "split": "dev",
   "keywords": [],
   "spec": "Network policy: 'deny' in any layer wins over 'allow'.",
   "diff": "--- a/master/controller/policy.py\n+++ b/master/controller/policy.py\n@@ -150,0 +150,7 @@ def merge(layers):\n+    networks = [(label, body[\"network\"][\"agents\"]) for label, body in bodies\n+                if \"network\" in body and \"agents\" in body[\"network\"]]\n+    if networks:\n+        denied = [item for item in networks if item[1] == \"deny\"]\n+        winner = denied[-1] if denied else networks[-1]\n+        _set_nested(result, \"network\", \"agents\", winner[1])\n+        sources[\"network.agents\"] = winner[0]\n",
@@ -196,6 +209,7 @@
  {
   "id": "quiet_hours_wrap_midnight",
   "expect": "approve",
+  "split": "dev",
   "keywords": [],
   "spec": "Quiet-hour windows are HH:MM-HH:MM, half-open, and may wrap past midnight.",
   "diff": "--- a/master/controller/policy.py\n+++ b/master/controller/policy.py\n@@ -180,0 +180,10 @@\n+def in_quiet_hours(windows, minute):\n+    for window in windows:\n+        match = QUIET_RE.fullmatch(window)\n+        if not match:\n+            continue\n+        start = int(match[1]) * 60 + int(match[2])\n+        end = int(match[3]) * 60 + int(match[4])\n+        if start < end and start <= minute < end:\n+            return True\n+        if start > end and (minute >= start or minute < end):\n+            return True\n+    return False\n",
@@ -204,6 +218,7 @@
  {
   "id": "claim_row_before_runner_call",
   "expect": "approve",
+  "split": "holdout",
   "keywords": [],
   "spec": "Reconciliation claims a node_models row before starting a runner operation, so concurrent requests can't change it meanwhile.",
   "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -317,6 +317,15 @@ async def reconcile_models() -> None:\n+        claim = time.time()\n+        with db() as c:\n+            claimed = c.execute(\n+                \"UPDATE node_models SET state='starting', updated_at=? WHERE node=? AND catalog_id=? \"\n+                \"AND updated_at=? AND op_id IS NULL AND desired=?\",\n+                (claim, row[\"node\"], row[\"catalog_id\"], row[\"updated_at\"], row[\"desired\"])).rowcount\n+        if not claimed:\n+            continue  # changed since we read it; next pass sees the new row\n",
@@ -212,6 +227,7 @@
  {
   "id": "hmac_token_compare",
   "expect": "approve",
+  "split": "dev",
   "keywords": [],
   "spec": "Every runner route requires the token; compare in constant time.",
   "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -887,3 +887,4 @@ class Handler:\n     def _authorized(self):\n         token = self.server.runner_token\n-        return not token or self.headers.get(\"X-Runner-Token\") == token\n+        supplied = self.headers.get(\"X-Runner-Token\", \"\")\n+        return bool(token and hmac.compare_digest(token, supplied))\n",

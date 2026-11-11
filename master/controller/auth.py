@@ -24,7 +24,7 @@ COOKIE = "fleet_token"
 
 # Writes that change who/what is trusted. Everything else that writes is "operate".
 ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies",
-               "/api/tasks/approve", "/api/tasks/reject")
+               "/api/skills", "/api/tasks/approve", "/api/tasks/reject")
 
 
 def _hash(token: str) -> str:

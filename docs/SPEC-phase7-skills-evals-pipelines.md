@@ -72,7 +72,8 @@ State machine (`master/controller/pipeline.py`, pure `step(pipeline, event) -> (
 | `reviewing` | builder task reaches `review` (gate passed) | one review per reviewer: `role` reviewers get a one-shot model call (LiteLLM role, the diff + spec, JSON review schema); `agent` reviewers get a `read-only` task on the builder's branch with a review prompt |
 | `resolving` | all reviews in, any high/medium issue | merge issues (dedupe by file + problem text), round += 1 → `building`, unless round > `max_rounds` → `escalated` |
 | `ready` | all reviews in, no high/medium issue | — (a person merges) |
-| `failed` | builder task `failed`/`interrupted` and its gate failed 3 times in a row, or any task cancelled | — |
+| `failed` | the builder task ends `failed`/`interrupted` (its gate didn't pass) | — |
+| `cancelled` | the pipeline is cancelled (`POST …/cancel`); its tasks are cancelled, branches kept | — |
 | `escalated` | rounds exhausted | needs a person (shows in the inbox) |
 
 - Review JSON schema (same as evals): `{"verdict": "approve|request_changes", "issues": [{"severity":

@@ -473,6 +473,8 @@ class LineageApiTests(unittest.TestCase):
     def test_resumed_build_is_one_work_item_with_both_runs(self):
         t = self.task(title="Resumable build")
         self.fail(t["id"], LIMIT_TEXT)
+        with db() as c:  # the account's limit has reset (a resume passes admission, docs/SPEC-limit-handoff.md 4.5)
+            c.execute("UPDATE agent_usage SET resets_at=? WHERE task_id=?", (time.time() - 1, t["id"]))
         r = self.c.post(f"/api/tasks/{t['id']}/message", json={"text": "carry on"}, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["state"], "working")

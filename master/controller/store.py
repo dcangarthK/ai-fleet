@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS budget_rules (
 CREATE TABLE IF NOT EXISTS review_agreement (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, pipeline_id TEXT, round INTEGER, local_model TEXT,
     hint_id INTEGER, confirmed INTEGER, trusted INTEGER, reviewer TEXT);
+CREATE TABLE IF NOT EXISTS resume_schedule (
+    task_id TEXT PRIMARY KEY, at REAL, reschedules INTEGER DEFAULT 0, state TEXT, reason TEXT, updated_at REAL,
+    run INTEGER);
+CREATE TABLE IF NOT EXISTS slot_flags (
+    node TEXT, agent TEXT, profile TEXT, state TEXT, reason TEXT, at REAL, PRIMARY KEY (node, agent, profile));
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.
@@ -95,11 +100,14 @@ MIGRATIONS = {
               "limits_applied": "TEXT",
               # why a queued task waits on the budget: 'limit' or 'slot' (null: not held by the budget)
               "budget_wait": "TEXT",
-              # which agent profile and account ran it (docs/SPEC-limit-handoff.md 3.2); nothing acts on them yet
-              "profile": "TEXT DEFAULT 'fleet'", "account_label": "TEXT"},
+              # which agent profile and account ran it (docs/SPEC-limit-handoff.md 3.2)
+              "profile": "TEXT DEFAULT 'fleet'", "account_label": "TEXT",
+              # the account (budget.account_key) the controller placed it on; limits and concurrency key on it
+              "account": "TEXT"},
     # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
-    # later cancelling, completing or resuming of the task cannot erase
-    "agent_usage": {"resets_at": "REAL", "identity": "TEXT"},
+    # later cancelling, completing or resuming of the task cannot erase; `account` is whose limit it was
+    # (null on older rows, which then hold every account of the agent)
+    "agent_usage": {"resets_at": "REAL", "identity": "TEXT", "account": "TEXT"},
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
                   "budget": "TEXT DEFAULT '{}'"},

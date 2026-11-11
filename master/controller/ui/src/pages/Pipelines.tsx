@@ -10,6 +10,7 @@ const STATE: Record<PipelineState, { tone: string; label: string }> = {
   building: { tone: "accent", label: "Building" },
   reviewing: { tone: "accent", label: "In review" },
   resolving: { tone: "accent", label: "Fixing review issues" },
+  review_waiting: { tone: "warn", label: "Reviewer limited: waiting for reset" },
   ready: { tone: "ok", label: "Ready to merge" },
   failed: { tone: "bad", label: "Failed" },
   escalated: { tone: "warn", label: "Needs you" },
@@ -26,7 +27,7 @@ export function PipelinesPage() {
   const list = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => get<Pipeline[]>("/api/pipelines"),
-    refetchInterval: (q) => ((q.state.data ?? []).some((p) => ["building", "reviewing", "resolving"].includes(p.state)) ? 4000 : 30_000),
+    refetchInterval: (q) => ((q.state.data ?? []).some((p) => ["building", "reviewing", "resolving", "review_waiting"].includes(p.state)) ? 4000 : 30_000),
   });
   const items = list.data ?? [];
   const current = items.find((p) => p.id === open);

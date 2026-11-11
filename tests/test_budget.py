@@ -560,15 +560,19 @@ class BudgetApiTests(unittest.TestCase):
 
     def test_resuming_the_limited_task_itself_keeps_the_limit_until_a_run_succeeds(self):
         limited = self.limited_codex()
+        # A resume passes admission like a new task (docs/SPEC-limit-handoff.md 4.5): refused while still limited.
         r = self.c.post(f"/api/tasks/{limited['id']}/message", json={"text": "carry on"}, headers=W)
-        self.assertEqual(r.json()["state"], "working")  # its failure fields are cleared for the new run
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("limited until", r.text)
         self.held()
-        FakeRunner.jobs[limited["id"]].update(state="cancelled")  # the resumed run is cancelled: proves nothing
         self.c.post(f"/api/tasks/{limited['id']}/cancel", headers=W)
         self.held()
         self.settle_all()
         again = self.limited_codex()
-        self.c.post(f"/api/tasks/{again['id']}/message", json={"text": "carry on"}, headers=W)
+        with db() as c:  # its reset has passed: the resume is admitted
+            c.execute("UPDATE agent_usage SET resets_at=? WHERE task_id=?", (time.time() - 1, again["id"]))
+        r = self.c.post(f"/api/tasks/{again['id']}/message", json={"text": "carry on"}, headers=W)
+        self.assertEqual(r.json()["state"], "working")  # its failure fields are cleared for the new run
         time.sleep(0.01)
         FakeRunner.jobs[again["id"]].update(state="exited", exit_code=0, result="done")
         self.c.portal.call(tasks.poll_task, again["id"])

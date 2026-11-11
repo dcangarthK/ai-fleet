@@ -5,6 +5,7 @@ import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../li
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
 import { displayOf } from "../lib/lineage";
+import { handoffSlotName, plannedText, type HandoffSlot } from "../lib/handoff";
 
 /** Task detail as a side sheet over the task list. Closes on Escape. */
 export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) {
@@ -107,10 +108,12 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
             Remove worktree
           </button>
         )}
+        {all.handoff && scope.admin && <HandOffNow id={task.id} busy={busy} act={act} />}
       </div>
 
       {task.error && <div className="banner error">{task.error}</div>}
       <Lineage task={task} />
+      {plannedText(task.planned) && <div className="banner note">{plannedText(task.planned)}</div>}
       {task.state === "blocked" && (
         <div className="banner note">
           The agent was denied: {denialTools(task).map((t) => <span className="tag" key={t}>{t}</span>)} Approve to rerun it with those tools allowed.
@@ -146,6 +149,33 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
   );
 }
 
+/** "Hand off now…" (admin only): the eligible slots, then the same handoff sequence as an automatic one. */
+function HandOffNow({ id, busy, act }: { id: string; busy: boolean; act: (a: string, body?: unknown) => void }) {
+  const [slots, setSlots] = useState<HandoffSlot[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  async function load() {
+    setError(null);
+    try {
+      setSlots((await get<{ slots: HandoffSlot[] }>(`/api/tasks/${id}/handoff`)).slots);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  return (
+    <>
+      <button disabled={busy} onClick={load}>Hand off now…</button>
+      {error && <span className="small tone-bad">{error}</span>}
+      {slots && slots.length === 0 && <span className="small quiet">No eligible slot right now.</span>}
+      {slots?.map((s) => (
+        <button key={`${s.node}/${s.agent}/${s.profile}/${s.model}`} disabled={busy}
+                onClick={() => confirm(`Hand this work off to ${handoffSlotName(s)}?`) && act("handoff", { slot: s })}>
+          {handoffSlotName(s)}
+        </button>
+      ))}
+    </>
+  );
+}
+
 /** Why the task ended as it did, when a limit lifts, and how it was dealt with. */
 function Lineage({ task }: { task: Task }) {
   const r = task.resolution;
@@ -161,7 +191,7 @@ function Lineage({ task }: { task: Task }) {
       {r && (
         <p className="small">
           <b>Resolution</b> <span className="quiet">{display.label}</span>
-          {r.kind === "resolved_by" && r.task_id && <> · <Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(r.task_id)}`}>open that task</Link></>}
+          {(r.kind === "resolved_by" || r.kind === "handed_off") && r.task_id && <> · <Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(r.task_id)}`}>open that task</Link></>}
           {r.note && <span className="quiet"> · {r.note}</span>}
         </p>
       )}

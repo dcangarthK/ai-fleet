@@ -24,19 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "controller"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import grounded as grounded_logic  # noqa: E402
 import grounding  # noqa: E402
+from redaction import SECRET_PATTERNS, redact as _redact  # noqa: E402,F401  (shared with the controller)
 
 GATEWAY = os.environ.get("LLM_GATEWAY_URL", "http://127.0.0.1:4000").rstrip("/")
 CONTROLLER = os.environ.get("FLEET_CONTROLLER_URL", "http://127.0.0.1:8700").rstrip("/")
 KEYCHAIN_SERVICE = "litellm-laptop1"
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 MAX_INPUT_CHARS = 48_000  # ~12k tokens; small nodes run a 16k context
-
-SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|secret|token|password|passwd)\s*[:=]\s*\S+"),
-    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----"),
-]
 
 mcp = FastMCP("local-llm")
 
@@ -48,12 +42,6 @@ def _api_key() -> str:
         ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-
-
-def _redact(text: str) -> str:
-    for pattern in SECRET_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
-    return text
 
 
 def _chat_request(role: str, system: str, user: str, timeout: float, extra: dict) -> dict:

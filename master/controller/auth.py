@@ -25,7 +25,9 @@ COOKIE = "fleet_token"
 # Writes that change who/what is trusted. Everything else that writes is "operate".
 ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies",
                "/api/skills", "/api/enroll", "/api/notify-rules", "/api/export", "/api/import",
-               "/api/tasks/approve", "/api/tasks/reject", "/api/budget/rules")
+               "/api/tasks/approve", "/api/tasks/reject", "/api/budget/rules",
+               # clearing a "not signed in" slot (docs/SPEC-limit-handoff.md 3.1); reading resources is view scope
+               "/api/resources")
 PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete"}
 
 
@@ -69,7 +71,9 @@ def required_scope(request: Request) -> str:
         return "operate"
     if path.startswith("/api/nodes/"):
         return "admin"
-    if path.startswith(ADMIN_PATHS) or (path.startswith("/api/tasks/") and path.endswith(("/approve", "/reject", "/resolve", "/outcome"))):
+    # "/handoff" is "Hand off now" (docs/SPEC-limit-handoff.md 5): admin only, like approvals.
+    if path.startswith(ADMIN_PATHS) or (path.startswith("/api/tasks/") and path.endswith(
+            ("/approve", "/reject", "/resolve", "/outcome", "/handoff"))):
         return "admin"
     return "operate"
 

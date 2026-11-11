@@ -20,7 +20,14 @@ export interface BudgetRules {
   models: Record<string, ModelRule>;
   unlisted: "allow" | "refuse";
   prompt: { max_kb: number; hard_max_kb: number; max_line_chars: number; exclude_globs: string[] };
-  limits: { on_limit: "queue" | "fallback" | "refuse"; fallbacks: Record<string, string[]> };
+  limits: {
+    on_limit: "queue" | "fallback" | "refuse";
+    fallbacks: Record<string, string[]>;
+    // A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2); kept as stored by the form.
+    on_task_limit?: Record<string, "handoff" | "wait">;
+    max_handoffs?: number;
+    allow_cross_vendor?: boolean;
+  };
   effort_ladder: Record<string, string[]>;
   limit_scope: "model" | "account";
   review_exec: { tools: string[]; max_turns: number | null; task_minutes: number | null };

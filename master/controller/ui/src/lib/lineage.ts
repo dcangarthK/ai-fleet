@@ -7,7 +7,7 @@ export type DisplayTone = "running" | "ok" | "paused" | "attention" | "resolved"
 export interface Display { tone: DisplayTone; label: string }
 export type Link = "retry" | "resume" | "review" | "fix" | "merge" | "check";
 export interface Outcome { kind: "merged" | "done" | "abandoned"; commit?: string; at: number }
-export interface Resolution { kind: "resolved_by" | "dismissed" | "done_elsewhere"; task_id?: string; title?: string; commit?: string; by?: string; note?: string; at: number }
+export interface Resolution { kind: "resolved_by" | "dismissed" | "done_elsewhere" | "handed_off" | "handing_off"; task_id?: string; title?: string; commit?: string; by?: string; note?: string; model?: string | null; label?: string | null; at: number }
 
 export interface Attempt {
   id: string;
@@ -22,6 +22,13 @@ export interface Attempt {
   ended_at: number | null;
   /** 1 for the first run of a task, higher for runs after it was resumed. */
   run?: number;
+  // Limit handoff (docs/SPEC-limit-handoff.md 5); absent on older controllers.
+  kind?: string | null;
+  account_label?: string | null;
+  /** This attempt continues another attempt's checkpoint after a usage limit. */
+  handoff?: boolean;
+  /** This attempt stopped at a usage limit and its work moved to a handoff attempt. */
+  handed_off?: boolean;
 }
 
 export interface WorkItem {
@@ -92,8 +99,14 @@ export function outcomeLabel(o: Outcome | null | undefined): string | null {
 
 /** One step per attempt (or run), then the outcome: ["Sonnet task · Paused: …", "resumed · Ready for review", "merged ec2ab20"]. */
 export function timelineSteps(attempts: Attempt[], outcome?: Outcome | null): string[] {
-  const steps = attempts.map((a) =>
-    (a.run ?? 1) > 1 ? `resumed · ${a.display.label}` : `${a.model || a.agent} ${a.link ?? "task"} · ${a.display.label}`);
+  const who = (a: Attempt) => `${a.model || a.agent}${a.account_label ? ` (${a.account_label})` : ""}`;
+  const steps = attempts.map((a) => {
+    if ((a.run ?? 1) > 1) return `resumed · ${a.display.label}`;
+    // A handed-off attempt reads as where it stopped; its successor as where the work went (one story, two accounts).
+    if (a.handoff) return `handed off to ${who(a)} · ${a.display.label}`;
+    const label = a.handed_off ? "paused: limit" : a.display.label;
+    return `${who(a)} ${a.link ?? a.kind ?? "task"} · ${label}`;
+  });
   const end = outcomeLabel(outcome);
   if (end) steps.push(end.charAt(0).toLowerCase() + end.slice(1));
   return steps;

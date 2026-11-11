@@ -151,6 +151,19 @@ class LiveApiTests(LiveBase):
         self.assertNotIn(first["id"], queue)
         ids = [q["task_id"] for q in self.live()["queue"]]
         self.assertLess(ids.index(slot["id"]), ids.index(approval["id"]))  # oldest first
+        with db() as c:  # the spare account's Sonnet is limited: a task pinned there waits for the reset
+            c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
+                      "VALUES (?,?,?,?,?,?,?,?,?)", (time.time(), "t-" + secrets.token_hex(4), 1, "claude", SONNET,
+                                                     "claude:" + SONNET, "limit", time.time() + 3600, "claude/spare"))
+        limited = self.ok(agent="claude", model=SONNET, kind="draft", profile="spare")
+        held = self.ok(agent="claude", model=SONNET, kind="draft")
+        with db() as c:  # the node's policy holds this one back (e.g. its concurrency)
+            c.execute("UPDATE tasks SET state='queued', budget_wait=NULL, error='max concurrent tasks reached' WHERE id=?",
+                      (held["id"],))
+        queue = {q["task_id"]: q for q in self.live()["queue"]}
+        self.assertEqual(queue[limited["id"]]["wait"], "limit")
+        self.assertGreater(queue[limited["id"]]["until"], time.time())
+        self.assertEqual((queue[held["id"]]["wait"], queue[held["id"]]["reason"]), ("node", "max concurrent tasks reached"))
 
     def test_pipeline_strip_from_history(self):
         p = {"history": [{"round": 1, "state": "building"}, {"round": 1, "state": "reviewing"},

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from urllib.parse import quote
 
 import httpx
@@ -48,7 +49,7 @@ def _redact(text: str) -> str:
     return text
 
 
-def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> str:
+def _chat_once(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> tuple[str, str, dict]:
     if not ROLE_RE.match(role):
         raise ValueError("role must be a role name like 'coder'; see fleet_status")
     user = _redact(user)
@@ -67,15 +68,70 @@ def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bo
         timeout=timeout,
     )
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"] or ""
-    return re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+    body = resp.json()
+    content = body["choices"][0]["message"]["content"] or ""
+    return (re.sub(r"<think>[\s\S]*?</think>", "", content).strip(),
+            str(body.get("model") or role), body.get("usage") if isinstance(body.get("usage"), dict) else {})
+
+
+def _report_call(role: str, model: str, elapsed_ms: float, ok: bool, usage: dict,
+                 fallback_from: str | None = None) -> None:
+    body = {"role": role, "model": model, "ms": elapsed_ms, "ok": ok}
+    if isinstance(usage.get("prompt_tokens"), int):
+        body["tokens_in"] = usage["prompt_tokens"]
+    if isinstance(usage.get("completion_tokens"), int):
+        body["tokens_out"] = usage["completion_tokens"]
+    if fallback_from:
+        body["fallback_from"] = fallback_from
+    try:
+        httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers={"X-Fleet": "1"}, timeout=5)
+    except httpx.HTTPError:
+        pass
+
+
+def _fallback_for(role: str) -> str | None:
+    try:
+        response = httpx.get(f"{CONTROLLER}/api/fleet", timeout=5)
+        response.raise_for_status()
+        info = next((item for item in response.json().get("roles", []) if item.get("name") == role), None)
+        fallback = info.get("fallback") if info else None
+        return fallback if isinstance(fallback, str) and ROLE_RE.match(fallback) else None
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+
+
+def _chat_with_role(role: str, system: str, user: str, timeout: float = 600,
+                    json_mode: bool = False) -> tuple[str, str]:
+    fallback = _fallback_for(role)
+    first_error = None
+    for attempted, fallback_from in ((role, None), (fallback, role)):
+        if not attempted:
+            continue
+        started = time.monotonic()
+        try:
+            content, model, usage = _chat_once(attempted, system, user, timeout, json_mode)
+        except (httpx.HTTPError, subprocess.CalledProcessError, KeyError, ValueError, IndexError, TypeError) as exc:
+            _report_call(attempted, attempted, (time.monotonic() - started) * 1000, False, {}, fallback_from)
+            if first_error is None:
+                first_error = exc
+            continue
+        _report_call(attempted, model, (time.monotonic() - started) * 1000, True, usage, fallback_from)
+        return content, attempted
+    if first_error:
+        raise first_error
+    raise RuntimeError(f"role {role} has no available model")
+
+
+def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> str:
+    return _chat_with_role(role, system, user, timeout, json_mode)[0]
 
 
 @mcp.tool()
 def ask_model(role: str, prompt: str) -> str:
     """Ask whichever fleet model holds a role. Usual roles: 'coder' (write/explain code),
     'reviewer' (critique), 'fast' (quick summaries). fleet_status lists live roles."""
-    return _chat(role, "You are a precise senior engineer. Be concise.", prompt)
+    answer, answered_by = _chat_with_role(role, "You are a precise senior engineer. Be concise.", prompt)
+    return (f"Answered by fallback role {answered_by}.\n\n" + answer) if answered_by != role else answer
 
 
 @mcp.tool()
@@ -90,12 +146,17 @@ def review_diff(diff: str, spec: str, role: str = "reviewer") -> str:
         '{"verdict":"approve|request_changes","issues":[{"severity":"high|medium|low",'
         '"file":"","line":0,"problem":"","fix":""}]}'
     )
-    raw = _chat(role, system, f"SPEC:\n{spec}\n\nDIFF:\n{diff}", json_mode=True)
+    raw, answered_by = _chat_with_role(role, system, f"SPEC:\n{spec}\n\nDIFF:\n{diff}", json_mode=True)
     match = re.search(r"\{[\s\S]*\}", raw)
     try:
-        return json.dumps(json.loads(match.group(0)) if match else {}, indent=2)
+        result = json.loads(match.group(0)) if match else {}
+        result["answered_by"] = answered_by
+        if answered_by != role:
+            result["fallback_from"] = role
+        return json.dumps(result, indent=2)
     except json.JSONDecodeError:
-        return json.dumps({"verdict": "unparseable", "raw": raw[:4000]})
+        return json.dumps({"verdict": "unparseable", "raw": raw[:4000], "answered_by": answered_by,
+                           **({"fallback_from": role} if answered_by != role else {})})
 
 
 @mcp.tool()

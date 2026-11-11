@@ -4,11 +4,13 @@
 #   .\onboard.ps1 -Models "qwen3:14b","qwen3:4b"   pull these models
 #   .\onboard.ps1 -AllowRoot C:\code -AllowRoot D:\repos
 #   .\onboard.ps1 -ScanOnly                    just rescan and republish (runs hourly after onboarding)
-param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(), [string]$FleetDir = "")
+param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(),
+      [string]$FleetDir = "", [string]$Enroll = "", [string]$Master = "")
 $ErrorActionPreference = "Stop"
 $AllowRootsSet = $PSBoundParameters.ContainsKey("AllowRoot")
 if (-not $FleetDir) { $FleetDir = if ($env:FLEET_DIR) { $env:FLEET_DIR } else { Join-Path $env:ProgramData "ai-fleet" } }
 $InfoPort = 11435
+$RunnerTokenValue = ""
 New-Item -ItemType Directory -Force -Path (Join-Path $FleetDir "public") | Out-Null
 
 function Say($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
@@ -228,6 +230,7 @@ via ps, and Claude's variadic --allowedTools would otherwise swallow a trailing 
 
 import datetime
 import glob
+import hashlib
 import hmac
 import json
 import math
@@ -249,6 +252,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 VERSION = "2"
+RUNNER_DIGEST = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 MODES = ("read-only", "supervised", "auto-edit", "full")
 MODE_RANK = {name: rank for rank, name in enumerate(MODES)}
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -463,6 +467,10 @@ class JobManager:
         self.max_job_minutes = (float(max_minutes)
                                 if isinstance(max_minutes, (int, float)) and not isinstance(max_minutes, bool)
                                 and math.isfinite(max_minutes) and max_minutes > 0 else 120.0)
+        power = config.get("power") if isinstance(config.get("power"), dict) else {}
+        minimum = power.get("min_battery_pct", 30)
+        self.min_battery_pct = (minimum if isinstance(minimum, int) and not isinstance(minimum, bool)
+                                and 0 <= minimum <= 100 else 30)
         network = config.get("network") if isinstance(config.get("network"), dict) else {}
         self.network = {"agents": "allow" if network.get("agents") == "allow" else "deny"}
         models = config.get("models") if isinstance(config.get("models"), dict) else {}
@@ -1549,6 +1557,53 @@ class HttpError(Exception):
         self.detail = detail
 
 
+def system_power():
+    """Return portable best-effort battery state; failures deliberately become unknown."""
+    fake = os.environ.get("FLEET_FAKE_POWER")
+    if fake is not None:
+        try:
+            value = json.loads(fake)
+            if isinstance(value, dict):
+                return {"on_battery": value.get("on_battery"), "battery_pct": value.get("battery_pct")}
+        except ValueError:
+            pass
+    try:
+        if sys.platform == "darwin":
+            output = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
+            match = re.search(r"(\d+)%", output)
+            source = output.splitlines()[0].lower() if output else ""
+            return {"on_battery": (True if "battery power" in source else
+                                    False if "ac power" in source else None),
+                    "battery_pct": min(100, max(0, int(match.group(1)))) if match else None}
+        if sys.platform.startswith("linux"):
+            batteries = []
+            for directory in glob.glob("/sys/class/power_supply/*"):
+                base = Path(directory)
+                if (base / "type").read_text(errors="ignore").strip().lower() != "battery":
+                    continue
+                capacity = int((base / "capacity").read_text().strip())
+                status = (base / "status").read_text(errors="ignore").strip().lower()
+                batteries.append((capacity, status))
+            if batteries:
+                pct = round(sum(item[0] for item in batteries) / len(batteries))
+                return {"on_battery": any(item[1] == "discharging" for item in batteries),
+                        "battery_pct": min(100, max(0, pct))}
+        if sys.platform == "win32":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                            ("BatteryLifePercent", ctypes.c_ubyte), ("SystemStatusFlag", ctypes.c_ubyte),
+                            ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+            state = Status()
+            if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(state)):
+                return {"on_battery": None if state.ACLineStatus == 255 else state.ACLineStatus == 0,
+                        "battery_pct": None if state.BatteryLifePercent == 255 else int(state.BatteryLifePercent)}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return {"on_battery": None, "battery_pct": None}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "FleetRunner/2"
 
@@ -1598,7 +1653,12 @@ class Handler(BaseHTTPRequestHandler):
             for job in self.manager.jobs.values():
                 self.manager.refresh(job)
                 running += job.get("state") == "running"
-            return {"ok": True, "version": VERSION, "max_mode": self.manager.max_mode,
+            power = system_power()
+            power["min_battery_pct"] = self.manager.min_battery_pct
+            power["ok"] = not (power["on_battery"] is True and power["battery_pct"] is not None
+                                and power["battery_pct"] < self.manager.min_battery_pct)
+            return {"ok": True, "version": VERSION, "digest": RUNNER_DIGEST,
+                    "power": power, "max_mode": self.manager.max_mode,
                     "agents": agents, "running": running,
                     "gate_profiles": sorted(self.manager.gate_profiles),
                     "allow_raw_gates": self.manager.allow_raw_gates,
@@ -1808,6 +1868,7 @@ function Configure-RunnerPolicy($cfg) {
   Set-DefaultProperty $config "allow_raw_gates" $false
   Set-DefaultProperty $config "max_jobs" 2
   Set-DefaultProperty $config "max_job_minutes" 120
+  Set-DefaultProperty $config "power" ([PSCustomObject]@{ min_battery_pct = 30 })
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
 }
 
@@ -1849,8 +1910,11 @@ set "OLLAMA_URL=http://${ip}:11434"
     Start-Sleep -Seconds 1
   }
   if ($token) {
+    $script:RunnerTokenValue = $token
     $nodeName = $env:COMPUTERNAME.ToLower()
-    Write-Host "Runner token (shown once). On the master run: printf '%s\n' '$token' | uv run --script master/controller/controller.py runner-token set '$nodeName'"
+    if (-not $Enroll) {
+      Write-Host "Runner token (shown once). On the master run: printf '%s\n' '$token' | uv run --script master/controller/controller.py runner-token set '$nodeName'"
+    }
   } else {
     Write-Host "Runner token was not created yet; inspect the AI Fleet Runner scheduled task and restart it."
   }
@@ -1871,5 +1935,13 @@ Say "Scanning for LLMs, engines and agents"
 Scan $ip
 Install-Services $ip
 Install-Runner $ip
+if ($Enroll) {
+  if (-not $Master) { throw "-Master is required with -Enroll" }
+  if (-not $RunnerTokenValue) { throw "Runner token was not created; enrollment cannot complete" }
+  $body = @{ code = $Enroll; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
+  Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd('/') + "/api/enroll/complete") -ContentType "application/json" -Body $body | Out-Null
+  $RunnerTokenValue = ""
+  Write-Host "Enrollment completed; approve this pending node in the console."
+}
 Say "Done"
 Write-Host "This node will show as 'pending' in the master dashboard within ~30s. Approve it there, then assign roles."

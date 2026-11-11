@@ -2,6 +2,8 @@
 uv run --with fastapi --with uvicorn --with httpx python -m unittest -v tests/test_controller.py
 """
 import json
+import asyncio
+import hashlib
 import os
 import sys
 import tempfile
@@ -77,6 +79,7 @@ class FakeRunner(BaseHTTPRequestHandler):
     ops: dict = {}
     op_script: list = []  # states an ensure op goes through on successive polls; default ready
     agents: dict = {"claude": "/x/claude", "codex": None, "ollama": "http://o"}
+    digest = hashlib.sha256((Path(__file__).resolve().parent.parent / "nodes" / "runner.py").read_bytes()).hexdigest()
 
     def log_message(self, *a):
         pass
@@ -110,7 +113,8 @@ class FakeRunner(BaseHTTPRequestHandler):
                         FakeRunner.models.pop(op["derived"], None)
             return self._send(200, {k: v for k, v in op.items() if k != "script"})
         if self.path == "/health":
-            return self._send(200, {"ok": True, "version": "2", "max_mode": FakeRunner.max_mode, "running": 0,
+            return self._send(200, {"ok": True, "version": "2", "digest": FakeRunner.digest,
+                                    "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "models": {"remote_management": True, "disk_reserve_gb": 8},
                                     "agents": dict(FakeRunner.agents)})
@@ -162,6 +166,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 import auth  # noqa: E402
 import controller  # noqa: E402
 import events  # noqa: E402
+import tasks  # noqa: E402
+from store import db  # noqa: E402
 
 W = {"X-Fleet": "1"}
 
@@ -932,6 +938,175 @@ Imported body.
         self.task()
         rows = self.c.get("/api/usage").json()
         self.assertTrue(any(r["node_id"] == "master" and r["agent"] == "claude" for r in rows))
+
+    # ---------- phase 8: operations ----------
+
+    def test_me_reports_port_scope_and_identity(self):
+        self.assertEqual(self.c.get("/api/me").json(), {"scope": "admin", "label": "local", "local": True})
+        remote = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        for scope in ("view", "operate", "admin"):
+            token = auth.create_token(scope, "p8-" + scope)
+            me = remote.get("/api/me", headers={"Authorization": f"Bearer {token}"}).json()
+            self.assertEqual(me, {"scope": scope, "label": "p8-" + scope, "local": False})
+            exported = remote.get("/api/export", headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(exported.status_code, 200 if scope == "admin" else 403)
+
+    def test_routing_truth_without_litellm(self):
+        response = self.c.post("/api/roles", json={"role": "p8-route", "node": "master",
+                                                    "model": "fake-model:1b"}, headers=W)
+        self.assertEqual(response.status_code, 200, response.text)
+        assignment = next(row for row in response.json()["assignments"] if row["role"] == "p8-route")
+        self.assertIs(assignment["routed"], False)
+        self.assertEqual(assignment["route_reason"], "litellm not configured")
+
+    def test_enrollment_single_use_expiry_binding_audit_and_rate_limit(self):
+        original = controller.now
+        clock = [1_900_000_000.0]
+        controller.now = lambda: clock[0]
+        controller._enroll_failures.clear()
+        try:
+            made = self.c.post("/api/enroll", json={"name": "p8-node"}, headers=W)
+            self.assertEqual(made.status_code, 200, made.text)
+            enrollment = made.json()
+            self.assertEqual(len(enrollment["code"]), 10)
+            self.assertEqual(enrollment["expires_at"], clock[0] + 1800)
+            self.assertIn("--enroll " + enrollment["code"], enrollment["command"])
+
+            wrong = self.c.post("/api/enroll/complete", json={"code": "AAAAAAAAAA", "hostname": "p8-host",
+                                                                "runner_token": "secret-runner-token"})
+            self.assertEqual(wrong.status_code, 403)
+            audit = self.c.get("/api/events/list?limit=1000").json()
+            self.assertTrue(any(event["type"] == "enrollment.failed" for event in audit))
+
+            completed = self.c.post("/api/enroll/complete", json={"code": enrollment["code"],
+                                                                    "hostname": "p8-host.example",
+                                                                    "runner_token": "secret-runner-token"})
+            self.assertEqual(completed.status_code, 200, completed.text)
+            self.assertEqual(completed.json()["status"], "pending")
+            self.assertEqual(self.c.post("/api/enroll/complete", json={"code": enrollment["code"],
+                                                                        "hostname": "p8-host",
+                                                                        "runner_token": "other"}).status_code, 403)
+            with db() as c:
+                c.execute("INSERT OR IGNORE INTO nodes (id,name,status) VALUES ('p8-node-id','p8-host','pending')")
+                controller._bind_enrollment(c, "p8-node-id", "p8-host")
+                node = c.execute("SELECT status,runner_token FROM nodes WHERE id='p8-node-id'").fetchone()
+            self.assertEqual((node["status"], node["runner_token"]), ("pending", "secret-runner-token"))
+
+            expiring = self.c.post("/api/enroll", json={}, headers=W).json()
+            clock[0] += 1801
+            self.assertEqual(self.c.post("/api/enroll/complete", json={"code": expiring["code"],
+                                                                        "hostname": "late", "runner_token": "x"}).status_code, 403)
+            controller._enroll_failures.clear()
+            codes = [{"code": "BADCODE%02d" % i, "hostname": "bad", "runner_token": "x"} for i in range(5)]
+            statuses = [self.c.post("/api/enroll/complete", json=body).status_code for body in codes]
+            self.assertEqual(statuses, [403, 403, 403, 403, 429])
+        finally:
+            controller.now = original
+            controller._enroll_failures.clear()
+
+    def test_power_eligibility_blocks_agents_not_ollama(self):
+        node = {"status": "approved", "runner": {"agents": {"claude": "x", "codex": "x", "ollama": "x"},
+                                                        "power": {"on_battery": True, "battery_pct": 23, "ok": False},
+                                                        "max_mode": "auto-edit"},
+                "runner_fails": 0, "models": ["fake-model:1b"], "ceiling": "auto-edit"}
+        self.assertEqual(tasks.eligible(node, "claude", None, "auto-edit"), "on battery (23%)")
+        self.assertEqual(tasks.eligible(node, "codex", None, "auto-edit"), "on battery (23%)")
+        self.assertIsNone(tasks.eligible(node, "ollama", "fake-model:1b", "auto-edit"))
+
+    def test_role_fallbacks_reject_cycles_and_appear_in_fleet(self):
+        self.assertEqual(self.c.put("/api/roles/p8-primary", json={"fallback": "p8-secondary",
+                                                                   "description": "primary"}, headers=W).status_code, 200)
+        cycle = self.c.put("/api/roles/p8-secondary", json={"fallback": "p8-primary"}, headers=W)
+        self.assertEqual(cycle.status_code, 400)
+        info = next(row for row in self.c.get("/api/fleet").json()["roles"] if row["name"] == "p8-primary")
+        self.assertEqual(info, {"name": "p8-primary", "fallback": "p8-secondary", "description": "primary"})
+
+    def test_model_call_stats(self):
+        for ms, ok, fallback in ((10, True, None), (20, False, None), (30, True, "old-role"), (100, True, None)):
+            response = self.c.post("/api/usage/calls", json={"role": "p8-stat", "model": "m", "ms": ms,
+                                                               "ok": ok, "fallback_from": fallback}, headers=W)
+            self.assertEqual(response.status_code, 200, response.text)
+        row = next(item for item in self.c.get("/api/usage/calls?days=7").json() if item["role"] == "p8-stat")
+        self.assertEqual((row["count"], row["error_rate"], row["p50_ms"], row["p95_ms"], row["fallbacks"]),
+                         (4, 0.25, 20, 100, 1))
+
+    def test_notification_defaults_toggle_and_test_event(self):
+        rules = self.c.get("/api/notify-rules").json()
+        self.assertTrue({"task.awaiting_approval", "task.blocked", "pipeline.escalated", "node.offline"}
+                        <= {rule["event_glob"] for rule in rules})
+        rule = rules[0]
+        toggled = self.c.put(f"/api/notify-rules/{rule['id']}", json={"enabled": not rule["enabled"]}, headers=W)
+        self.assertEqual(toggled.status_code, 200, toggled.text)
+        tested = self.c.post(f"/api/notify-rules/{rule['id']}/test", headers=W)
+        self.assertEqual(tested.status_code, 200, tested.text)
+        self.assertTrue(any(event["type"] == "notify.test" for event in self.c.get("/api/events/list?limit=1000").json()))
+
+    def test_retention_cleans_worktrees_prunes_events_and_only_marks_models_idle(self):
+        task = self.task()
+        self.c.post(f"/api/tasks/{task['id']}/cancel", headers=W)
+        original = controller.now
+        clock = [time.time()]
+        controller.now = lambda: clock[0]
+        try:
+            with db() as c:
+                c.execute("UPDATE tasks SET updated_at=?,cleaned_at=NULL WHERE id=?", (clock[0] - 8 * 86400, task["id"]))
+                c.execute("INSERT INTO events (ts,task_id,type,data) VALUES (?,?,?,?)",
+                          (clock[0] - 91 * 86400, None, "p8.old", "{}"))
+                c.execute("INSERT OR REPLACE INTO model_catalog (id,reference,engine,display_name,defaults,suggested_roles,evals,source,created_at) "
+                          "VALUES ('p8-idle','fake-model:1b','ollama','idle','{}','[]','{}','test',?)", (clock[0],))
+                c.execute("INSERT OR REPLACE INTO node_models (node,catalog_id,desired,state,ownership,params,updated_at) "
+                          "VALUES ('master','p8-idle','present','ready','fleet-managed','{}',?)",
+                          (clock[0] - 15 * 86400,))
+            result = asyncio.run(controller.retention_once())
+            self.assertEqual((result["cleaned"], result["models_idle"]), (1, 1))
+            with db() as c:
+                kept = c.execute("SELECT cleaned_at FROM tasks WHERE id=?", (task["id"],)).fetchone()
+                old = c.execute("SELECT 1 FROM events WHERE type='p8.old'").fetchone()
+                state = c.execute("SELECT state FROM node_models WHERE node='master' AND catalog_id='p8-idle'").fetchone()[0]
+            self.assertIsNotNone(kept["cleaned_at"])
+            self.assertIsNone(old)
+            self.assertEqual(state, "idle")
+        finally:
+            controller.now = original
+
+    def test_export_has_no_secrets_and_import_versions_without_implicit_prune(self):
+        self.c.put("/api/roles/p8-export-keep", json={"fallback": None, "description": "keep"}, headers=W)
+        exported = self.c.get("/api/export")
+        self.assertEqual(exported.status_code, 200, exported.text)
+        text = exported.text
+        self.assertNotIn("tok-master-123", text)
+        self.assertNotIn("secret-runner-token", text)
+        doc = exported.json()
+        doc["instructions"].append({"scope": "role", "scope_id": "p8-import", "text": "one"})
+        preview = self.c.post("/api/import?dry_run=1", json=doc, headers=W)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertIn("instructions", preview.json()["changes"])
+        self.assertEqual(self.c.post("/api/import", json=doc, headers=W).status_code, 200)
+        doc["instructions"][-1]["text"] = "two"
+        self.assertEqual(self.c.post("/api/import", json=doc, headers=W).status_code, 200)
+        history = self.c.get("/api/instructions/role/p8-import/history").json()
+        self.assertEqual([row["text"] for row in history[:2]], ["two", "one"])
+        self.assertTrue(any(row["name"] == "p8-export-keep" for row in self.c.get("/api/fleet").json()["roles"]))
+        pruned = self.c.get("/api/export").json()
+        pruned["roles"] = [row for row in pruned["roles"] if row["name"] != "p8-export-keep"]
+        pruned["prune"] = True
+        self.assertEqual(self.c.post("/api/import", json=pruned, headers=W).status_code, 200)
+        self.assertFalse(any(row["name"] == "p8-export-keep" for row in self.c.get("/api/fleet").json()["roles"]))
+
+    def test_runner_digest_update_and_dashboard_redirects(self):
+        node = next(row for row in self.c.get("/api/fleet").json()["nodes"] if row["id"] == "master")
+        self.assertFalse(node["update_available"])
+        FakeRunner.digest = "outdated"
+        try:
+            wait_for(lambda: next(row for row in self.c.get("/api/fleet").json()["nodes"]
+                                  if row["id"] == "master")["update_available"])
+        finally:
+            FakeRunner.digest = hashlib.sha256(Path(controller.RUNNER_SOURCE).read_bytes()).hexdigest()
+        self.assertEqual(self.c.get("/", follow_redirects=False).headers["location"], "/app/")
+        self.assertIn("AI Fleet", self.c.get("/classic").text)
+        self.assertEqual(self.c.get("/login", follow_redirects=False).headers["location"], "/app/")
+        public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        self.assertEqual(public.get("/enroll/onboard.sh").status_code, 200)
 
 
 if __name__ == "__main__":

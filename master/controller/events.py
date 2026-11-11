@@ -4,6 +4,7 @@ import json
 import subprocess
 import threading
 import time
+import fnmatch
 from pathlib import Path
 
 from store import db
@@ -97,8 +98,39 @@ PLUGINS = load_plugins()
 
 def run_plugins(event: dict) -> None:
     for p in PLUGINS:
-        if event["type"] in p["events"] or "*" in p["events"]:
+        if _plugin_wants(p, event):
             threading.Thread(target=_run_plugin, args=(p, event), daemon=True).start()
+
+
+def _plugin_wants(plugin: dict, event: dict) -> bool:
+    """Database rules override a manifest's legacy event list for that plugin."""
+    try:
+        with db() as c:
+            rules = c.execute("SELECT event_glob,enabled FROM notify_rules WHERE plugin=?", (plugin["name"],)).fetchall()
+    except Exception:  # startup migrations may not have run yet
+        rules = []
+    if not rules:
+        return event["type"] in plugin["events"] or "*" in plugin["events"]
+    for row in rules:
+        if not row["enabled"]:
+            continue
+        pattern = row["event_glob"]
+        if pattern in ("model.state", "model.state:blocked|failed"):
+            if event["type"] == "model.state" and event.get("data", {}).get("state") in ("blocked", "failed"):
+                return True
+        elif fnmatch.fnmatchcase(event["type"], pattern):
+            return True
+    return False
+
+
+def send_test(plugin_name: str, rule_id: str) -> bool:
+    plugin = next((item for item in PLUGINS if item["name"] == plugin_name), None)
+    if not plugin:
+        return False
+    event = {"id": 0, "ts": time.time(), "task_id": None, "type": "notify.test",
+             "data": {"rule_id": rule_id}}
+    threading.Thread(target=_run_plugin, args=(plugin, event), daemon=True).start()
+    return True
 
 
 def _run_plugin(plugin: dict, event: dict) -> None:

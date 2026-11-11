@@ -43,7 +43,8 @@ FAKE_TS.chmod(0o755)
 os.environ.update({"FLEET_PLUGINS_DIR": str(TMP / "no-plugins"), "FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_TS),
                    "FLEET_POLL_SECONDS": "0.3", "FLEET_TASK_POLL_SECONDS": "0.2",
                    "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": "",
-                   "FLEET_SKILLS_DIR": str(SKILLS_DIR), "FLEET_EVAL_RESULTS": str(EVAL_RESULTS),
+                   "FLEET_SKILLS_DIR": str(SKILLS_DIR), "FLEET_INSTRUCTIONS_DIR": str(TMP / "no-instructions"),
+                   "FLEET_EVAL_RESULTS": str(EVAL_RESULTS),
                    "FLEET_EVAL_CMD": f"{sys.executable} {FAKE_EVAL}"})
 
 
@@ -684,6 +685,166 @@ Imported body.
         skill_file.write_text(skill_file.read_text().replace("Imported body.", "Changed imported body."))
         changed = controller.fleet_skills.import_repo()
         self.assertEqual((changed[0]["version"], changed[0]["author"]), (4, "repo"))
+
+    # ---------- G5: repo instructions and skills ----------
+
+    @staticmethod
+    def _forget_g5(skill_ids=(), instruction_scopes=()):
+        with db() as c:
+            for skill_id in skill_ids:
+                c.execute("DELETE FROM skills WHERE id=?", (skill_id,))
+                c.execute("DELETE FROM skill_bindings WHERE skill_id=?", (skill_id,))
+            for scope, scope_id in instruction_scopes:
+                c.execute("DELETE FROM instructions WHERE scope=? AND scope_id=?", (scope, scope_id))
+
+    def test_g5_fleet_instruction_imported_once_never_over_operator(self):
+        repo_text = controller.fleet_instructions.DEFAULT_DIR.joinpath("fleet.md").read_text().strip()
+        self.assertLessEqual(len(repo_text.splitlines()), 8)
+        self.assertNotIn("JSON", repo_text)
+        root = TMP / "g5-instructions"
+        (root / "role").mkdir(parents=True, exist_ok=True)
+        (root / "fleet.md").write_text(repo_text + "\n")
+        (root / "role" / "g5-role.md").write_text("Role seed.\n")
+        scopes = [("fleet", "*"), ("role", "g5-role")]
+        self._forget_g5(instruction_scopes=scopes)
+        try:
+            first = controller.fleet_instructions.import_repo(root)
+            self.assertEqual([(r["scope"], r["scope_id"], r["version"], r["author"]) for r in first],
+                             [("fleet", "*", 1, "repo"), ("role", "g5-role", 1, "repo")])
+            self.assertEqual(first[0]["text"], repo_text)
+            self.assertEqual(controller.fleet_instructions.import_repo(root), [])
+
+            edited = self.c.put("/api/instructions/fleet/*", json={"text": "Operator wins."}, headers=W)
+            self.assertEqual(edited.json()["version"], 2)
+            (root / "fleet.md").write_text("A changed repo instruction.\n")
+            self.assertEqual(controller.fleet_instructions.import_repo(root), [])
+            history = self.c.get("/api/instructions/fleet/*/history").json()
+            self.assertEqual([(r["version"], r["text"], r["author"]) for r in history],
+                             [(2, "Operator wins.", "local"), (1, repo_text, "repo")])
+        finally:
+            self._forget_g5(instruction_scopes=scopes)
+
+    def test_g5_skill_bind_front_matter_applies_on_first_import_only(self):
+        root = TMP / "g5-skills"
+        (root / "g5-bound").mkdir(parents=True, exist_ok=True)
+        (root / "g5-bad-bind").mkdir(exist_ok=True)
+        skill_file = root / "g5-bound" / "SKILL.md"
+        skill_file.write_text("---\nid: g5-bound\ndescription: Bound\nagents: [claude]\nrisk: prompt-only\n"
+                              "bind: [role:g5-bound-role, node:g5-node]\n---\nFirst body.\n")
+        (root / "g5-bad-bind" / "SKILL.md").write_text(
+            "---\nid: g5-bad-bind\ndescription: Bad\nagents: [claude]\nrisk: prompt-only\nbind: [nowhere]\n---\nBody.\n")
+        self._forget_g5(skill_ids=("g5-bound", "g5-bad-bind"))
+        try:
+            role = {"scope": "role", "scope_id": "g5-bound-role"}
+            node = {"scope": "node", "scope_id": "g5-node"}
+            first = controller.fleet_skills.import_repo(root)
+            self.assertEqual([row["id"] for row in first], ["g5-bound"])  # an invalid bind rejects the skill
+            self.assertEqual(first[0]["bindings"], [{"skill_id": "g5-bound", **role}, {"skill_id": "g5-bound", **node}])
+            current = next(row for row in self.c.get("/api/skills").json() if row["id"] == "g5-bound")
+            self.assertCountEqual(current["bindings"], [role, node])
+
+            self.assertEqual(self.c.request("DELETE", "/api/skills/g5-bound/bindings", json=role,
+                                            headers=W).status_code, 200)
+            skill_file.write_text(skill_file.read_text().replace("First body.", "Second body."))
+            second = controller.fleet_skills.import_repo(root)
+            self.assertEqual([(row["id"], row["version"], row["bindings"]) for row in second],
+                             [("g5-bound", 2, [])])
+            current = next(row for row in self.c.get("/api/skills").json() if row["id"] == "g5-bound")
+            self.assertEqual(current["bindings"], [node])
+        finally:
+            self._forget_g5(skill_ids=("g5-bound", "g5-bad-bind"))
+
+    def test_g5_first_import_commits_skill_and_bindings_together(self):
+        root = TMP / "g5-atomic"
+        (root / "g5-atomic").mkdir(parents=True, exist_ok=True)
+        (root / "g5-atomic" / "SKILL.md").write_text(
+            "---\nid: g5-atomic\ndescription: Atomic\nagents: [claude]\nrisk: prompt-only\n"
+            "bind: [role:g5-atomic-a, role:g5-atomic-b]\n---\nBody.\n")
+        self._forget_g5(skill_ids=("g5-atomic",))
+        with db() as c:  # interrupt the first import after the skill row and the first binding
+            c.execute("CREATE TRIGGER g5_interrupt BEFORE INSERT ON skill_bindings "
+                      "WHEN NEW.scope_id='g5-atomic-b' BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+        try:
+            self.assertEqual(controller.fleet_skills.import_repo(root), [])
+            with db() as c:
+                self.assertIsNone(c.execute("SELECT 1 FROM skills WHERE id='g5-atomic'").fetchone())
+                self.assertIsNone(c.execute("SELECT 1 FROM skill_bindings WHERE skill_id='g5-atomic'").fetchone())
+                c.execute("DROP TRIGGER g5_interrupt")
+            retried = controller.fleet_skills.import_repo(root)
+            self.assertEqual([(r["version"], [b["scope_id"] for b in r["bindings"]]) for r in retried],
+                             [(1, ["g5-atomic-a", "g5-atomic-b"])])
+            current = next(row for row in self.c.get("/api/skills").json() if row["id"] == "g5-atomic")
+            self.assertCountEqual(current["bindings"], [{"scope": "role", "scope_id": "g5-atomic-a"},
+                                                        {"scope": "role", "scope_id": "g5-atomic-b"}])
+        finally:
+            with db() as c:
+                c.execute("DROP TRIGGER IF EXISTS g5_interrupt")
+            self._forget_g5(skill_ids=("g5-atomic",))
+
+    def test_g5_bind_applies_on_first_repo_import_after_operator_version(self):
+        root = TMP / "g5-operator-first"
+        (root / "g5-operator").mkdir(parents=True, exist_ok=True)
+        (root / "g5-operator" / "SKILL.md").write_text(
+            "---\nid: g5-operator\ndescription: Repo\nagents: [claude]\nrisk: prompt-only\n"
+            "bind: [role:g5-operator-role]\n---\nRepo body.\n")
+        self._forget_g5(skill_ids=("g5-operator",))
+        try:
+            made = self.c.put("/api/skills/g5-operator", json={
+                "description": "Operator", "agents": ["claude"], "risk": "prompt-only", "body": "Operator body.",
+            }, headers=W)
+            self.assertEqual(made.status_code, 200, made.text)
+            role = {"scope": "role", "scope_id": "g5-operator-role"}
+            imported = controller.fleet_skills.import_repo(root)
+            self.assertEqual([(r["version"], r["author"], r["bindings"]) for r in imported],
+                             [(2, "repo", [{"skill_id": "g5-operator", **role}])])
+            self.c.request("DELETE", "/api/skills/g5-operator/bindings", json=role, headers=W)
+            (root / "g5-operator" / "SKILL.md").write_text(
+                (root / "g5-operator" / "SKILL.md").read_text().replace("Repo body.", "Repo body two."))
+            again = controller.fleet_skills.import_repo(root)
+            self.assertEqual([(r["version"], r["bindings"]) for r in again], [(3, [])])
+        finally:
+            self._forget_g5(skill_ids=("g5-operator",))
+
+    def test_g5_repo_skill_files_parse_and_validate(self):
+        expected = {"grounded-answer": ["role:fast", "agent:ollama"], "reviewer": ["role:reviewer"]}
+        for skill_id, binds in expected.items():
+            with self.subTest(skill=skill_id):
+                path = controller.fleet_skills.DEFAULT_DIR / skill_id / "SKILL.md"
+                meta, body = controller.fleet_skills._frontmatter(path.read_text(encoding="utf-8"))
+                self.assertEqual(meta["id"], skill_id)
+                controller.fleet_skills.validate(skill_id, meta["description"], meta["agents"], meta["risk"], body)
+                self.assertEqual(meta["bind"], binds)
+                self.assertEqual(controller.fleet_skills._bindings(meta["bind"]),
+                                 [tuple(b.split(":", 1)) for b in binds])
+                self.assertTrue(15 <= len(body.strip().splitlines()) <= 30, len(body.strip().splitlines()))
+        reviewer = (controller.fleet_skills.DEFAULT_DIR / "reviewer" / "SKILL.md").read_text()
+        examples = [json.loads(line) for line in reviewer.splitlines()
+                    if line.startswith('{"verdict":"') and "|" not in line]  # skip the schema line
+        self.assertEqual([e["verdict"] for e in examples], ["request_changes", "abstain"])
+        issue = examples[0]["issues"][0]
+        self.assertEqual(set(issue), {"severity", "file", "problem", "evidence", "expected", "actual", "fix"})
+        self.assertIn(issue["evidence"], reviewer.replace('\\"', '"'))
+        self.assertNotEqual(issue["fix"], issue["evidence"])
+        self.assertEqual(examples[1]["issues"], [])
+
+    def test_g5_reviewer_preview_includes_skill_and_fleet_instruction(self):
+        skill_ids, scopes = ("grounded-answer", "reviewer"), [("fleet", "*")]
+        self._forget_g5(skill_ids=skill_ids, instruction_scopes=scopes)
+        try:
+            controller.fleet_skills.import_repo(controller.fleet_skills.DEFAULT_DIR)
+            controller.fleet_instructions.import_repo(controller.fleet_instructions.DEFAULT_DIR)
+            preview = self.c.post("/api/policies/preview", json={
+                "node": "master", "agent": "claude", "role": "reviewer"}, headers=W)
+            self.assertEqual(preview.status_code, 200, preview.text)
+            preview = preview.json()
+            self.assertEqual([s["id"] for s in preview["skills"]], ["reviewer"])
+            self.assertIn("## skill: reviewer v1", preview["instructions"])
+            self.assertTrue(preview["instructions"].startswith("## fleet\n- Say \"I don't know\""))
+            fast = self.c.post("/api/policies/preview", json={
+                "node": "master", "agent": "ollama", "role": "fast"}, headers=W).json()
+            self.assertEqual([s["id"] for s in fast["skills"]], ["grounded-answer"])
+        finally:
+            self._forget_g5(skill_ids=skill_ids, instruction_scopes=scopes)
 
     def test_skill_snapshot_filters_agents_and_records_versions(self):
         skill_id = "phase7-snapshot"

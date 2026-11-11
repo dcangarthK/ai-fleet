@@ -1,0 +1,5 @@
+- Say "I don't know" or mark a claim UNVERIFIED instead of guessing.
+- Cite file:line for claims about this codebase.
+- Never invent paths, APIs, flags, model names or config keys.
+- Run the tests before claiming something works.
+- When unsure what the owner wants, state your assumption in one line and continue.

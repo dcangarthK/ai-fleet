@@ -39,6 +39,7 @@ import auth  # noqa: E402
 import events  # noqa: E402
 import evaluations  # noqa: E402
 import grounding  # noqa: E402
+import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
 import skills as fleet_skills  # noqa: E402
@@ -477,6 +478,7 @@ async def loop() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     fleet_skills.import_repo()
+    fleet_instructions.import_repo()
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),

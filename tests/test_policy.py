@@ -99,6 +99,15 @@ class Merge(unittest.TestCase):
         self.assertNotEqual(a["hash"], c["hash"])
         self.assertEqual(len(a["hash"]), 64)
 
+    def test_auto_approve_only_narrows(self):
+        r = P.merge([L("fleet", body={"auto_approve": {"agents": ["claude", "codex"], "full_mode": True, "denied_tools": True}}),
+                     L("node:n", body={"auto_approve": {"agents": ["codex"], "full_mode": False}})])
+        self.assertEqual(r["policy"]["auto_approve"], {"agents": ["codex"], "full_mode": False, "denied_tools": True})
+        with self.assertRaises(ValueError):
+            P.validate({"auto_approve": {"agents": ["ollama"]}})
+        with self.assertRaises(ValueError):
+            P.validate({"auto_approve": {"full_mode": "yes"}})
+
     def test_empty(self):
         r = P.merge([])
         self.assertEqual(r["instructions"], "")

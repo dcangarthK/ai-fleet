@@ -1138,6 +1138,7 @@ class PipelineRequest(BaseModel):
     mode: str = "auto-edit"
     require_trusted: bool = True
     trusted_roles: list[str] = Field(default_factory=list)
+    bypass: bool = False
 
 
 def pipeline_view(row) -> dict:
@@ -1149,6 +1150,7 @@ def pipeline_view(row) -> dict:
         except (ValueError, TypeError):
             value[field] = fallback
     value["require_trusted"] = bool(value.get("require_trusted", 1))
+    value["bypass"] = bool(value.get("bypass", 0))
     return value
 
 
@@ -1308,7 +1310,7 @@ async def _pipeline_diff(p: dict) -> str:
 def _pipeline_events(p: dict, history_start: int) -> None:
     for item in p["history"][history_start:]:
         events.emit(None, f"pipeline.{item['state']}", {"id": p["id"], "title": p["title"],
-                                                        "round": item["round"]})
+                                                        "round": item["round"], "note": item.get("note")})
 
 
 async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
@@ -1317,6 +1319,7 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
             task = await tasks.create_task(tasks.TaskIn(
                 agent=p["builder"]["agent"], prompt=p["spec"], title=p["title"], mode=p["mode"],
                 repo=p.get("repo"), gate=p.get("gate"), node=p["builder"].get("node"), worktree=True,
+                trusted_bypass=bool(p.get("bypass")),
             ))
             p["build_task"] = task["id"]
             save_pipeline(p)
@@ -1446,12 +1449,12 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
     with db() as c:
         c.execute("""INSERT INTO pipelines
             (id,title,state,round,max_rounds,spec,repo,gate,mode,builder,reviewers,build_task,reviews,history,
-             created_at,updated_at,require_trusted,trusted_roles)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+             created_at,updated_at,require_trusted,trusted_roles,bypass)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 p["id"], p["title"], p["state"], p["round"], p["max_rounds"], p["spec"], p.get("repo"),
                 p.get("gate"), p["mode"], json.dumps(p["builder"]), json.dumps(p["reviewers"]), p.get("build_task"),
                 json.dumps(p["reviews"]), json.dumps(p["history"]), now, now, int(p["require_trusted"]),
-                json.dumps(p["trusted_roles"]),
+                json.dumps(p["trusted_roles"]), int(p.get("bypass", False)),
             ))
     _pipeline_events(p, 0)
     try:

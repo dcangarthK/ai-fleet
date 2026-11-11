@@ -73,8 +73,8 @@ MIGRATIONS = {
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
-              "cleaned_at": "REAL"},
-    "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'"},
+              "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0"},
+    "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0"},
 }
 
 
@@ -110,6 +110,9 @@ def _seed_notify_rules(c: sqlite3.Connection) -> None:
         ("pipeline-escalated", "pipeline.escalated"),
         ("model-state", "model.state"),
         ("node-offline", "node.offline"),
+        ("pipeline-ready", "pipeline.ready"),
+        ("pipeline-failed", "pipeline.failed"),
+        ("auto-approve-exhausted", "task.auto_approve_exhausted"),
     ]
     for identifier, event_glob in defaults:
         c.execute("INSERT OR IGNORE INTO notify_rules (id,event_glob,plugin,enabled) VALUES (?,?,?,1)",

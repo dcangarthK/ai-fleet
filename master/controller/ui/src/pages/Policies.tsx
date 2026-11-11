@@ -33,6 +33,8 @@ export function compact(body: PolicyBody): PolicyBody {
   const l = body.limits ?? {};
   const limits = Object.fromEntries(Object.entries(l).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length) && !Number.isNaN(v)));
   if (Object.keys(limits).length) out.limits = limits;
+  const a = body.auto_approve;
+  if (a && (a.agents?.length || a.full_mode !== undefined || a.denied_tools !== undefined)) out.auto_approve = a;
   return out;
 }
 
@@ -206,6 +208,32 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
                      onChange={(e) => set((b) => ({ ...b, limits: { ...b.limits, quiet_hours: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) } }))} />
             </label>
           </div>
+          <fieldset className="panel" style={{ padding: 12, margin: 0 }}>
+            <legend className="small" style={{ padding: "0 6px" }}>Approvals for Claude and Codex</legend>
+            <div className="row" style={{ gap: 16 }}>
+              {(["claude", "codex"] as const).map((agent) => (
+                <label key={agent} className="row small" style={{ gap: 6 }}>
+                  <input type="checkbox" checked={(body.auto_approve?.agents ?? []).includes(agent)}
+                         onChange={(e) => set((b) => {
+                           const agents = new Set(b.auto_approve?.agents ?? []);
+                           if (e.target.checked) agents.add(agent); else agents.delete(agent);
+                           return { ...b, auto_approve: { ...b.auto_approve, agents: [...agents] } };
+                         })} />
+                  Trust {agent === "claude" ? "Claude" : "Codex"}
+                </label>
+              ))}
+            </div>
+            <label className="row small" style={{ gap: 6, marginTop: 8 }}>
+              <input type="checkbox" checked={!!body.auto_approve?.denied_tools}
+                     onChange={(e) => set((b) => ({ ...b, auto_approve: { ...b.auto_approve, denied_tools: e.target.checked } }))} />
+              When a trusted agent is denied a tool (like Bash), approve it automatically (up to 3 times per task)
+            </label>
+            <label className="row small" style={{ gap: 6 }}>
+              <input type="checkbox" checked={!!body.auto_approve?.full_mode}
+                     onChange={(e) => set((b) => ({ ...b, auto_approve: { ...b.auto_approve, full_mode: e.target.checked } }))} />
+              Let trusted agents start in full mode (no permission prompts) without asking you. The node must also allow full mode.
+            </label>
+          </fieldset>
         </div>
       )}
 

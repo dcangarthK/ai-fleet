@@ -150,7 +150,8 @@ def node_rows() -> list[dict]:
         rows = [dict(r) for r in c.execute("SELECT * FROM nodes")]
         running = dict(c.execute(
             "SELECT node_id, COUNT(*) FROM tasks WHERE state IN ('starting','working') GROUP BY node_id").fetchall())
-    for _key, _account, node_id in budget.RESERVED.values():  # admitted continuations hold the node's slot too
+    # A snapshot: sync endpoints call this from a worker thread while the loop adds and removes reservations.
+    for _key, _account, node_id in list(budget.RESERVED.values()):  # admitted continuations hold the node's slot too
         running[node_id] = running.get(node_id, 0) + 1
     for n in rows:
         n.pop("runner_token", None)

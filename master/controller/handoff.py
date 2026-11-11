@@ -395,6 +395,8 @@ async def _run_one(task_id: str, now: float) -> None:
             result = await _handoff(task, same_slot(task), budget.current_rules(), now)
             if result.get("action") == "handoff":
                 _set_schedule(task_id, state="done", reason=f"retried as {result['task_id']}")
+            elif result.get("moved_on"):  # resumed or resolved meanwhile: nothing is left for the owner
+                _set_schedule(task_id, state="skipped", reason=result["reason"])
             else:
                 _leave(task, result.get("reason") or "could not retry")
             return

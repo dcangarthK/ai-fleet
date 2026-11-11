@@ -687,7 +687,7 @@ def running_count(key: str, exclude: str | None = None, account: str | None = No
         args += (account,)
     with db() as c:
         running = {r[0] for r in c.execute(query, args)}
-    reserved = {task_id for task_id, (r_key, r_account, _node) in RESERVED.items()
+    reserved = {task_id for task_id, (r_key, r_account, _node) in list(RESERVED.items())
                 if r_key == key and task_id != exclude and (not account or r_account == account)}
     return len(running | reserved)
 

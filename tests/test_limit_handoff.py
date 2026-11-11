@@ -493,6 +493,27 @@ class WaitTests(HandoffBase):
         self.assertEqual(self.sent(new)["base_branch"], f"fleet/{t['id']}")
         self.assertEqual(len(self.posts(t["id"], "checkpoint")), 1)
 
+    def test_a_first_turn_retry_that_finds_the_task_moved_on_is_skipped_not_left(self):
+        t = self.ok(agent="claude", model=SONNET, kind="draft", gate=None)
+        self.limit(t["id"], session_id=None)
+        row = self.schedule(t["id"])
+        with db() as c:
+            c.execute("UPDATE agent_usage SET resets_at=? WHERE task_id=?", (time.time() - 1, t["id"]))
+        real = handoff._handoff
+
+        async def resumed_meanwhile(task, slot, rules, now):  # the owner resumed it while we waited for its lock
+            return {"action": "none", "moved_on": True, "reason": "task is working"}
+
+        handoff._handoff = resumed_meanwhile
+        try:
+            self.c.portal.call(handoff.run_due, row["at"] + 1)
+        finally:
+            handoff._handoff = real
+        self.assertEqual(self.schedule(t["id"])["state"], "skipped")
+        with db() as c:
+            left = c.execute("SELECT COUNT(*) FROM events WHERE task_id=? AND type='handoff.left'", (t["id"],)).fetchone()[0]
+        self.assertEqual(left, 0)
+
     def test_manual_message_goes_through_admission(self):
         t = self.review()
         self.limit(t["id"])

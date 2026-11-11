@@ -1,0 +1,242 @@
+[
+  {
+    "id": "config_default_role",
+    "context": "# controller settings\ndefault_role: reviewer\nmax_parallel: 2\n",
+    "question": "Which role is configured as the default?",
+    "answerable": true,
+    "answer": "reviewer",
+    "aliases": ["default_role: reviewer"]
+  },
+  {
+    "id": "config_ollama_port",
+    "context": "services:\n  ollama:\n    listen: 127.0.0.1:11434\n    keep_alive: 5m\n",
+    "question": "On which port does Ollama listen?",
+    "answerable": true,
+    "answer": "11434",
+    "aliases": ["127.0.0.1:11434"]
+  },
+  {
+    "id": "config_temperature",
+    "context": "roles:\n  grounded:\n    options:\n      temperature: 0\n      num_ctx: 8192\n",
+    "question": "What temperature is set for the grounded role?",
+    "answerable": true,
+    "answer": "0",
+    "aliases": ["temperature: 0"]
+  },
+  {
+    "id": "config_headroom",
+    "context": "LAPTOP_GB = 16\nHEADROOM_GB = 3  # macOS + apps + KV cache\n",
+    "question": "How many GB of headroom are reserved?",
+    "answerable": true,
+    "answer": "3",
+    "aliases": ["HEADROOM_GB = 3"]
+  },
+  {
+    "id": "log_task_complete",
+    "context": "2026-11-11T08:12:04Z task=7 state=running\n2026-11-11T08:12:09Z task=7 state=complete exit=0\n",
+    "question": "What was the final state of task 7?",
+    "answerable": true,
+    "answer": "complete",
+    "aliases": ["state=complete"]
+  },
+  {
+    "id": "log_denial_reason",
+    "context": "auth request id=req-19 subject=node-3\ndecision=deny reason=expired_token\n",
+    "question": "Why was request req-19 denied?",
+    "answerable": true,
+    "answer": "expired_token",
+    "aliases": ["reason=expired_token"]
+  },
+  {
+    "id": "log_model_speed",
+    "context": "model=phi4:14b load=8.7GB\neval_count=420 eval_rate=18.6 tok/s\n",
+    "question": "What evaluation rate was recorded?",
+    "answerable": true,
+    "answer": "18.6 tok/s",
+    "aliases": ["eval_rate=18.6 tok/s"]
+  },
+  {
+    "id": "log_gate_failure",
+    "context": "gate=fleet-gate status=failed\nfailed_test=tests.test_policy.PolicyTests.test_denied_action\n",
+    "question": "Which test caused the gate failure?",
+    "answerable": true,
+    "answer": "tests.test_policy.PolicyTests.test_denied_action",
+    "aliases": ["failed_test=tests.test_policy.PolicyTests.test_denied_action"]
+  },
+  {
+    "id": "code_canonical_suffix",
+    "context": "def canonical(name: str) -> str:\n    return name if ':' in name.split('/')[-1] else f'{name}:latest'\n",
+    "question": "Which suffix is added to an untagged model name?",
+    "answerable": true,
+    "answer": ":latest",
+    "aliases": ["latest"]
+  },
+  {
+    "id": "code_timeout",
+    "context": "def run_job(proc):\n    try:\n        return proc.communicate(timeout=20)\n    except TimeoutExpired:\n        proc.kill()\n",
+    "question": "What timeout in seconds is passed to communicate?",
+    "answerable": true,
+    "answer": "20",
+    "aliases": ["timeout=20"]
+  },
+  {
+    "id": "code_allowed_verdicts",
+    "context": "VERDICTS = {'approve', 'request_changes', 'abstain'}\nif verdict not in VERDICTS:\n    return invalid()\n",
+    "question": "Which verdict represents declining to make a review claim?",
+    "answerable": true,
+    "answer": "abstain",
+    "aliases": ["'abstain'"]
+  },
+  {
+    "id": "code_sandbox_network",
+    "context": "return ['docker', 'run', '--rm', '-i', '--network', 'none', '--read-only']\n",
+    "question": "What Docker network mode is selected?",
+    "answerable": true,
+    "answer": "none",
+    "aliases": ["'none'"]
+  },
+  {
+    "id": "docs_escalation_order",
+    "context": "On ABSTAIN, try the role fallback once. If policy permits escalation, then create a read-only agent task.",
+    "question": "What is tried before a read-only agent task?",
+    "answerable": true,
+    "answer": "the role fallback once",
+    "aliases": ["role fallback"]
+  },
+  {
+    "id": "docs_signal_policy",
+    "context": "Self-confidence and token probabilities remain telemetry until an evaluation shows that they predict errors.",
+    "question": "How are self-confidence and token probabilities treated before calibration?",
+    "answerable": true,
+    "answer": "telemetry",
+    "aliases": ["remain telemetry"]
+  },
+  {
+    "id": "docs_review_evidence",
+    "context": "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk.",
+    "question": "What kind of evidence must each review issue provide?",
+    "answerable": true,
+    "answer": "an exact quote",
+    "aliases": ["exact quote"]
+  },
+  {
+    "id": "config_missing_fallback",
+    "context": "roles:\n  coder:\n    primary: qwen2.5-coder:7b\n    temperature: 0.2\n",
+    "question": "Which fallback model is configured for coder?",
+    "answerable": false,
+    "answer": "phi4:14b",
+    "aliases": ["phi4"]
+  },
+  {
+    "id": "config_no_tls_cert",
+    "context": "server:\n  bind: 127.0.0.1\n  auth: token\n  tls: disabled\n",
+    "question": "What is the TLS certificate path?",
+    "answerable": false,
+    "answer": "/etc/fleet/server.crt",
+    "aliases": ["server.crt"]
+  },
+  {
+    "id": "config_removed_api_router",
+    "context": "The standalone API-key router is disabled. Requests go through the authenticated controller.",
+    "question": "On which port is the standalone API-key router running?",
+    "answerable": false,
+    "answer": "8000",
+    "aliases": ["port 8000"]
+  },
+  {
+    "id": "config_unknown_queue_limit",
+    "context": "queue:\n  strategy: fifo\n  retry_limit: 2\n",
+    "question": "What is the queue's maximum item count?",
+    "answerable": false,
+    "answer": "500",
+    "aliases": ["five hundred"]
+  },
+  {
+    "id": "log_no_exit_code",
+    "context": "2026-11-11T09:00:00Z task=12 state=queued\n2026-11-11T09:00:02Z task=12 state=running\n",
+    "question": "What exit code did task 12 return?",
+    "answerable": false,
+    "answer": "17",
+    "aliases": ["seventeen"]
+  },
+  {
+    "id": "log_contradicted_success",
+    "context": "pipeline=release-4 result=failed\nsummary='unit tests did not start because the sandbox was unavailable'\n",
+    "question": "Which commit was successfully released?",
+    "answerable": false,
+    "answer": "a81d9e2",
+    "aliases": ["commit a81d9e2"]
+  },
+  {
+    "id": "log_missing_model",
+    "context": "request=91 role=reviewer status=unroutable\nreason='no eligible node online'\n",
+    "question": "Which model handled request 91?",
+    "answerable": false,
+    "answer": "qwen3:8b",
+    "aliases": ["qwen3"]
+  },
+  {
+    "id": "log_no_duration",
+    "context": "task=44 created_at=2026-11-11T10:14:00Z\nstatus=awaiting_approval\n",
+    "question": "How many seconds did task 44 take to complete?",
+    "answerable": false,
+    "answer": "37 seconds",
+    "aliases": ["37"]
+  },
+  {
+    "id": "code_no_return_value",
+    "context": "def unload(base, model):\n    try:\n        post(base, '/api/generate', {'model': model, 'keep_alive': 0})\n    except OSError:\n        pass\n",
+    "question": "What status string does unload return on success?",
+    "answerable": false,
+    "answer": "unloaded",
+    "aliases": ["success"]
+  },
+  {
+    "id": "code_missing_hash",
+    "context": "def save_event(store, event):\n    store.append(json.dumps(event))\n    store.flush()\n",
+    "question": "Which hashing algorithm protects each saved event?",
+    "answerable": false,
+    "answer": "SHA-256",
+    "aliases": ["sha256"]
+  },
+  {
+    "id": "code_contradicted_async",
+    "context": "def ask_model(prompt):\n    # This client is deliberately synchronous.\n    return urllib.request.urlopen(make_request(prompt)).read()\n",
+    "question": "Which async runtime schedules ask_model?",
+    "answerable": false,
+    "answer": "asyncio",
+    "aliases": ["event loop"]
+  },
+  {
+    "id": "code_unknown_retry_delay",
+    "context": "for attempt in range(3):\n    result = send(request)\n    if result.ok:\n        break\n",
+    "question": "How long does the code sleep between retries?",
+    "answerable": false,
+    "answer": "one second",
+    "aliases": ["1s"]
+  },
+  {
+    "id": "docs_no_windows_support",
+    "context": "The onboarding guide in this section covers macOS and Linux nodes only.",
+    "question": "Which PowerShell version is required for Windows onboarding?",
+    "answerable": false,
+    "answer": "PowerShell 7",
+    "aliases": ["pwsh 7"]
+  },
+  {
+    "id": "docs_rejected_threshold",
+    "context": "Fixed confidence thresholds are not adopted. Thresholds must be calibrated separately for each model.",
+    "question": "What universal confidence threshold gates all models?",
+    "answerable": false,
+    "answer": "0.85",
+    "aliases": ["85%"]
+  },
+  {
+    "id": "docs_unknown_owner",
+    "context": "Node approval is the user's responsibility and is performed from the dashboard.",
+    "question": "What is the full name of the person who approves nodes?",
+    "answerable": false,
+    "answer": "Alex Morgan",
+    "aliases": ["A. Morgan"]
+  }
+]

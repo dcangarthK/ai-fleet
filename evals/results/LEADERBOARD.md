@@ -22,3 +22,14 @@ Scores are % of the role's checks passed. 'Fits 16GB' = loaded size + 3GB headro
 - **fast**: glm-4.7-flash:latest (100%); on a 16GB laptop: qwen2.5-coder:14b (100%)
 
 Treat role scores below ~70% as 'second opinion only'; tests and Claude make the final call.
+
+## Grounding signal policy
+
+Signals are kept only when a training-selected threshold halves held-out error at >=70% held-out coverage.
+
+| Model | Signal | Decision |
+|---|---|---|
+| — | logprob_min | dropped |
+| — | logprob_mean | dropped |
+| — | confidence | dropped |
+| — | agreement | dropped |

@@ -1,6 +1,7 @@
 """Tests for the shared reviewer schema and deterministic diff grounding."""
 
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -8,6 +9,111 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "master" / "controller"))
 import grounding  # noqa: E402
+
+
+class GroundingCalibrationHelpers(unittest.TestCase):
+    def test_check_quotes_uses_whitespace_normalised_verbatim_matching(self):
+        context = "role: grounded\n  temperature:   0\nstatus: ready"
+        quotes = ["temperature: 0", "status: ready", "status: missing", "   "]
+        self.assertEqual(grounding.check_quotes(quotes, context), (2, 2))
+
+    def test_content_logprobs_cover_only_split_answer_tokens(self):
+        tokens = [
+            {"token": '<think>guess {"answer":"London"}</think>', "logprob": math.log(0.01)},
+            {"token": '{"status":"ANSWER","answer":"', "logprob": math.log(0.2)},
+            {"token": "New", "logprob": math.log(0.9)},
+            {"token": " York", "logprob": math.log(0.8)},
+            {"token": " City", "logprob": math.log(0.7)},
+            {"token": ".", "logprob": math.log(0.01)},
+            {"token": '\",\"quotes\":[\"New York City\"],\"tags\":[\"ESTABLISHED\"],'
+                      '\"confidence\":0.9}', "logprob": math.log(0.3)},
+        ]
+        score = grounding.content_logprob_score(tokens)
+        self.assertAlmostEqual(score["min"], 0.7)
+        self.assertAlmostEqual(score["mean"], 0.8)
+
+    def test_content_logprobs_return_none_without_textual_answer_content(self):
+        missing = [{"token": '{"status":"ABSTAIN"}', "logprob": -0.1}]
+        punctuation = [{"token": '{"answer":"', "logprob": -0.1},
+                       {"token": "...", "logprob": -2}, {"token": '"}', "logprob": -0.1}]
+        self.assertIsNone(grounding.content_logprob_score(missing))
+        self.assertIsNone(grounding.content_logprob_score(punctuation))
+
+    def test_agreement_normalises_case_and_whitespace(self):
+        samples = [{"answer": "New  York"}, {"answer": " new york "}, {"answer": "Boston"}]
+        self.assertEqual(grounding.agreement(samples), 2 / 3)
+        self.assertEqual(grounding.agreement([]), 0.0)
+
+    def test_agreement_matches_primary_status_and_treats_invalid_as_disagreement(self):
+        primary = {"status": "ANSWER", "answer": "X", "valid_json": True}
+        samples = [
+            {"status": "ANSWER", "answer": "Y", "valid_json": True},
+            {"status": "ANSWER", "answer": " x ", "valid_json": True},
+            {"status": "INVALID", "answer": "X", "valid_json": False},
+        ]
+        self.assertEqual(grounding.agreement(samples, primary), 1 / 3)
+        abstain = {"status": "ABSTAIN", "answer": "", "valid_json": True}
+        invalid = {"status": "INVALID", "answer": "", "valid_json": False}
+        self.assertEqual(grounding.agreement([invalid], abstain), 0.0)
+
+    def test_outcome_covers_all_five_classes(self):
+        answerable = {"answerable": True, "answer": "11434", "aliases": ["port 11434"]}
+        unavailable = {"answerable": False, "answer": "8000", "aliases": []}
+        self.assertEqual(grounding.outcome(answerable, {"status": "ANSWER", "answer": "port 11434"}),
+                         "correct")
+        self.assertEqual(grounding.outcome(answerable, {"status": "ABSTAIN", "answer": ""}),
+                         "wrong_abstain")
+        self.assertEqual(grounding.outcome(answerable, {"status": "ANSWER", "answer": "8080"}), "wrong")
+        self.assertEqual(grounding.outcome(unavailable, {"status": "ABSTAIN", "answer": ""}),
+                         "correct_abstain")
+        self.assertEqual(grounding.outcome(unavailable, {"status": "ANSWER", "answer": "8000"}),
+                         "hallucinated")
+
+    def test_outcome_accepts_sentence_form_but_rejects_near_misses(self):
+        case = {"answerable": True, "answer": "8000", "aliases": ["port 8000"]}
+        self.assertEqual(
+            grounding.outcome(case, {"status": "ANSWER", "answer": "The service listens on port 8000."}),
+            "correct",
+        )
+        self.assertEqual(
+            grounding.outcome(case, {"status": "ANSWER", "answer": "The service listens on port 18000."}),
+            "wrong",
+        )
+
+    def test_outcome_ignores_article_and_surrounding_punctuation(self):
+        case = {"answerable": True, "answer": "reviewer", "aliases": []}
+        reply = {"status": "ANSWER", "answer": "The reviewer."}
+        self.assertEqual(grounding.outcome(case, reply), "correct")
+
+    def test_outcome_rejects_numeric_answer_inside_decimal(self):
+        case = {"answerable": True, "answer": "0", "aliases": []}
+        reply = {"status": "ANSWER", "answer": "0.2"}
+        self.assertEqual(grounding.outcome(case, reply), "wrong")
+
+    def test_outcome_rejects_negated_and_ambiguous_mentions(self):
+        case = {"answerable": True, "answer": "3", "aliases": []}
+        for answer in ("It is not 3, it is 16", "3 or 16", "maybe 3", "I think it is 3"):
+            with self.subTest(answer=answer):
+                self.assertEqual(grounding.outcome(case, {"status": "ANSWER", "answer": answer}),
+                                 "wrong")
+
+    def test_contains_bounded_rejects_embedded_and_decimal_matches(self):
+        self.assertTrue(grounding.contains_bounded("20", "timeout = 20"))
+        self.assertFalse(grounding.contains_bounded("20", "timeout = 120"))
+        self.assertFalse(grounding.contains_bounded("0", "temperature = 0.2"))
+
+    def test_risk_coverage_keeps_high_signal_answered_rows(self):
+        rows = [
+            {"outcome": "correct", "confidence": 0.8},
+            {"outcome": "wrong", "confidence": 0.4},
+            {"outcome": "hallucinated", "confidence": 0.2},
+            {"outcome": "correct_abstain", "confidence": 0.9},
+        ]
+        self.assertEqual(grounding.risk_coverage(rows, "confidence"), [
+            (0.2, 1.0, 2 / 3),
+            (0.4, 2 / 3, 0.5),
+            (0.8, 1 / 3, 0.0),
+        ])
 
 
 DIFF = """--- a/app.py

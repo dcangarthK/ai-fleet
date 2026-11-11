@@ -783,12 +783,24 @@ Imported body.
         controller.pipeline_model_call = fake
         FakeRunner.agents["codex"] = "/x/codex"
         self.c.post("/api/refresh", headers=W)
+
+        def finish_build(pipeline):
+            # Settle the fake task and drive the production build-to-review
+            # transition on the app's event loop, without waiting for either
+            # background poller to be scheduled.
+            self.c.portal.call(controller.tasks.poll_task, pipeline["build_task"])
+            task_state = controller.tasks.get_task(pipeline["build_task"])["state"]
+            self.assertEqual(task_state, "review")
+            self.c.portal.call(controller.advance_pipeline, pipeline["id"],
+                               {"type": "build", "state": task_state})
+
         try:
             body = {"title": "Fallback review", "spec": "s", "repo": "/repo", "gate": "pytest", "mode": "auto-edit",
                     "builder": {"agent": "codex"}, "reviewers": [{"kind": "role", "role": "slowrole"}],
                     "max_rounds": 1, "require_trusted": False}
             p = self.c.post("/api/pipelines", json=body, headers=W).json()
             FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            finish_build(p)
             done = wait_for(lambda: (lambda x: x if x["state"] == "ready" else None)(
                 self.c.get(f"/api/pipelines/{p['id']}").json()), timeout=20)
             self.assertEqual(calls, ["slowrole", "fastrole"])
@@ -797,6 +809,7 @@ Imported body.
             controller.pipeline_model_call = lambda role, spec, diff: (_ for _ in ()).throw(ConnectionError("down"))
             p2 = self.c.post("/api/pipelines", json=dict(body, title="No reviewer"), headers=W).json()
             FakeRunner.jobs[p2["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            finish_build(p2)
             esc = wait_for(lambda: (lambda x: x if x["state"] == "escalated" else None)(
                 self.c.get(f"/api/pipelines/{p2['id']}").json()), timeout=20)
             self.assertIn("ConnectionError", esc["history"][-1]["note"])

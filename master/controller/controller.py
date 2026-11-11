@@ -41,6 +41,7 @@ import budget  # noqa: E402
 import events  # noqa: E402
 import evaluations  # noqa: E402
 import grounding  # noqa: E402
+import handoff  # noqa: E402
 import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
@@ -485,7 +486,7 @@ async def lifespan(_: FastAPI):
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
-                  asyncio.create_task(retention_loop())]
+                  asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop())]
     yield
     for t in background:
         t.cancel()
@@ -494,6 +495,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="fleet", lifespan=lifespan)
 app.middleware("http")(auth.access_control)
 app.include_router(tasks.router)
+app.include_router(handoff.router)
 
 
 class Assignment(BaseModel):
@@ -1654,7 +1656,29 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
     reviews_rules = rules["reviews"]
     b = p.setdefault("budget", {})
     build = tasks.get_task(p["build_task"])
+    # Review independence (docs/SPEC-limit-handoff.md 4.7): the reviewer must differ in agent or model from every
+    # build attempt of this work item (handoffs included), using the models those attempts really ran.
+    built = handoff.build_attempts(build["id"])
+    b["build_models"] = [f"{agent}:{model}" if model else agent for agent, model in built]
+
+    def built_it(candidate: dict) -> bool:
+        if candidate.get("kind") != "agent":
+            return False
+        model = candidate.get("model") or budget.node_default_model(candidate["agent"], build.get("node_id"))
+        return bool(model) and (candidate["agent"], model) in built
+
+    if built_it(reviewer):
+        if not any(not built_it(other) for other in p["reviewers"]):
+            return _escalate(p, "all eligible reviewers built this work")
+        save_pipeline(p)
+        return await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
+                                                 "reason": "this reviewer built part of this work"})
     is_codex = reviewer["agent"] == "codex"
+    # A budget fallback may never turn this review into a self-review, nor into a Codex review once Codex's rounds
+    # are spent; round accounting below follows the agent and model the review task was admitted on.
+    forbidden = set(built)
+    if len(b.get("codex_rounds") or []) >= reviews_rules["max_codex_rounds"] and p["round"] not in (b.get("codex_rounds") or []):
+        forbidden.add(("codex", None))
     security = budget.touches(budget.changed_files(diff), reviews_rules.get("security_paths") or [])
     kind = ("security_review" if security else "review") if is_codex else "review"
     if security and is_codex and p["round"] not in b.setdefault("security_review_rounds", []):
@@ -1695,11 +1719,12 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
             title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"), worktree=False,
             node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
             origin_kind=origin_kind if kind == "re_review" else None,
-        ))
-        # The round is spent only once the review task was admitted (a refused one costs nothing).
+        ), forbidden=forbidden)
+        # The round is spent only once the review task was admitted (a refused one costs nothing), and it is
+        # counted against the agent the task was really admitted on, after any fallback.
         if p["round"] not in paid_rounds:
             paid_rounds.append(p["round"])
-        if is_codex and p["round"] not in codex_rounds:
+        if review_task["agent"] == "codex" and p["round"] not in codex_rounds:
             codex_rounds.append(p["round"])
         p["reviews"][str(index)]["task_id"] = review_task["id"]
         if review_task.get("split"):
@@ -1714,13 +1739,32 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
 async def _message_build(p: dict, text: str) -> None:
     """A fix round: resume the builder; its effort follows the rules' ladder for fixes."""
     task_id = p["build_task"]
+    b = p.setdefault("budget", {})
     async with tasks._locks[task_id]:
         task = tasks.get_task(task_id)
         if task["state"] not in tasks.RESUMABLE:
             raise HTTPException(409, f"can't message a task that is {task['state']}")
         effort = budget.resolve_effort(budget.current_rules(), task.get("budget_key"), "fix", None,
                                        tasks.gate_failures(task_id))
-        await tasks.resume(task, text, [], reset_auto_approvals=True, effort=effort)
+        # A fix round is more paid work: the continuation admission, budget and node policy alike
+        # (docs/SPEC-limit-handoff.md 4.5). resume() checks it again and reserves the slot.
+        verdict = tasks.continuation(task, effort=effort)
+        if verdict["outcome"] == "admit":
+            try:
+                await tasks.resume(task, text, [], reset_auto_approvals=True, effort=effort)
+            except tasks.NotAdmitted as exc:  # admitted a moment ago, but another continuation took the slot
+                verdict = exc.verdict
+        if verdict["outcome"] == "defer":
+            b["pending_fix"] = {"text": text, "until": verdict.get("until") or time.time() + 60,
+                                "reason": verdict["reason"]}
+            save_pipeline(p)
+            return
+        if verdict["outcome"] == "refuse":
+            b.pop("pending_fix", None)
+            _escalate(p, f"fix round refused by the budget: {verdict['reason']}")
+            return
+    if b.pop("pending_fix", None) is not None:
+        save_pipeline(p)
 
 
 async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
@@ -1815,9 +1859,33 @@ async def poll_pipeline(pipeline_id: str) -> None:
             await _pipeline_actions(p, [{"do": "spawn_build"}])
             return
         if p["state"] == "building" and p.get("build_task"):
+            pending = (p.get("budget") or {}).get("pending_fix")
+            if pending:
+                # A fix round admission deferred: the build waits in 'review' until the round can be sent.
+                if time.time() >= (pending.get("until") or 0):
+                    await _message_build(p, pending["text"])
+                return
             build = tasks.get_task(p["build_task"])
+            moved = build.get("resolution") or {}
+            if moved.get("kind") == "handed_off" and moved.get("task_id"):
+                await _pipeline_step_unlocked(p, {"type": "build_limited", "action": "handoff",
+                                                  "task_id": moved["task_id"]})
+                return
+            if moved.get("kind") == "handing_off":
+                return
+            if handoff.limit_failure(build):
+                # Under the pipeline lock, through the ordered path: pipeline -> work item -> task.
+                result = await handoff.handle_limit(build["id"])
+                if result["action"] in ("handoff", "wait", "left"):
+                    await _pipeline_step_unlocked(p, {"type": "build_limited", **result})
+                return
             if build["state"] in ("review", "failed", "interrupted", "cancelled"):
                 await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"]})
+            return
+        if p["state"] == "review_waiting":
+            due = [r["waiting_until"] for r in p["reviews"].values() if r.get("waiting_until") is not None]
+            if not due or time.time() >= max(due):
+                await _pipeline_step_unlocked(p, {"type": "review_resume"})
             return
         if p["state"] != "reviewing":
             return
@@ -1843,6 +1911,15 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 return
             # "blocked" counts as finished too: a read-only reviewer that hit a denied tool still has its answer.
             if all(part["state"] in ("review", "failed", "interrupted", "blocked") for part in parts):
+                limited = [part for part in parts if handoff.limit_failure(part)]
+                if limited:
+                    # Not a finished review and not a paid round: wait for the reset, then review again.
+                    p = await _pipeline_step_unlocked(p, {
+                        "type": "review_limited", "reviewer": index, "task_id": limited[0]["id"],
+                        "resets_at": max(part["resets_at"] for part in limited),
+                        # the agent the review was admitted on (a fallback may differ from the configured one)
+                        "codex": limited[0]["agent"] == "codex"})
+                    return
                 reason = None
                 unfinished = [part for part in parts if part["state"] != "review"]
                 if unfinished:
@@ -1863,7 +1940,7 @@ async def pipeline_loop() -> None:
         try:
             with db() as c:
                 ids = [row[0] for row in c.execute(
-                    "SELECT id FROM pipelines WHERE state IN ('building','reviewing','resolving') "
+                    "SELECT id FROM pipelines WHERE state IN ('building','reviewing','resolving','review_waiting') "
                     "ORDER BY created_at, rowid")]
         except Exception as exc:
             print(f"pipeline poll failed: {exc!r}")

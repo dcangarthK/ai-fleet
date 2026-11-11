@@ -45,7 +45,11 @@ DEFAULT_RULES = {
                "exclude_globs": ["master/controller/ui/dist/**", "**/*.min.js", "**/*.bundle.js",
                                  "**/package-lock.json", "evals/results/*.json"]},
     "limits": {"on_limit": "queue",
-               "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]}},
+               "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
+               # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
+               # or wait for the reset. By kind; "*" covers the rest.
+               "on_task_limit": {"build": "handoff", "fix": "handoff", "*": "wait"},
+               "max_handoffs": 2, "allow_cross_vendor": False},
     "effort_ladder": {"build": ["medium", "medium", "high"], "fix": ["low", "medium", "high"], "re_review": ["low", "medium"]},
     "limit_scope": "model",
     "review_exec": {"tools": ["Read", "Grep", "Glob"], "max_turns": 8, "task_minutes": 15},
@@ -174,9 +178,17 @@ def validate_rules(body) -> dict:
     limits = body["limits"]
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
-    _unknown(limits, {"on_limit", "fallbacks"}, "limits")
+    _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor"}, "limits")
     if limits.get("on_limit") not in ("queue", "fallback", "refuse"):
         raise ValueError("limits.on_limit must be queue, fallback or refuse")
+    on_task = limits.get("on_task_limit", {})
+    if not isinstance(on_task, dict) or any((k != "*" and k not in KINDS) or v not in ("handoff", "wait")
+                                            for k, v in on_task.items()):
+        raise ValueError("limits.on_task_limit maps task kinds (or '*') to handoff or wait")
+    if "max_handoffs" in limits and not _int(limits["max_handoffs"], 0):
+        raise ValueError("limits.max_handoffs must be a non-negative integer")
+    if "allow_cross_vendor" in limits and not isinstance(limits["allow_cross_vendor"], bool):
+        raise ValueError("limits.allow_cross_vendor must be true or false")
     fallbacks = limits.get("fallbacks", {})
     if not isinstance(fallbacks, dict):
         raise ValueError("limits.fallbacks must be an object")
@@ -585,15 +597,38 @@ def save_rules(body: dict, author: str) -> dict:
 
 # ---------- live state from the database ----------
 
-def limit_snapshot(rules: dict, now: float) -> dict:
+def account_key(agent: str, node_id: str | None, profile: str | None, label: str | None) -> str:
+    """The account behind a slot (docs/SPEC-limit-handoff.md 3.2): the owner's label, shared across profiles and
+    nodes, or (agent, node, profile) when the profile has no label."""
+    if label:
+        return f"{agent}/{label}"
+    return f"{agent}@{node_id or 'master'}/{profile or 'fleet'}"
+
+
+# The same account key in SQL, for task rows (older rows, placed before accounts existed, use their node's default).
+ACCOUNT_SQL = "COALESCE(account, agent || '@' || COALESCE(node_id, 'master') || '/fleet')"
+
+
+def task_account(task: dict) -> str:
+    return task.get("account") or account_key(task.get("agent") or "", task.get("node_id"), None, None)
+
+
+def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     """The breaker reads what each run itself ended with (agent_usage), never the task's current state: cancelling,
-    completing or resuming a limited task changes the task but not the fact that its run hit the limit."""
+    completing or resuming a limited task changes the task but not the fact that its run hit the limit.
+
+    With `account`, only that account's runs count (plus older runs recorded before accounts, which hold every
+    account of their agent). Without it, every run counts: the most conservative view."""
+    query = ("SELECT agent, model, identity AS budget_identity, outcome, resets_at, ts AS ended_at FROM agent_usage "
+             "WHERE outcome IN ('ok','limit') AND agent IN ('claude','codex')")
+    args: tuple = ()
+    if account:
+        query += " AND (account IS NULL OR account=?)"
+        args = (account,)
     with db() as c:
         rows = [dict(r) | ({"state": "failed", "failure_reason": "limit"} if r["outcome"] == "limit"
                            else {"state": "review", "failure_reason": None})
-                for r in c.execute(
-                    "SELECT agent, model, identity AS budget_identity, outcome, resets_at, ts AS ended_at FROM agent_usage "
-                    "WHERE outcome IN ('ok','limit') AND agent IN ('claude','codex')")]
+                for r in c.execute(query, args)]
     state = limit_state(rows, now, rules.get("limit_scope", "model"))
     # Past the daily hard token budget, a model behaves as limited until local midnight.
     midnight = local_midnight(now) + 86400
@@ -635,10 +670,26 @@ def today_tokens(rules: dict, key: str, now: float | None = None) -> int:
     return sum(r["tokens"] for r in rows if match_key(rules, r["agent"], r["model"]) == key)
 
 
-def running_count(key: str, exclude: str | None = None) -> int:
+# Continuations (resumes) admitted but not yet acknowledged by the runner: task id -> (rules key, account, node).
+# They hold their slot from admission until the task is working (or the runner call failed), so two resumes
+# admitted at once can't both take an account's last slot, nor a node's (docs/SPEC-limit-handoff.md 4.5). Unpaid
+# tasks are reserved too (key None), for the node's count only.
+RESERVED: dict[str, tuple[str | None, str | None, str | None]] = {}
+
+
+def running_count(key: str, exclude: str | None = None, account: str | None = None) -> int:
+    """Running tasks of this rules key; with `account`, only those on that account (concurrency is per account).
+    Reserved continuations count as running."""
+    query = "SELECT id FROM tasks WHERE budget_key=? AND state IN ('starting','working') AND id IS NOT ?"
+    args: tuple = (key, exclude)
+    if account:
+        query += f" AND {ACCOUNT_SQL}=?"
+        args += (account,)
     with db() as c:
-        return c.execute("SELECT COUNT(*) FROM tasks WHERE budget_key=? AND state IN ('starting','working') AND id IS NOT ?",
-                         (key, exclude)).fetchone()[0]
+        running = {r[0] for r in c.execute(query, args)}
+    reserved = {task_id for task_id, (r_key, r_account, _node) in list(RESERVED.items())
+                if r_key == key and task_id != exclude and (not account or r_account == account)}
+    return len(running | reserved)
 
 
 def log_decision(decision: str, reason: str, *, task_id: str | None = None, **data) -> None:
@@ -674,11 +725,42 @@ def blocked_by(rules: dict, state: dict, agent: str, key: str | None, ident: str
 
 
 def admit(*, agent: str, model: str | None, kind: str, effort: str | None, override: bool, failures: int = 0,
-          now: float | None = None, node_id: str | None = None, origin_kind: str | None = None) -> dict:
+          now: float | None = None, node_id: str | None = None, origin_kind: str | None = None,
+          accounts_for=None, reroute: bool = True, forbidden=None) -> dict:
     """Decide how a new task may run. Raises Refusal for a 400/409; otherwise returns the (possibly rerouted)
-    agent/model, its rules key, the effort, and whether it must wait (queued) and why."""
+    agent/model, its rules key, the effort, the account it should run on, and whether it must wait (queued) and why.
+
+    `accounts_for(agent)` lists the accounts that agent's task may use, in preference order (limits and concurrency
+    are per account); without it there is one account and the whole fleet's state counts. `reroute=False` (a resume
+    of an existing session) never moves the work to a fallback model. `forbidden` holds (agent, model) pairs a
+    fallback may never be (model None: any model of that agent), e.g. a reviewer must not become a builder."""
     now = time.time() if now is None else now
     rules = current_rules()
+    snapshots: dict = {}
+
+    def snapshot(account):
+        if account not in snapshots:
+            snapshots[account] = limit_snapshot(rules, now, account)
+        return snapshots[account]
+
+    def accounts(of_agent):
+        found = list(accounts_for(of_agent)) if accounts_for else []
+        return found or [None]
+
+    def place(of_agent, of_key, of_ident, of_entry):
+        """(account, wait, reason) on the first account that isn't limited, preferring one with a free slot;
+        None when every account is limited. Also returns the first limit reason seen."""
+        chosen, first = None, (None, None)
+        for account in accounts(of_agent):
+            until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
+            if until:
+                first = first if first[0] else (until, why)
+                continue
+            maximum = of_entry.get("max_concurrent")
+            if maximum is None or of_key is None or running_count(of_key, account=account) < maximum:
+                return (account, None, None), first
+            chosen = chosen or (account, "slot", f"waiting for a {label(of_key)} slot")
+        return chosen, first
     paid = agent in PAID_AGENTS
     if kind == "check" and paid:
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
@@ -695,37 +777,38 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, f"{label(key)} is reserved for [{reserved}]"
                            + (f"; use {alternative} for {kind}" if alternative else f"; no model in the rules allows {kind}"))
     decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": None,
-                "wait": None, "reason": None}
+                "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
-        state = limit_snapshot(rules, now)
-        until, why = blocked_by(rules, state, agent, key, decision["identity"])
-        if until:
+        placed, (until, why) = place(agent, key, decision["identity"], entry)
+        if placed:
+            decision.update(account=placed[0], wait=placed[1], reason=placed[2])
+        else:
             on_limit = rules["limits"]["on_limit"]
             if on_limit == "refuse":
                 raise Refusal(409, why)
             rerouted = False
-            if on_limit == "fallback":
+            if on_limit == "fallback" and reroute:
                 for target in (rules["limits"].get("fallbacks") or {}).get(key) or []:
                     f_agent, _, f_model = target.partition(":")
+                    if forbidden and ((f_agent, None) in forbidden or (
+                            f_agent, f_model or node_default_model(f_agent, node_id)) in forbidden):
+                        continue
                     f_key = match_key(rules, f_agent, f_model)
                     if f_key and not kind_allowed(rules["models"][f_key], kind, origin_kind):
                         continue
-                    if blocked_by(rules, state, f_agent, f_key, identity(f_agent, f_model))[0]:
+                    f_entry = entry_for(rules, f_key, f_agent)
+                    f_placed, _ = place(f_agent, f_key, identity(f_agent, f_model), f_entry)
+                    if not f_placed:
                         continue
                     decision.update(agent=f_agent, model=f_model, key=f_key, identity=identity(f_agent, f_model),
-                                    routed_from=decision["identity"])
-                    entry = entry_for(rules, f_key, f_agent)
+                                    routed_from=decision["identity"], account=f_placed[0], wait=f_placed[1],
+                                    reason=f_placed[2])
                     rerouted = True
                     break
             if not rerouted:
-                decision.update(wait="limit", reason=why)
-        key = decision["key"]
-        if key and decision["wait"] is None:
-            maximum = entry.get("max_concurrent")
-            if maximum is not None and running_count(key) >= maximum:
-                decision.update(wait="slot", reason=f"waiting for a {label(key)} slot")
-        if key:
-            maybe_soft_notice(rules, key, now)
+                decision.update(wait="limit", reason=why, until=until)
+        if decision["key"]:
+            maybe_soft_notice(rules, decision["key"], now)
     decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)
     if kind in REVIEW_KINDS:
         decision["review_exec"] = rules["review_exec"]
@@ -742,19 +825,52 @@ def start_wait(task: dict, now: float | None = None) -> tuple[str | None, str | 
     now = time.time() if now is None else now
     rules = current_rules()
     ident = task.get("budget_identity") or identity(task["agent"], task.get("model"))
-    until, why = blocked_by(rules, limit_snapshot(rules, now), task["agent"], key, ident)
+    account = task_account(task)
+    until, why = blocked_by(rules, limit_snapshot(rules, now, account), task["agent"], key, ident)
     if until:
         return "limit", why
     maximum = entry_for(rules, key, task["agent"]).get("max_concurrent")
     if maximum is not None:
         with db() as c:
             older = c.execute("SELECT COUNT(*) FROM tasks WHERE budget_key=? AND state='queued' AND budget_wait='slot' "
-                              "AND id!=? AND (created_at < ? OR (created_at = ? AND rowid < "
+                              f"AND {ACCOUNT_SQL}=? AND id!=? AND (created_at < ? OR (created_at = ? AND rowid < "
                               "(SELECT rowid FROM tasks WHERE id=?)))",
-                              (key, task["id"], task["created_at"], task["created_at"], task["id"])).fetchone()[0]
-        if running_count(key, task["id"]) + older >= maximum:
+                              (key, account, task["id"], task["created_at"], task["created_at"], task["id"])).fetchone()[0]
+        if running_count(key, task["id"], account) + older >= maximum:
             return "slot", f"waiting for a {label(key)} slot"
     return None, None
+
+
+def on_task_limit(rules: dict, kind: str | None) -> str:
+    """What a task of this kind does when it stops at a usage limit: "handoff" or "wait" (docs/SPEC-limit-handoff.md 4.2)."""
+    table = (rules.get("limits") or {}).get("on_task_limit") or DEFAULT_RULES["limits"]["on_task_limit"]
+    return table.get(kind or "draft") or table.get("*") or "wait"
+
+
+def admission(task: dict, now: float | None = None, *, effort: str | None = None) -> dict:
+    """The admission function applied to more work on an existing task (a resume, a fix round): the same checks as
+    a new task, on the task's own account and model (never rerouted). The owner's recorded budget_override on the
+    task still covers its kind (it never bypasses a limit, a budget or concurrency). Returns
+    {"outcome": "admit"|"defer"|"refuse", "until", "reason", "wait"} (docs/SPEC-limit-handoff.md 4.5)."""
+    now = time.time() if now is None else now
+    if task.get("agent") not in PAID_AGENTS:
+        return {"outcome": "admit", "until": None, "reason": None, "wait": None}
+    account = task_account(task)
+    try:
+        decision = admit(agent=task["agent"], model=task.get("model"), kind=task.get("kind") or "draft",
+                         effort=effort, override=bool(task.get("budget_override")), now=now,
+                         node_id=task.get("node_id"),
+                         accounts_for=lambda _agent: [account], reroute=False)
+    except Refusal as refusal:
+        return {"outcome": "refuse", "until": None, "reason": refusal.detail, "wait": None}
+    if decision["wait"] is None:
+        # Others running on this account (not this task, which is settled) decide the slot.
+        return {"outcome": "admit", "until": None, "reason": None, "wait": None}
+    if decision["wait"] == "limit":
+        until = decision.get("until")
+        reason = decision["reason"]
+        return {"outcome": "defer", "until": until, "reason": reason, "wait": "limit"}
+    return {"outcome": "defer", "until": now + 60, "reason": decision["reason"], "wait": "slot"}
 
 
 def start_block(task: dict, now: float | None = None) -> str | None:

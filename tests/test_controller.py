@@ -87,6 +87,9 @@ class FakeRunner(BaseHTTPRequestHandler):
     deltas: dict = {}
     delta_text = None  # None: the delta is the same as the full diff
     diff_text = None  # None: "+hello"
+    # Account pools (docs/SPEC-limit-handoff.md): None = an older runner that reports no profiles.
+    profiles = None
+    checkpoint_error = None  # (status, detail) to make the checkpoint fail
 
     def log_message(self, *a):
         pass
@@ -124,7 +127,9 @@ class FakeRunner(BaseHTTPRequestHandler):
                                     "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "models": {"remote_management": True, "disk_reserve_gb": 8},
-                                    "agents": dict(FakeRunner.agents), "budget": True})
+                                    "agents": dict(FakeRunner.agents), "budget": True,
+                                    **({"profiles": FakeRunner.profiles, "checkpoint": True}
+                                       if FakeRunner.profiles is not None else {})})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
             return self._send(404, {"detail": "no job"})
@@ -155,7 +160,7 @@ class FakeRunner(BaseHTTPRequestHandler):
                 return self._send(409, {"detail": "duplicate job id"})
             job = {"id": body["id"], "agent": body["agent"], "mode": body["mode"], "state": "running",
                    "exit_code": None, "session_id": "s-1", "cwd": "/w", "worktree": "/w", "branch": f"fleet/{body['id']}",
-                   "result": None, "denials": [], "gate": None, "runs": 1}
+                   "result": None, "denials": [], "gate": None, "runs": 1, "profile": body.get("profile")}
             self.jobs[body["id"]] = job
             return self._send(200, job)
         jid = self.path.split("/")[2]
@@ -163,6 +168,11 @@ class FakeRunner(BaseHTTPRequestHandler):
             made = FakeRunner.trees.setdefault(jid, [])
             made.append(f"{len(made) + 1:040x}")
             return self._send(200, {"tree": made[-1]})
+        if self.path.endswith("/checkpoint") and jid in self.jobs:
+            if FakeRunner.checkpoint_error:
+                return self._send(FakeRunner.checkpoint_error[0], {"detail": FakeRunner.checkpoint_error[1]})
+            return self._send(200, {"sha": "c0ffee" + "0" * 34, "committed": True, "excluded": [".env"],
+                                    "branch": f"fleet/{jid}", "stat": " app.py | 2 +-\n 1 file changed"})
         if self.path.endswith("/message"):
             self.jobs[jid].update(state="running", denials=[], runs=self.jobs[jid]["runs"] + 1)
         elif self.path.endswith("/cancel"):

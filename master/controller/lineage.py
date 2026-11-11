@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LINKS = ("retry", "resume", "review", "fix", "merge", "check")
 REASONS = ("limit", "gate_failed", "denied", "error", "interrupted", "cancelled")
-RESOLUTION_KINDS = ("resolved_by", "dismissed", "done_elsewhere")
+RESOLUTION_KINDS = ("resolved_by", "dismissed", "done_elsewhere", "handed_off")
+# Set by the controller during a limit handoff (docs/SPEC-limit-handoff.md 4.3): `handing_off` is the claim,
+# `handed_off` the result. Neither can be overwritten by /resolve, and a handed-off task can't be resumed.
+HANDOFF_KINDS = ("handing_off", "handed_off")
 OUTCOME_KINDS = ("merged", "done", "abandoned")
 FAILURE_STATES = {"failed", "blocked", "interrupted", "cancelled"}
 RUNNING = {"queued": "Queued", "starting": "Working", "working": "Working"}
@@ -159,6 +162,12 @@ def display_status(task: dict, tz: datetime.tzinfo | None = None, now: float | N
         return {"tone": "resolved", "label": f"Done elsewhere by {resolution.get('by') or 'someone'}{commit}"}
     if kind == "dismissed":
         return {"tone": "muted", "label": "Dismissed"}
+    if kind == "handed_off":
+        to = resolution.get("model") or resolution.get("agent") or "another agent"
+        account = f" ({resolution['label']})" if resolution.get("label") else ""
+        return {"tone": "resolved", "label": f"Handed off to {to}{account}"}
+    if kind == "handing_off":
+        return {"tone": "running", "label": "Handing off"}
     reason = task.get("failure_reason")
     if state == "blocked":
         return {"tone": "attention", "label": "Blocked: needs approval"}

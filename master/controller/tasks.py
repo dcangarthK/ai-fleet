@@ -28,7 +28,8 @@ import budget
 import policy as fleet_policy
 import skills as fleet_skills
 from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
-    CHAIN_LINKS, FAILURE_STATES, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status, failure_reason,
+    CHAIN_LINKS, FAILURE_STATES, HANDOFF_KINDS, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status,
+    failure_reason,
     parse_reset, provider_limit, resolution_targets, tail, valid_commit,
 )
 from store import db, task_root
@@ -149,6 +150,9 @@ def node_rows() -> list[dict]:
         rows = [dict(r) for r in c.execute("SELECT * FROM nodes")]
         running = dict(c.execute(
             "SELECT node_id, COUNT(*) FROM tasks WHERE state IN ('starting','working') GROUP BY node_id").fetchall())
+    # A snapshot: sync endpoints call this from a worker thread while the loop adds and removes reservations.
+    for _key, _account, node_id in list(budget.RESERVED.values()):  # admitted continuations hold the node's slot too
+        running[node_id] = running.get(node_id, 0) + 1
     for n in rows:
         n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
@@ -237,10 +241,72 @@ def _esc_view(node: dict, role, agent, snapshot, task_policy, escalation: bool) 
             if escalation else snapshot["policy"])
 
 
+# ---------- slots: (node, agent, profile) places paid work can run (docs/SPEC-limit-handoff.md 3) ----------
+
+LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def profile_support(node: dict) -> bool:
+    """A runner that takes `profile`, `base_branch` and checkpoints (older runners get no handoffs)."""
+    runner = node.get("runner") or {}
+    return isinstance(runner.get("profiles"), dict) and bool(runner.get("checkpoint"))
+
+
+def signed_out() -> dict[tuple[str, str, str], str]:
+    """Slots marked "not signed in" after an auth failure, until the owner clears them."""
+    with db() as c:
+        return {(r["node"], r["agent"], r["profile"]): r["reason"] or ""
+                for r in c.execute("SELECT * FROM slot_flags WHERE state='not_signed_in'")}
+
+
+def node_slots(node: dict, agent: str, flags: dict | None = None) -> list[dict]:
+    """This node's profiles for the agent, in its runner's order. A runner that reports none has one: `fleet`."""
+    reported = (node.get("runner") or {}).get("profiles") if profile_support(node) else None
+    entries = reported.get(agent) if isinstance(reported, dict) else None
+    legacy = not isinstance(entries, list)
+    if legacy:
+        entries = [{"id": "fleet", "label": None, "ready": True}]
+    flags = signed_out() if flags is None else flags
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not PROFILE_RE.fullmatch(entry["id"]):
+            continue
+        label = entry.get("label") if isinstance(entry.get("label"), str) and LABEL_RE.fullmatch(entry["label"]) else None
+        flagged = (node["id"], agent, entry["id"]) in flags
+        out.append({"node": node["id"], "node_name": node.get("name"), "agent": agent, "profile": entry["id"],
+                    "label": label, "ready": entry.get("ready") is not False, "signed_out": flagged,
+                    "legacy": legacy, "account": budget.account_key(agent, node["id"], entry["id"], label)})
+    return out
+
+
+def usable(slot: dict) -> bool:
+    return slot["ready"] and not slot["signed_out"]
+
+
+def placement(agent: str, wanted: str | None) -> list[dict]:
+    """Usable slots for this agent on eligible-looking nodes (the named node only, when one is named), least busy
+    node first, then each node's own profile order."""
+    nodes = [n for n in node_rows() if n["status"] == "approved" and n.get("runner")
+             and ((n["runner"].get("agents") or {}).get(agent))]
+    if wanted:
+        nodes = [n for n in nodes if n["id"] == wanted or n["name"] == wanted]
+    nodes.sort(key=lambda n: (n["running_tasks"], -ram(n)))
+    flags = signed_out()
+    return [s for n in nodes for s in node_slots(n, agent, flags) if usable(s)]
+
+
+def accounts_of(slots: list[dict], agent: str) -> list[str]:
+    return list(dict.fromkeys(s["account"] for s in slots if s["agent"] == agent))
+
+
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
               role: str | None = None, task_policy: dict | None = None,
-              skill_ids: list[str] | None = None, escalation: bool = False) -> tuple[dict, dict, str | None]:
+              skill_ids: list[str] | None = None, escalation: bool = False,
+              allowed: set[str] | None = None) -> tuple[dict, dict, str | None]:
     nodes = node_rows()
+    if allowed is not None and not wanted:
+        nodes = [n for n in nodes if n["id"] in allowed] or nodes
     if wanted:
         match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
         if not match:
@@ -458,8 +524,14 @@ async def start(task: dict) -> None:
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     support = budget_support(node)
+    extra = task.get("launch_extra") or {}
+    if profile_support(node) and task["agent"] in budget.PAID_AGENTS:
+        # Only the profile id: the runner maps it to a directory from its own config.
+        if task.get("profile"):
+            body["profile"] = task["profile"]
+        if extra.get("base_branch"):
+            body.update(base_branch=extra["base_branch"], source_job=extra.get("source_job"))
     if support:
-        extra = task.get("launch_extra") or {}
         if task.get("effort"):
             body["effort"] = task["effort"]
         if isinstance(extra.get("tools"), list):  # an empty list is "no tools", not "unrestricted"
@@ -517,7 +589,10 @@ async def try_start(task: dict) -> bool:
 
 
 async def recover() -> None:
-    """After a controller restart: finish starting tasks that were mid-start or never started."""
+    """After a controller restart: finish starting tasks that were mid-start or never started, and release
+    handoff claims a crash left behind (those tasks wait for their reset instead)."""
+    import handoff  # local import: handoff builds on this module
+    await handoff.recover_claims()
     with db() as c:
         pending = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('queued','starting')")]
 
@@ -557,17 +632,26 @@ def outcome(task: dict, job: dict) -> str:
 
 
 async def poll_task(task_id: str) -> None:
+    settled = await _poll_task(task_id)
+    if settled:
+        # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
+        import handoff
+        await handoff.after_settled(task_id)
+
+
+async def _poll_task(task_id: str) -> bool:
+    """Poll one working task; True when it just settled as failed."""
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] != "working":
-            return
+            return False
         try:
             job = await runner_call(node_of(task), "GET", f"/jobs/{task_id}", timeout=5)
         except HTTPException as e:
             if not task["error"]:
                 update(task_id, error=str(e.detail))
                 emit(task_id, "task.unreachable", {"title": task["title"], "node": task["node_id"]})
-            return
+            return False
         new = outcome(task, job)
         fields = job_fields(job)
         agent_end = iso_epoch(job.get("ended_at"))
@@ -579,6 +663,8 @@ async def poll_task(task_id: str) -> None:
             record_usage(task_id)
             if new == "blocked":
                 await auto_approve_denials(get_task(task_id))
+            return new == "failed"
+    return False
 
 
 def record_usage(task_id: str) -> None:
@@ -602,7 +688,8 @@ def record_usage(task_id: str) -> None:
            "output": usage.get("output"), "cached": usage.get("cached"), "cost_usd": usage.get("cost_usd"),
            "prompt_bytes": prompt_bytes, "effort": t.get("effort"), "outcome": outcome_name,
            "num_turns": t.get("num_turns"), "identity": t.get("budget_identity") or budget.identity(t["agent"], t.get("model")),
-           "resets_at": t.get("resets_at") if outcome_name == "limit" else None}
+           "resets_at": t.get("resets_at") if outcome_name == "limit" else None,
+           "account": budget.task_account(t) if t["agent"] in budget.PAID_AGENTS else None}
     with db() as c:
         inserted = c.execute(f"INSERT OR IGNORE INTO agent_usage ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                              tuple(row.values())).rowcount
@@ -644,10 +731,18 @@ async def auto_approve_denials(task: dict) -> None:
     if (task.get("auto_approvals") or 0) >= AUTO_APPROVE_ROUNDS:
         emit(task["id"], "task.auto_approve_exhausted", {"title": task["title"], "rounds": AUTO_APPROVE_ROUNDS})
         return
-    update(task["id"], auto_approvals=(task.get("auto_approvals") or 0) + 1)
+    rounds = task.get("auto_approvals") or 0
+    update(task["id"], auto_approvals=rounds + 1)
+    try:
+        await resume(get_task(task["id"]), "Policy pre-approves the tools you were denied: " + ", ".join(tools)
+                     + ". Continue the task.", tools)
+    except NotAdmitted as exc:
+        # Admission deferred or refused it: the task stays blocked for the owner and the round isn't spent.
+        update(task["id"], auto_approvals=rounds, error=str(exc.detail))
+        emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
+                                                    "reason": str(exc.detail)})
+        return
     emit(task["id"], "task.auto_approved", {"title": task["title"], "tools": tools, "agent": task["agent"]})
-    await resume(get_task(task["id"]), "Policy pre-approves the tools you were denied: " + ", ".join(tools)
-                 + ". Continue the task.", tools)
 
 
 async def poll_loop() -> None:
@@ -767,8 +862,9 @@ async def create_task_route(t: TaskIn, request: Request) -> dict:
     return await create_task(t, scope=getattr(request.state, "scope", "admin"))
 
 
-async def create_task(t: TaskIn, scope: str = "admin") -> dict:
-    """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller."""
+async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None = None) -> dict:
+    """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
+    `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to."""
     if t.agent not in AGENTS:
         raise HTTPException(400, f"agent must be one of {sorted(AGENTS)}")
     if t.mode not in MODES:
@@ -829,9 +925,18 @@ async def create_task(t: TaskIn, scope: str = "admin") -> dict:
             raise HTTPException(400, f"prompt is {biggest // 1024} KB after removing generated files; the limit is "
                                      f"{rules['prompt']['hard_max_kb']} KB (prompt.hard_max_kb on the Budget page)")
     failures = gate_failures(t.parent_id) if kind in (rules.get("effort_ladder") or {}) else 0
+    slot_cache: dict[str, list[dict]] = {}
+
+    def slots_for(of_agent: str) -> list[dict]:
+        if of_agent not in slot_cache:
+            slot_cache[of_agent] = placement(of_agent, t.node) if of_agent in budget.PAID_AGENTS else []
+        return slot_cache[of_agent]
+
     try:
         decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
-                                failures=failures, node_id=t.node, origin_kind=t.origin_kind)
+                                failures=failures, node_id=t.node, origin_kind=t.origin_kind,
+                                accounts_for=lambda of_agent: accounts_of(slots_for(of_agent), of_agent),
+                                forbidden=forbidden)
     except budget.Refusal as refusal:
         budget.log_decision("refused", refusal.detail, agent=t.agent, model=t.model, kind=kind,
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
@@ -845,13 +950,21 @@ async def create_task(t: TaskIn, scope: str = "admin") -> dict:
         limits = dict(task_policy.get("limits") or {})
         limits["task_minutes"] = min(limits.get("task_minutes", review_exec["task_minutes"]), review_exec["task_minutes"])
         task_policy["limits"] = limits
+    on_account = [s for s in slots_for(agent) if s["account"] == decision.get("account")]
     try:
         if task_policy is not None:
             fleet_policy.validate(task_policy)
         node, effective, queued_reason = pick_node(agent, model, t.mode, t.node, t.gate, t.role, task_policy,
-                                                   t.skills, t.escalation)
+                                                   t.skills, t.escalation,
+                                                   allowed={s["node"] for s in on_account} if on_account else None)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    # The profile this task runs under: the chosen account's slot on the chosen node.
+    slot = next((s for s in on_account if s["node"] == node["id"]), None)
+    if slot is None and agent in budget.PAID_AGENTS:
+        mine = node_slots(node, agent)
+        slot = next((s for s in mine if usable(s)), mine[0] if mine else None)
+    account = (slot["account"] if slot else None) if agent in budget.PAID_AGENTS else None
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -889,6 +1002,8 @@ async def create_task(t: TaskIn, scope: str = "admin") -> dict:
             "review_of": t.review_of, "launch_extra": json.dumps(extra) if extra else None,
             "budget_wait": decision["wait"] if state == "queued" else None,
             "approved_tools": json.dumps(tools_at_launch),
+            "profile": slot["profile"] if slot else "fleet", "account_label": slot["label"] if slot else None,
+            "account": account,
         }
         with db() as c:
             c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
@@ -940,7 +1055,10 @@ async def wait(ids: str, timeout: float = 300, mode: str = "all") -> dict:
 
 @router.get("/api/tasks/{task_id}")
 def read_task(task_id: str) -> dict:
-    return with_root(get_task(task_id))
+    import handoff
+    view = with_root(get_task(task_id))
+    view["planned"] = handoff.planned_action(view)  # what happens to a limited task (docs/SPEC-limit-handoff.md 5)
+    return view
 
 
 @router.get("/api/tasks/{task_id}/log")
@@ -957,9 +1075,96 @@ async def task_diff(task_id: str) -> dict:
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/diff")
 
 
+def moved_to(task: dict) -> str | None:
+    """Why the task's work can't continue here: it was handed off (or is being handed off) to another attempt."""
+    resolution = task.get("resolution") or {}
+    if isinstance(resolution, str):
+        try:
+            resolution = json.loads(resolution)
+        except ValueError:
+            resolution = {}
+    if resolution.get("kind") == "handed_off":
+        return f"work moved to {resolution.get('task_id') or 'another task'}"
+    if resolution.get("kind") == "handing_off":
+        return "work moved to a handoff in progress"
+    return None
+
+
+def refuse_if_moved(task: dict) -> None:
+    moved = moved_to(task)
+    if moved:
+        raise HTTPException(409, moved)
+
+
+CONTINUE_RETRY = 60  # a continuation held by the node's policy (quiet hours, its concurrency) is retried after this
+# eligible() reasons that pass on their own (the rest, e.g. mode ceiling or a missing agent, need the owner)
+TRANSIENT_INELIGIBLE = ("runner offline", "on battery")
+
+
+def node_hold(node: dict, agent: str, model: str | None, mode: str, gate: str | None, policy: dict,
+              now: float | None = None) -> dict | None:
+    """The node side of admission, shared by new tasks' starts, continuations and handoffs: a refusal when the
+    node can't take this work at all (agent, model, mode ceiling, gate), a defer while its policy holds work back
+    (quiet hours, its concurrency, its daily agent minutes). None when the node admits it."""
+    now = time.time() if now is None else now
+    why = eligible(node, agent, model, mode, gate, policy)
+    if why and why.startswith(TRANSIENT_INELIGIBLE):
+        # The node is briefly unreachable or on battery: retry shortly, as a queued new task would keep waiting.
+        return {"outcome": "defer", "until": now + CONTINUE_RETRY, "reason": why, "wait": "node"}
+    if why:
+        return {"outcome": "refuse", "until": None, "reason": why, "wait": None}
+    why = temporary_reason(node, policy)
+    if why:
+        return {"outcome": "defer", "until": now + CONTINUE_RETRY, "reason": why, "wait": "node"}
+    return None
+
+
+def continuation(task: dict, *, effort: str | None = None, now: float | None = None) -> dict:
+    """The one admission for more work on an existing task (a message, an approval, an automatic tool approval,
+    a scheduled resume, a pipeline fix round): the budget (kinds, the account's limit, concurrency, hard budget)
+    and the node's policy. {"outcome": "admit"|"defer"|"refuse", "until", "reason", "wait"}."""
+    now = time.time() if now is None else now
+    verdict = budget.admission(task, now, effort=effort)
+    if verdict["outcome"] != "admit":
+        return verdict
+    try:
+        node = node_of(task)
+    except HTTPException as exc:
+        return {"outcome": "refuse", "until": None, "reason": str(exc.detail), "wait": None}
+    return node_hold(node, task["agent"], task.get("model"), task["mode"], task.get("gate"),
+                     task.get("policy") or {}, now) or verdict
+
+
+class NotAdmitted(HTTPException):
+    """A continuation that admission deferred or refused (409); `verdict` says which, why and until when."""
+    def __init__(self, verdict: dict):
+        when = f" (try again after {clock(verdict['until'])})" if verdict.get("until") else ""
+        super().__init__(409, f"{verdict['reason']}{when}")
+        self.verdict = verdict
+
+
 async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool = False,
                  effort: str | None = None) -> None:
-    """Caller holds the task lock. `effort` (pipelines' fix rounds) is sent only to runners that understand it."""
+    """Caller holds the task lock. `effort` (pipelines' fix rounds) is sent only to runners that understand it.
+    Every continuation passes admission here, before the runner hears of it, and holds its slot on the account
+    until the task is working (raises NotAdmitted otherwise)."""
+    refuse_if_moved(task)  # two writers never share one branch: the handoff attempt owns this work now
+    verdict = continuation(task, effort=effort)
+    if verdict["outcome"] != "admit":
+        raise NotAdmitted(verdict)
+    # Admission and the reservation happen with no await between them, so no other coroutine can be admitted to
+    # the same last slot (the account's or the node's) in between.
+    paid = task["agent"] in budget.PAID_AGENTS and task.get("budget_key")
+    budget.RESERVED[task["id"]] = (task["budget_key"] if paid else None,
+                                   budget.task_account(task) if paid else None, task.get("node_id"))
+    try:
+        await _send_resume(task, text, allowed_tools, reset_auto_approvals=reset_auto_approvals, effort=effort)
+    finally:
+        budget.RESERVED.pop(task["id"], None)
+
+
+async def _send_resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool,
+                       effort: str | None) -> None:
     tools = approvable_tools(task, [*(task.get("approved_tools") or []), *allowed_tools])
     if tools != task.get("approved_tools"):
         update(task["id"], approved_tools=json.dumps(tools))
@@ -986,8 +1191,10 @@ async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_
 async def message(task_id: str, m: MessageIn) -> dict:
     async with _locks[task_id]:
         task = get_task(task_id)
+        refuse_if_moved(task)
         if task["state"] not in RESUMABLE:
             raise HTTPException(409, f"can't message a task that is {task['state']}")
+        # resume() applies the continuation admission (docs/SPEC-limit-handoff.md 4.5): a defer or refusal is a 409.
         await resume(task, m.text, [], reset_auto_approvals=True)
     return get_task(task_id)
 
@@ -997,15 +1204,17 @@ async def approve(task_id: str) -> dict:
     """User-only (dashboard): start an awaiting task, or grant a blocked task the tools it was denied."""
     async with _locks[task_id]:
         task = get_task(task_id)
+        refuse_if_moved(task)
         if task["state"] == "awaiting_approval":
             if transition(task, {"awaiting_approval"}, "queued", ended_at=None, auto_approvals=0):
                 emit(task_id, "task.approved", {"title": task["title"]})
                 await try_start(get_task(task_id))
         elif task["state"] == "blocked":
             tools = denied_tool_names(task)
-            emit(task_id, "task.approved", {"title": task["title"], "tools": tools})
+            # Approving tools never bypasses admission: a limited or busy account, or the node's policy, gives 409.
             await resume(task, "The user approved the tools you were denied: " + ", ".join(tools)
                          + ". Continue the task.", tools, reset_auto_approvals=True)
+            emit(task_id, "task.approved", {"title": task["title"], "tools": tools})
         else:
             raise HTTPException(409, f"nothing to approve: task is {task['state']}")
     return get_task(task_id)
@@ -1081,14 +1290,24 @@ async def resolve(task_id: str, body: ResolveIn, request: Request) -> dict:
             raise HTTPException(400, "done_elsewhere needs 'by' (who finished it)")
         if task["state"] not in RESOLVABLE:
             raise HTTPException(409, f"can't resolve a task that is {task['state']}")
-        resolution = {"kind": body.kind, "at": time.time()}
+        if (task.get("resolution") or {}).get("kind") in HANDOFF_KINDS:
+            raise HTTPException(409, "a limit handoff owns this task's resolution")
+        resolution: dict = {"kind": body.kind, "at": time.time()}
         if by:
             resolution["by"] = by
         if commit:
             resolution["commit"] = commit
         if body.note and body.note.strip():
             resolution["note"] = body.note.strip()[:500]
-        update(task_id, resolution=json.dumps(resolution))
+        # Conditional: a handoff claim written since the read above (it doesn't take this task lock) wins.
+        marks = ",".join("?" * len(HANDOFF_KINDS))
+        with db() as c:
+            moved = c.execute(f"UPDATE tasks SET resolution=?, updated_at=? WHERE id=? AND (resolution IS NULL OR "
+                              f"json_extract(resolution, '$.kind') IS NULL OR "
+                              f"json_extract(resolution, '$.kind') NOT IN ({marks}))",
+                              (json.dumps(resolution), time.time(), task_id, *HANDOFF_KINDS)).rowcount
+        if moved != 1:
+            raise HTTPException(409, "a limit handoff owns this task's resolution")
     emit(task_id, "task.resolved", {"title": task["title"], "kind": body.kind, "by": by or None,
                                     "commit": commit or None, "actor": getattr(request.state, "actor", None)})
     return with_root(get_task(task_id))
@@ -1119,7 +1338,8 @@ async def set_outcome(task_id: str, body: OutcomeIn, request: Request) -> dict:
 
 
 WORK_COLUMNS = ("id,parent_id,link,title,agent,model,state,failure_reason,resets_at,resolution,outcome,hidden,"
-                "created_at,updated_at,started_at,ended_at,runs,gate,gate_result,exit_code,error,"
+                "created_at,updated_at,started_at,ended_at,runs,gate,gate_result,exit_code,error,kind,account_label,"
+                "launch_extra,"
                 # The end of the output is where a usage-limit message sits (same slice derive_reason uses).
                 "CASE WHEN failure_reason IS NULL AND state IN ('failed','blocked','interrupted','cancelled') "
                 "THEN substr(result,-4000) END AS result")
@@ -1136,9 +1356,18 @@ def outcome_display(value: dict) -> dict:
 
 def attempt_entries(row: dict, resumed: list[dict]) -> list[dict]:
     """One entry per run of a task: earlier runs come from task.resumed events, the last from the row."""
+    try:
+        extra = json.loads(row.get("launch_extra") or "{}") or {}
+    except (TypeError, ValueError):
+        extra = {}
+    handed_off = ((row.get("resolution") or {}) if isinstance(row.get("resolution"), dict) else {}).get("kind") == "handed_off"
+
     def entry(**kw) -> dict:
         return {"id": row["id"], "title": row["title"], "agent": row["agent"], "model": row["model"],
-                "link": row["link"], "created_at": row["created_at"]} | kw
+                "link": row["link"], "created_at": row["created_at"], "kind": row.get("kind"),
+                "account_label": row.get("account_label"),
+                # a limit handoff: this attempt continues another's checkpoint / this attempt's work moved on
+                "handoff": bool(extra.get("source_job")), "handed_off": handed_off} | kw
 
     at = row["created_at"]
     out, started = [], row["started_at"] or at

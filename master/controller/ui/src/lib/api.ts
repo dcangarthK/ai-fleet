@@ -163,11 +163,17 @@ export interface Task {
   link?: "retry" | "resume" | "review" | "fix" | "merge" | "check" | null;
   failure_reason?: "limit" | "gate_failed" | "denied" | "error" | "interrupted" | "cancelled" | null;
   resets_at?: number | null;
-  resolution?: { kind: "resolved_by" | "dismissed" | "done_elsewhere"; task_id?: string; title?: string; commit?: string; by?: string; note?: string; at: number } | null;
+  resolution?: { kind: "resolved_by" | "dismissed" | "done_elsewhere" | "handed_off" | "handing_off"; task_id?: string; title?: string; commit?: string; by?: string; note?: string; model?: string | null; label?: string | null; at: number } | null;
   outcome?: { kind: "merged" | "done" | "abandoned"; commit?: string; at: number } | null;
   hidden?: boolean;
   display?: { tone: "running" | "ok" | "paused" | "attention" | "resolved" | "muted"; label: string };
   root_id?: string;
+  // Account pools and limit handoff (docs/SPEC-limit-handoff.md); absent on older controllers.
+  kind?: string | null;
+  profile?: string | null;
+  account_label?: string | null;
+  account?: string | null;
+  planned?: { action: "handoff" | "wait" | "left"; label: string; at?: number } | null;
 }
 
 export interface UsageRow {
@@ -304,7 +310,7 @@ export interface LeaderRow {
 
 export interface Recommendation { node: string; role: string; model: string; score: number; installed: boolean }
 
-export type PipelineState = "building" | "reviewing" | "resolving" | "ready" | "failed" | "escalated" | "cancelled";
+export type PipelineState = "building" | "reviewing" | "resolving" | "review_waiting" | "ready" | "failed" | "escalated" | "cancelled";
 
 export interface ReviewIssue { severity: "high" | "medium" | "low"; file?: string; problem: string; evidence?: string; fix?: string }
 

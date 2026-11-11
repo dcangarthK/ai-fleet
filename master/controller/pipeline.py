@@ -240,6 +240,19 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
             p["state"] = "failed"
             _history(p, "failed", note=f"builder task {state}")
         return p, []
+    if kind == "build_limited":
+        return _build_limited(p, event)
+    if kind == "review_limited" and p.get("state") == "reviewing":
+        return _review_limited(p, event)
+    if kind == "review_resume" and p.get("state") == "review_waiting":
+        actions = []
+        for key, review in sorted(p["reviews"].items()):
+            if review.get("waiting_until") is not None:
+                p["reviews"][key] = {"status": "pending"}
+                actions.append({"do": "spawn_review", "reviewer": int(key)})
+        p["state"] = "reviewing"
+        _history(p, "reviewing", note="the limited review restarts after the reset (same round)")
+        return p, actions
     if kind == "local_review" and p.get("state") == "reviewing":
         return _local_review(p, event)
     if kind != "review" or p.get("state") != "reviewing":
@@ -252,6 +265,56 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
     return _finish_round(p)
+
+
+def _build_limited(p: dict, event: dict) -> tuple[dict, list[dict]]:
+    """The build stopped at a usage limit (docs/SPEC-limit-handoff.md 4.6). With a handoff the pipeline follows the
+    new attempt; while waiting it stays building; left for the owner, it escalates. Never "failed"."""
+    if p.get("state") != "building":
+        return p, []
+    action = event.get("action")
+    budget = p.setdefault("budget", {})
+    if action == "handoff" and event.get("task_id"):
+        if p.get("build_task") == event["task_id"]:
+            return p, []
+        old = p.get("build_task")
+        p["build_task"] = event["task_id"]
+        budget.pop("waiting_build", None)
+        _history(p, "building", note=f"build {old} stopped at a usage limit; handed off to {event['task_id']}",
+                 handoff_from=old, handoff_to=event["task_id"])
+        return p, []
+    if action == "wait":
+        if budget.get("waiting_build") == p.get("build_task"):
+            return p, []
+        budget["waiting_build"] = p.get("build_task")
+        _history(p, "building", note="build stopped at a usage limit; waiting for the reset to resume it")
+        return p, []
+    if action == "left":
+        p["state"] = "escalated"
+        _history(p, "escalated", note="build stopped at a usage limit and was left for the owner"
+                 + (f": {event['reason']}" if event.get("reason") else ""))
+    return p, []
+
+
+def _review_limited(p: dict, event: dict) -> tuple[dict, list[dict]]:
+    """A paid review stopped at a usage limit: not a finished review and not a paid round; wait for the reset."""
+    index = event.get("reviewer")
+    key = str(index)
+    if not isinstance(index, int) or p["reviews"].get(key, {}).get("status") != "pending":
+        return p, []
+    p["reviews"][key] = {"status": "pending", "waiting_until": event.get("resets_at"),
+                         "limited_task": event.get("task_id")}
+    budget = p.setdefault("budget", {})
+    others = [k for k, review in p["reviews"].items() if k != key and review.get("task_id")
+              and p["reviewers"][int(k)].get("kind") == "agent"]
+    if not others and p["round"] in budget.get("paid_rounds", []):
+        budget["paid_rounds"].remove(p["round"])
+    if event.get("codex") and p["round"] in budget.get("codex_rounds", []):
+        budget["codex_rounds"].remove(p["round"])
+    p["state"] = "review_waiting"
+    _history(p, "review_waiting", note=f"reviewer {key} stopped at a usage limit; it reviews again after the reset",
+             resets_at=event.get("resets_at"))
+    return p, []
 
 
 def _finish_round(p: dict) -> tuple[dict, list[dict]]:

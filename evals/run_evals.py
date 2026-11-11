@@ -99,8 +99,9 @@ def ollama(base: str, path: str, body: dict | None = None, timeout: float = 600)
 
 
 def chat(base: str, model: str, system: str, prompt: str, json_mode: bool = False,
-         temperature: float = 0, logprobs: bool = False, seed: int = 42) -> dict:
-    body = {"model": model, "stream": False, "keep_alive": "5m",
+         temperature: float = 0, logprobs: bool = False, seed: int = 42, think: bool = False) -> dict:
+    # "think" is Ollama's documented switch for reasoning models (qwen3 etc.); False skips the thinking phase.
+    body = {"model": model, "stream": False, "keep_alive": "5m", "think": think,
             "options": {"temperature": temperature, "seed": seed, "num_ctx": 8192},
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
     if json_mode:
@@ -111,7 +112,7 @@ def chat(base: str, model: str, system: str, prompt: str, json_mode: bool = Fals
     out = ollama(base, "/api/chat", body)
     elapsed = time.monotonic() - started
     text = (out.get("message") or {}).get("content") or ""
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()  # reasoning models
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()  # fallback if a model still emits tags
     tps = out["eval_count"] / (out["eval_duration"] / 1e9) if out.get("eval_count") and out.get("eval_duration") else 0
     token_logprobs = (out.get("message") or {}).get("logprobs") or out.get("logprobs") or []
     return {"text": text, "seconds": elapsed, "tokens_per_s": tps, "logprobs": token_logprobs}
@@ -502,6 +503,7 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
             })
         if role in REVIEWER_ROLES:
             role_result["metrics"] = split_metrics(pairs)
+        role_result["think"] = False  # chat() default; every request in this run sent "think": false
         role_result["evaluated_at"] = time.time()
         res["roles"][role] = role_result
     unload(base, model)
@@ -525,36 +527,70 @@ def merge_result(old: dict | None, new: dict) -> dict:
     return {**new, "roles": {**kept, **new["roles"]}}
 
 
-def leaderboard(results: list[dict], roles: list[str]) -> str:
+ROLE_ORDER = ["coder", "reviewer", "fast", "reviewer_real", "grounded"]
+
+
+def _role_score(result: dict, role: str) -> float | None:
+    value = (result.get("roles") or {}).get(role)
+    return value.get("score") if isinstance(value, dict) else None
+
+
+def leaderboard(results: list[dict], roles: list[str] | None = None) -> str:
+    """Every stored model appears; a role a model lacks is an empty cell. roles=None means all stored roles."""
+    if roles is None:
+        found = {role for r in results for role in (r.get("roles") or {})}
+        roles = [x for x in ROLE_ORDER if x in found] + sorted(found - set(ROLE_ORDER))
+    results = [r for r in results if any(_role_score(r, x) is not None for x in roles)]
     lines = ["# Local model leaderboard", "",
              f"Scores are % of the role's checks passed. 'Fits 16GB' = loaded size + {HEADROOM_GB}GB headroom "
-             f"<= {LAPTOP_GB}GB. Generated {time.strftime('%Y-%m-%d %H:%M')}.", ""]
+             f"<= {LAPTOP_GB}GB. Empty cell = role not evaluated for that model (never counted as 0). "
+             f"Rows are sorted by the mean score over the roles each model has, ties by number of roles. "
+             f"Generated {time.strftime('%Y-%m-%d %H:%M')}.", ""]
     headers = ["Model", *(r.capitalize() for r in roles), "Review JSON valid"]
     if "grounded" in roles:
         headers += ["Hallucination rate", "Correct abstain rate"]
-    headers += ["Median s", "Tok/s", "Size GB", "Fits 16GB"]
+    headers += ["Think", "Median s (last run)", "Tok/s (last run)", "Size GB", "Fits 16GB"]
     lines += ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
-    for r in sorted(results, key=lambda r: -sum(r["roles"][x]["score"] for x in roles)):
-        reviewer_scores = r["roles"].get("reviewer") or r["roles"].get("reviewer_real", {})
+    def sort_key(r):
+        scores = [v for v in (_role_score(r, x) for x in roles) if v is not None]
+        return (-sum(scores) / len(scores), -len(scores))
+
+    unknown_think = []
+    for r in sorted(results, key=sort_key):
+        reviewer_scores = r["roles"].get("reviewer") or r["roles"].get("reviewer_real") or {}
         jv = reviewer_scores.get("json_valid")
-        cells = [r["model"], *(f"{r['roles'][x]['score']:.0f}" for x in roles),
+        cells = [r["model"], *("" if _role_score(r, x) is None else f"{_role_score(r, x):.0f}" for x in roles),
                  "" if jv is None else f"{jv:.0f}"]
         if "grounded" in roles:
-            grounded_result = r["roles"]["grounded"]
-            cells += [f"{grounded_result['hallucination_rate']:.1%}",
-                      f"{grounded_result['correct_abstain_rate']:.1%}"]
-        cells += [str(r["median_s"]), str(r["tokens_per_s"]),
-                  str(r["size_gb"] if r["size_gb"] is not None else "?"),
-                  "yes" if r["fits_16gb"] else "no"]
+            g = r["roles"].get("grounded")
+            cells += [f"{g['hallucination_rate']:.1%}", f"{g['correct_abstain_rate']:.1%}"] if g else ["", ""]
+        fits = r.get("fits_16gb")
+        stored = [v for v in r["roles"].values() if isinstance(v, dict)]
+        if stored and all(v.get("think") is False for v in stored):
+            think_cell = "off"
+        else:
+            think_cell = "unknown"
+            unknown_think.append(r["model"])
+        cells += [think_cell, "" if r.get("median_s") is None else str(r["median_s"]),
+                  "" if r.get("tokens_per_s") is None else str(r["tokens_per_s"]),
+                  str(r["size_gb"] if r.get("size_gb") is not None else "?"),
+                  "" if fits is None else ("yes" if fits else "no")]
         lines.append("| " + " | ".join(cells) + " |")
+    if unknown_think:
+        lines += ["", "think: unknown (before think=false) for: " + ", ".join(unknown_think)
+                  + ". Their stored role results lack the `think` field, so thinking models may have run with "
+                  "thinking on. Capability per model is not recorded here; no model was re-run."]
     lines += ["", "## Recommendation", ""]
     for role in roles:
-        ranked = sorted(results, key=lambda r: -r["roles"][role]["score"])
+        ranked = sorted((r for r in results if _role_score(r, role) is not None),
+                        key=lambda r: -_role_score(r, role))
+        if not ranked:
+            continue
         best = ranked[0]
-        small = next((r for r in ranked if r["fits_16gb"]), None)
-        line = f"- **{role}**: {best['model']} ({best['roles'][role]['score']:.0f}%)"
+        small = next((r for r in ranked if r.get("fits_16gb")), None)
+        line = f"- **{role}**: {best['model']} ({_role_score(best, role):.0f}%)"
         if small and small is not best:
-            line += f"; on a 16GB laptop: {small['model']} ({small['roles'][role]['score']:.0f}%)"
+            line += f"; on a 16GB laptop: {small['model']} ({_role_score(small, role):.0f}%)"
         lines.append(line)
     lines += ["", "Treat role scores below ~70% as 'second opinion only'; tests and Claude make the final call."]
     if "reviewer_real" in roles:
@@ -634,30 +670,37 @@ def reviewer_metrics_table(results: list[dict], role: str) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--models", required=True)
+    ap.add_argument("--models", default="")
     ap.add_argument("--roles", default="coder,reviewer,fast")
     ap.add_argument("--ollama", default=os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434"))
     ap.add_argument("--out", default=str(HERE / "results"))
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--sandbox", choices=["auto", "macos", "docker"], default="auto")
     ap.add_argument("--unsafe-exec", action="store_true", help="run model code without a sandbox")
+    ap.add_argument("--report-only", action="store_true",
+                    help="regenerate LEADERBOARD.md and GROUNDING.md from results.json; calls no model")
     args = ap.parse_args()
+    if not args.report_only and not args.models:
+        ap.error("--models is required unless --report-only is given")
     global SANDBOX_MODE
     SANDBOX_MODE = "none" if args.unsafe_exec else args.sandbox
     roles = [r for r in args.roles.split(",") if r]
-    if "coder" in roles:
+    if "coder" in roles and not args.report_only:
         _command(tempfile.gettempdir())  # fail fast if model-written code will need a sandbox
     out = Path(args.out)
+    if args.report_only and not (out / "results.json").exists():
+        ap.error(f"--report-only needs {out / 'results.json'}, which does not exist")
     out.mkdir(parents=True, exist_ok=True)
     previous = {}
     if (out / "results.json").exists():  # keep earlier models so the leaderboard grows run by run
         previous = {r["model"]: r for r in json.loads((out / "results.json").read_text())}
-    for model in [m for m in args.models.split(",") if m]:
+    for model in [] if args.report_only else [m for m in args.models.split(",") if m]:
         print(f"== {model}", flush=True)
         previous[model] = merge_result(previous.get(model), eval_model(args.ollama, model, roles, args.repeat))
     results = list(previous.values())
-    (out / "results.json").write_text(json.dumps(results, indent=2))
-    (out / "LEADERBOARD.md").write_text(leaderboard([r for r in results if all(x in r["roles"] for x in roles)], roles))
+    if not args.report_only:
+        (out / "results.json").write_text(json.dumps(results, indent=2))
+    (out / "LEADERBOARD.md").write_text(leaderboard(results))
     (out / "GROUNDING.md").write_text(grounding_report(results))
     print((out / "LEADERBOARD.md").read_text())
     return 0

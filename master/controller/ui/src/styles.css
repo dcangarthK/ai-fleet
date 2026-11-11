@@ -223,6 +223,19 @@ pre.diff .hunk { color: var(--info); }
 .banner.error { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 7%, var(--surface)); }
 .banner.note { color: var(--ink-2); border-color: var(--line); background: var(--surface); }
 
+/* Install progress */
+.bar { display: block; width: 100%; max-width: 160px; height: 4px; margin-top: 5px; border-radius: 2px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--action); transition: width 400ms ease-out; }
+.bar > span.indeterminate { animation: bar-slide 1.2s ease-in-out infinite; }
+@keyframes bar-slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+button.small { padding: 2px 8px; font-size: 12.5px; }
+
+/* The install strip: running model operations, visible on every page. */
+.ops { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; padding: 8px 12px; margin: -8px 0 16px;
+       background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); font-size: 13px; }
+.ops .op { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.ops .op .bar { width: 90px; margin: 0; }
+
 /* ---------- side sheet & dialog ---------- */
 .sheet-backdrop { position: fixed; inset: 0; background: rgba(10, 15, 13, 0.35); z-index: 20; }
 .sheet {

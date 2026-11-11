@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { useFleet, useLiveUpdates, useTasks } from "../lib/data";
-import { needsYou, nodeSignal, SIGNAL_LABEL } from "../lib/format";
+import { BUSY, useFleet, useLiveUpdates, useModels, useTasks } from "../lib/data";
+import { INSTALL_LABEL, needsYou, nodeSignal, progressFraction, SIGNAL_LABEL } from "../lib/format";
 import { NodeLight } from "./bits";
 
 const NAV: { to: string; label: string; later?: string }[] = [
@@ -101,8 +101,32 @@ export function Shell() {
       </aside>
 
       <main className="main" id="main">
+        <InstallStrip />
         <Outlet />
       </main>
+    </div>
+  );
+}
+
+/** Model installs and removals in progress, shown above every page until they finish. */
+function InstallStrip() {
+  const models = useModels();
+  const fleet = useFleet();
+  const ops = (models.data ?? []).flatMap((m) =>
+    Object.entries(m.nodes).filter(([, n]) => n.state && BUSY.has(n.state)).map(([node, n]) => ({ m, node, n })));
+  if (!ops.length) return null;
+  const name = (id: string) => fleet.data?.nodes.find((x) => x.id === id)?.name ?? id;
+  return (
+    <div className="ops" role="status" aria-live="polite">
+      {ops.map(({ m, node, n }) => {
+        const frac = progressFraction(n.progress);
+        return (
+          <Link key={m.id + node} to="/models" className="op" style={{ color: "inherit", textDecoration: "none" }}>
+            <span>{INSTALL_LABEL[n.state ?? "pending"].label} <b>{m.display_name || m.reference}</b> on {name(node)}</span>
+            <span className="bar"><span style={{ width: frac == null ? "30%" : `${Math.round(frac * 100)}%` }} className={frac == null ? "indeterminate" : ""} /></span>
+          </Link>
+        );
+      })}
     </div>
   );
 }

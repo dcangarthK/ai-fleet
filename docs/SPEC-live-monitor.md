@@ -194,8 +194,9 @@ names.
 - Self-reported records never affect enforcement.
 - **Profile pinning** can't bypass admission or slot rules.
 - **Independence for ad-hoc tasks:**
-  - **New kind:** `test` is added to `budget.KINDS` and to the seeded budget rules' kind lists, for every Claude
-    rule; Codex stays reserved.
+  - **New kind:** `test` is added to `budget.KINDS` and to the seeded budget rules' kind lists, for the Claude
+    rules **except Fable**. Fable never builds, fixes or tests (owner rule; CLAUDE.md rule 0). Codex stays
+    reserved.
   - **When it applies:** to a task with `kind` review, re_review, final_review, security_review or test, and a
     `parent_id`, that was **not** created by the pipeline engine. Pipeline review tasks keep their existing check
     and Part C's escalation path.

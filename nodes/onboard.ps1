@@ -674,7 +674,10 @@ class Heartbeat:
     def run_forever(self):
         while True:
             time.sleep(self.next_delay())
-            self.beat()
+            try:
+                self.beat()
+            except Exception:  # a failing report must not end the thread: the next beat tries again
+                pass
 
     def start(self):
         threading.Thread(target=self.run_forever, name="heartbeat", daemon=True).start()
@@ -2438,7 +2441,7 @@ def health_report(manager):
     agents = find_agents(manager.ollama_url, ollama_up=ollama_up)
     manager.agents = agents
     running = 0
-    for job in manager.jobs.values():
+    for job in list(manager.jobs.values()):  # a snapshot: jobs are added from request threads
         manager.refresh(job)
         running += job.get("state") == "running"
     power = system_power()

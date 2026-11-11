@@ -536,11 +536,12 @@ def reset_limit(body: ResetIn, request: Request) -> dict:
 HEARTBEAT_MAX_BYTES = 64 * 1024
 HEARTBEAT_SKEW = 60
 HEARTBEAT_MIN_GAP = 2.0
+HEARTBEAT_FAIL_LIMIT, HEARTBEAT_FAIL_WINDOW = 30, 60.0
 REFUSED = {"detail": "heartbeat refused"}
 
 
 def _refuse(source: str, now: float) -> JSONResponse:
-    if not _rate(HEARTBEAT_FAILURES[source], 30, 60, now):
+    if not _rate(HEARTBEAT_FAILURES[source], HEARTBEAT_FAIL_LIMIT, HEARTBEAT_FAIL_WINDOW, now):
         return JSONResponse(REFUSED, status_code=429)
     return JSONResponse(REFUSED, status_code=401)
 
@@ -551,6 +552,15 @@ async def heartbeat(request: Request):
     only auth: no user token, no API scope. Every refusal is the same 401."""
     now = time.time()
     source = request.client.host if request.client else "?"
+    # Header shape first (no body, no DB): a source over its failure limit sending junk is cut off right here.
+    node_id = request.headers.get("x-fleet-node") or ""
+    sig = (request.headers.get("x-fleet-sig") or "").lower()
+    try:
+        ts = int(request.headers.get("x-fleet-ts") or "")
+    except ValueError:
+        return _refuse(source, now)
+    if not tasks.NODE_ID_RE.fullmatch(node_id) or not re.fullmatch(r"[0-9a-f]{64}", sig):
+        return _refuse(source, now)
     try:
         length = int(request.headers.get("content-length") or 0)
     except ValueError:
@@ -563,14 +573,6 @@ async def heartbeat(request: Request):
             return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
         buffer += part
     raw = bytes(buffer)
-    node_id = request.headers.get("x-fleet-node") or ""
-    sig = (request.headers.get("x-fleet-sig") or "").lower()
-    try:
-        ts = int(request.headers.get("x-fleet-ts") or "")
-    except ValueError:
-        return _refuse(source, now)
-    if not tasks.NODE_ID_RE.fullmatch(node_id) or not re.fullmatch(r"[0-9a-f]{64}", sig):
-        return _refuse(source, now)
     with db() as c:
         row = c.execute("SELECT status, heartbeat_ts, runner FROM nodes WHERE id=?", (node_id,)).fetchone()
     # An unknown or unapproved node is refused before any key is looked up (no env-token fallback for strangers).
@@ -627,6 +629,9 @@ def _transition(key, active: bool, seed: bool) -> bool:
 async def sweep_once(now: float | None = None) -> None:
     now = time.time() if now is None else now
     grace = tasks.in_startup_grace(now)
+    for source in [s for s, bucket in HEARTBEAT_FAILURES.items()
+                   if not bucket or bucket[-1] <= now - HEARTBEAT_FAIL_WINDOW]:
+        del HEARTBEAT_FAILURES[source]  # an idle source's bucket is dropped, so the map can't grow without bound
     nodes = tasks.node_rows()
     for node in nodes:
         if node["status"] != "approved":
@@ -637,6 +642,8 @@ async def sweep_once(now: float | None = None) -> None:
             emit(None, kind, {"node": node["id"], "name": node.get("name"), "reason": reason})
         machine = machine_row(node, now)
         for warning, kind in (("swap", "node.swap_high"), ("disk", "node.disk_low")):
+            if machine["unknown"]:
+                continue  # stale or missing metrics say nothing: no transition either way
             active = warning in machine["warnings"]
             if _transition((node["id"], kind), active, False):
                 emit(None, kind, {"node": node["id"], "name": node.get("name"),
@@ -676,6 +683,8 @@ def replace(task: dict, now: float) -> bool:
     allowed = None
     if task["agent"] in budget.PAID_AGENTS and task.get("account"):
         slots = [s for s in tasks.placement(task["agent"], None) if s["account"] == task["account"]]
+        if not task.get("model"):  # no model named: only the fleet profile runs the fleet default
+            slots = [s for s in slots if s["profile"] == "fleet"]
         allowed = {s["node"] for s in slots} - {task["node_id"]}
         if not allowed:
             return False
@@ -691,7 +700,8 @@ def replace(task: dict, now: float) -> bool:
     profile, label, account = task.get("profile"), task.get("account_label"), task.get("account")
     if task["agent"] in budget.PAID_AGENTS:
         slot = next((s for s in tasks.node_slots(node, task["agent"]) if tasks.usable(s)
-                     and (account is None or s["account"] == account)), None)
+                     and (account is None or s["account"] == account)
+                     and (task.get("model") or s["profile"] == "fleet")), None)
         if slot is None:
             return False
         profile, label, account = slot["profile"], slot["label"], slot["account"]

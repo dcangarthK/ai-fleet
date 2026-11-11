@@ -245,7 +245,7 @@ def runner_offline(node: dict, now: float | None = None, grace: bool | None = No
     """The one liveness rule (docs/SPEC-live-monitor.md 12.2): why this node's runner is OFFLINE, or None.
     1. no runner report, or 3 failed polls in a row (every runner);
     2. heartbeat expiry: an accepted heartbeat, more than HEARTBEAT_TTL old, and the last good poll (or none) more
-       than one poll interval + 5 s old. Not applied during the controller's startup grace."""
+       than two poll intervals + 5 s old (a tick runs past its sleep, so a healthy poll can be older than one). Not applied during the controller's startup grace."""
     now = time.time() if now is None else now
     if not node.get("runner") or (node.get("runner_fails") or 0) >= 3:
         return "runner offline"
@@ -257,7 +257,7 @@ def runner_offline(node: dict, now: float | None = None, grace: bool | None = No
     if grace:
         return None
     polled = node.get("polled_at")
-    if now - beat > HEARTBEAT_TTL and (polled is None or now - polled > NODE_POLL_SECONDS + 5):
+    if now - beat > HEARTBEAT_TTL and (polled is None or now - polled > 2 * NODE_POLL_SECONDS + 5):
         return f"runner offline: no heartbeat for {int(now - beat)} s"
     return None
 
@@ -1006,7 +1006,9 @@ def check_independence(t: "TaskIn", kind: str, agent: str, model: str | None, no
     if pipeline or kind not in INDEPENDENT_KINDS or not t.parent_id:
         return None
     if t.independence == "waived":
-        return {"waived": True, "reason": (t.independence_reason or "").strip()[:300]}
+        import redaction  # local import: keeps this module's imports as they were
+        reason = " ".join(redaction.redact(t.independence_reason or "", strict=True).split())
+        return {"waived": True, "reason": reason[:300]}
     import handoff  # local import: handoff builds on this module
     resolved = model or (budget.node_default_model(agent, node["id"])
                          if agent in budget.PAID_AGENTS and (profile or "fleet") == "fleet" else None)

@@ -57,6 +57,10 @@ class LiveBase(unittest.TestCase):
         cls.ctx.__exit__(None, None, None)
 
     def setUp(self):
+        self._started_at = live.STARTED_AT
+        self.addCleanup(setattr, tasks, "NODE_POLL_SECONDS", tasks.NODE_POLL_SECONDS)
+        tasks.NODE_POLL_SECONDS = 30.0  # the suite polls every 0.3 s; liveness ages here are real-world ones
+        self.addCleanup(setattr, live, "STARTED_AT", self._started_at)  # tests move the startup grace
         self.settle_all()
         r = self.c.put("/api/budget/rules", json={"body": rules()}, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
@@ -156,10 +160,13 @@ class LiveApiTests(LiveBase):
                       "VALUES (?,?,?,?,?,?,?,?,?)", (time.time(), "t-" + secrets.token_hex(4), 1, "claude", SONNET,
                                                      "claude:" + SONNET, "limit", time.time() + 3600, "claude/spare"))
         limited = self.ok(agent="claude", model=SONNET, kind="draft", profile="spare")
-        held = self.ok(agent="claude", model=SONNET, kind="draft")
-        with db() as c:  # the node's policy holds this one back (e.g. its concurrency)
-            c.execute("UPDATE tasks SET state='queued', budget_wait=NULL, error='max concurrent tasks reached' WHERE id=?",
-                      (held["id"],))
+        r = self.c.put("/api/policies/node/master", json={"body": {"limits": {"max_concurrent": 1}}}, headers=W)  # the build above already runs
+        self.assertEqual(r.status_code, 200, r.text)
+        try:  # a real node limit holds this one back
+            held = self.ok(agent="claude", model=SONNET, kind="draft")
+            self.c.portal.call(tasks.try_start, tasks.get_task(held["id"]))
+        finally:
+            self.c.put("/api/policies/node/master", json={"body": {}}, headers=W)
         queue = {q["task_id"]: q for q in self.live()["queue"]}
         self.assertEqual(queue[limited["id"]]["wait"], "limit")
         self.assertGreater(queue[limited["id"]]["until"], time.time())
@@ -433,6 +440,15 @@ class PinningTests(LiveBase):
         self.assertIn("test", budget.DEFAULT_RULES["models"]["claude:claude-opus-*"]["kinds"])
         self.assertNotIn("test", budget.DEFAULT_RULES["models"]["claude:claude-fable-*"]["kinds"])
 
+    def test_a_test_task_is_not_a_builder_in_the_work_item(self):
+        body = rules()
+        body["models"]["claude:claude-opus-*"]["kinds"].append("test")
+        self.c.put("/api/budget/rules", json={"body": body}, headers=W)
+        build = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest")
+        self.ok(agent="claude", model=SONNET, kind="test", parent_id=build["id"], mode="read-only",
+                worktree=False, independence="waived", independence_reason="fixture")
+        self.assertEqual(handoff.build_attempts(build["id"]), [("claude", OPUS)])
+
     def test_adhoc_independence_refused_unless_waived(self):
         body = rules()
         body["models"]["claude:claude-opus-*"]["kinds"].append("test")
@@ -461,6 +477,14 @@ class PinningTests(LiveBase):
                                            (waived["id"],)).fetchone())
         row = next(w for w in self.live()["workers"] if w.get("task_id") == waived["id"])
         self.assertEqual(row["independence"], "waived")
+        secret = "sk-ant-" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4"
+        leaky = self.ok(agent="claude", model=OPUS, prompt="test it", kind="test", parent_id=build["id"], link="check",
+                        mode="read-only", worktree=False, independence="waived",
+                        independence_reason=f"key {secret} was the reason")
+        self.assertNotIn(secret, json.dumps(leaky["independence"]))
+        with db() as c:
+            events = " ".join(r[0] or "" for r in c.execute("SELECT data FROM events WHERE task_id=?", (leaky["id"],)))
+        self.assertNotIn(secret, events)
         other = self.ok(agent="claude", model=SONNET, prompt="review", kind="review", parent_id=build["id"],
                         link="review", mode="read-only", worktree=False)
         self.assertNotIn(other["state"], ("failed",))
@@ -606,7 +630,8 @@ class HeartbeatTests(LiveBase):
                 pulled.append(len(chunk))
                 yield chunk
 
-        return type("Req", (), {"headers": {}, "client": None, "stream": staticmethod(stream)})()
+        headers = {"x-fleet-node": "master", "x-fleet-ts": str(int(time.time())), "x-fleet-sig": "0" * 64}
+        return type("Req", (), {"headers": headers, "client": type("C", (), {"host": "testclient"})(), "stream": staticmethod(stream)})()
 
     def test_one_huge_chunk_is_refused_without_being_buffered(self):
         pulled, held = [], []
@@ -633,6 +658,24 @@ class HeartbeatTests(LiveBase):
         r = self.c.portal.call(live.heartbeat, req)
         self.assertEqual(r.status_code, 413)
         self.assertEqual(pulled, [half, half, 1])
+
+    def test_a_limited_source_sending_junk_headers_is_cut_off_before_the_body_is_read(self):
+        for _ in range(30):
+            self.beat(sig="0" * 64)
+        pulled = []
+        req = self._stream_request([b"x" * 100], pulled)
+        req.headers["x-fleet-sig"] = "nothex"
+        r = self.c.portal.call(live.heartbeat, req)
+        self.assertEqual(r.status_code, 429)
+        self.assertEqual(pulled, [])  # no body read, no DB lookup
+        self.assertEqual(self.beat().status_code, 200)  # a validly signed post still passes
+
+    def test_the_sweep_prunes_idle_failure_buckets(self):
+        live.HEARTBEAT_FAILURES["203.0.113.9"].append(time.time() - 600)
+        live.HEARTBEAT_FAILURES["203.0.113.10"]  # an empty bucket from a lookup
+        live.HEARTBEAT_FAILURES["203.0.113.11"].append(time.time())
+        self.c.portal.call(live.sweep_once)
+        self.assertEqual(set(live.HEARTBEAT_FAILURES), {"203.0.113.11"})
 
     def test_bad_posts_never_use_up_the_nodes_own_allowance(self):
         for _ in range(5):
@@ -665,6 +708,10 @@ class HeartbeatTests(LiveBase):
 
 class LivenessTests(unittest.TestCase):
     """runner_offline is pure: one rule, a fake clock."""
+    def setUp(self):
+        self.addCleanup(setattr, tasks, "NODE_POLL_SECONDS", tasks.NODE_POLL_SECONDS)
+        tasks.NODE_POLL_SECONDS = 30.0
+
     def node(self, **kw):
         return {"status": "approved", "runner": {"ok": True}, "runner_fails": 0, "heartbeat_at": None,
                 "polled_at": None} | kw
@@ -681,14 +728,17 @@ class LivenessTests(unittest.TestCase):
         # push broken but pollable: online
         self.assertIsNone(off(self.node(heartbeat_at=now - 300, polled_at=now - 2), now))
         # dead: both stale
-        self.assertTrue(off(self.node(heartbeat_at=now - 26, polled_at=now - 36), now))
-        self.assertIsNone(off(self.node(heartbeat_at=now - 24, polled_at=now - 36), now))
+        self.assertTrue(off(self.node(heartbeat_at=now - 26, polled_at=now - 66), now))
+        self.assertIsNone(off(self.node(heartbeat_at=now - 24, polled_at=now - 66), now))
+        # a poll older than one interval but inside two + 5 s is a healthy tick that ran long: still online
+        for age in (36, 45, 65):
+            self.assertIsNone(off(self.node(heartbeat_at=now - 300, polled_at=now - age), now), age)
         # a NULL polled_at counts as stale
         self.assertTrue(off(self.node(heartbeat_at=now - 26), now))
         # runner_fails >= 3 with fresh heartbeats stays offline
         self.assertTrue(off(self.node(heartbeat_at=now - 1, runner_fails=3), now))
         # the startup grace switches the expiry rule off
-        self.assertIsNone(off(self.node(heartbeat_at=now - 26, polled_at=now - 36), now, grace=True))
+        self.assertIsNone(off(self.node(heartbeat_at=now - 26, polled_at=now - 66), now, grace=True))
 
 
 class SweepTests(LiveBase):
@@ -704,7 +754,7 @@ class SweepTests(LiveBase):
 
     def test_offline_and_online_events_once_and_startup_grace(self):
         live.STARTED_AT = time.time()  # within the grace: seeds only
-        self.node_ages(60, 60)
+        self.node_ages(90, 90)
         before = self.events("node.runner_offline")
         self.c.portal.call(live.sweep_once)
         self.assertEqual(self.events("node.runner_offline"), before)
@@ -719,6 +769,37 @@ class SweepTests(LiveBase):
         self.c.portal.call(live.sweep_once)
         self.c.portal.call(live.sweep_once)
         self.assertEqual(self.events("node.runner_online"), on + 1)
+
+    def test_a_node_that_still_answers_polls_does_not_flap_offline(self):
+        # Fable (medium): the poll loop is tick + 30 s sleep, so a good poll can be 36-45 s old.
+        live.STARTED_AT = time.time() - 120
+        before = self.events("node.runner_offline")
+        for poll_age in (36, 45):
+            self.node_ages(120, poll_age)  # pushes lost, polls still succeeding
+            self.c.portal.call(live.sweep_once)
+            self.assertIsNone(tasks.runner_offline(next(n for n in tasks.node_rows() if n["id"] == "master")))
+        self.assertEqual(self.events("node.runner_offline"), before)
+        self.c.post("/api/refresh", headers=W)  # a successful poll follows
+        wait_for(lambda: next(n for n in tasks.node_rows() if n["id"] == "master")["polled_at"] > time.time() - 5)
+        self.c.portal.call(live.sweep_once)
+        self.assertEqual(self.events("node.runner_offline"), before)
+
+    def test_unknown_metrics_raise_and_clear_no_warning_events(self):
+        live.STARTED_AT = time.time() - 120
+        FakeRunner.health_extra = {"metrics": dict(METRICS, swap_used_gb=6.0, age_s=2), "heartbeat": True}
+        self.refresh_metrics()
+        try:
+            self.c.portal.call(live.sweep_once)  # active swap warning
+            started = self.events("node.swap_high")
+            with db() as c:  # the report goes stale: the machine reads as unknown, which is not "cleared"
+                c.execute("UPDATE nodes SET polled_at=?, heartbeat_at=NULL WHERE id='master'", (time.time() - 600,))
+            machine = live.machine_row(next(n for n in tasks.node_rows() if n["id"] == "master"), time.time())
+            self.assertTrue(machine["unknown"])
+            self.c.portal.call(live.sweep_once)
+            self.assertEqual(self.events("node.swap_high"), started)
+        finally:
+            FakeRunner.health_extra = {"metrics": dict(METRICS, age_s=3), "heartbeat": True}
+            self.refresh_metrics()
 
     def test_machine_warnings_and_deduplicated_node_events(self):
         live.STARTED_AT = time.time() - 120
@@ -795,13 +876,31 @@ class FailoverTests(LiveBase):
             c.execute("INSERT OR REPLACE INTO nodes (id, name, status, runner, runner_fails, models, heartbeat_at, polled_at) "
                       "VALUES (?, ?, 'approved', ?, 0, '[]', ?, ?)",
                       (node_id, node_id, json.dumps({"agents": {"claude": "/x/claude"}, "max_mode": "auto-edit",
-                                                     "budget": True}), now - 60, now - 60))
+                                                     "budget": True}), now - 120, now - 120))
         return node_id
 
     def park(self, task, node_id, **placement):
         with db() as c:
             c.execute("UPDATE tasks SET state='queued', cwd=NULL, branch=NULL, node_id=?, placement=? WHERE id=?",
                       (node_id, json.dumps({"pinned": False} | placement), task["id"]))
+
+    def test_lease_race_between_try_start_and_replace(self):
+        dead = self.offline()
+        live.STARTED_AT = time.time() - 120
+        t = self.ok(agent="claude", model=SONNET, kind="draft")
+        self.park(t, dead)
+        stale = tasks.get_task(t["id"])  # try_start's snapshot, taken before the move
+        self.assertTrue(live.replace(stale, time.time()))
+        self.assertEqual(self.get(t["id"])["node_id"], "master")
+        original = tasks.node_of
+        tasks.node_of = lambda task: original(stale)  # the start still believes the old node
+        try:
+            started = self.c.portal.call(tasks.try_start, stale)
+        finally:
+            tasks.node_of = original
+        self.assertFalse(started)  # the lease holds on the node it was checked for
+        self.assertEqual(self.get(t["id"])["state"], "queued")
+        self.assertEqual(self.get(t["id"])["node_id"], "master")
 
     def test_lease_start_only_on_the_node_it_was_checked_for(self):
         t = self.ok(agent="claude", model=SONNET, kind="draft")
@@ -824,13 +923,38 @@ class FailoverTests(LiveBase):
         with db() as c:
             c.execute("UPDATE tasks SET state='queued', cwd=NULL, node_id=?, placement=NULL WHERE id=?", (dead, legacy["id"]))
         self.c.portal.call(live.sweep_once)
-        self.assertEqual(self.get(placed["id"])["node_id"], "master")
+        moved = self.get(placed["id"])
+        self.assertEqual(moved["node_id"], "master")
+        self.assertEqual((moved["profile"], moved["account"]), ("fleet", "claude/owner-max"))
+        with db() as c:
+            row = c.execute("SELECT policy, policy_hash FROM tasks WHERE id=?", (placed["id"],)).fetchone()
+        effective = tasks.pick_node("claude", SONNET, "auto-edit", "master")[1]
+        self.assertEqual((json.loads(row["policy"]), row["policy_hash"]), (effective["policy"], effective["hash"]))
         self.assertEqual(self.get(pinned["id"])["node_id"], dead)
         self.assertEqual(self.get(legacy["id"])["node_id"], dead)
         with db() as c:
             self.assertIsNotNone(c.execute("SELECT 1 FROM events WHERE type='task.replaced' AND task_id=?",
                                            (placed["id"],)).fetchone())
             c.execute("DELETE FROM nodes WHERE id=?", (dead,))
+
+    def test_a_model_less_task_is_replaced_only_onto_the_fleet_profile(self):
+        live.STARTED_AT = time.time() - 120
+        try:  # a named profile listed first, on the same account as the fleet one
+            FakeRunner.profiles = {"claude": [{"id": "spare", "label": "owner-max", "ready": True},
+                                              {"id": "fleet", "label": "owner-max", "ready": True}],
+                                   "codex": PROFILES["codex"]}
+            self.refresh()
+            dead = self.offline()
+            t = self.ok(agent="claude", kind="draft")
+            self.assertEqual(self.get(t["id"])["profile"], "fleet")
+            self.park(t, dead)
+            with db() as c:
+                c.execute("UPDATE tasks SET model=NULL WHERE id=?", (t["id"],))
+            self.assertTrue(live.replace(tasks.get_task(t["id"]), time.time()))
+            self.assertEqual((self.get(t["id"])["node_id"], self.get(t["id"])["profile"]), ("master", "fleet"))
+        finally:
+            FakeRunner.profiles = PROFILES
+            self.refresh()
 
     def test_a_queued_review_of_an_offline_nodes_build_is_pinned(self):
         build = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest")

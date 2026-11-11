@@ -174,6 +174,34 @@ class Heartbeats(unittest.TestCase):
 
         self.assertFalse(runner.Heartbeat(FakeManager(), "t", dict, post=boom).beat())
 
+    def test_the_loop_survives_a_report_that_raises(self):
+        calls = []
+
+        def report():
+            calls.append(1)
+            raise RuntimeError("jobs changed size")
+
+        beat = runner.Heartbeat(FakeManager(), "t", report, post=lambda *a: 200)
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) > 3:
+                raise SystemExit  # ends the otherwise endless loop
+
+        original = runner.time.sleep
+        runner.time.sleep = fake_sleep
+        try:
+            with self.assertRaises(SystemExit):
+                beat.run_forever()
+        finally:
+            runner.time.sleep = original
+        self.assertEqual(len(calls), 3)  # three failed beats, and the loop kept going
+
+    def test_health_report_survives_jobs_added_while_it_iterates(self):
+        import inspect
+        self.assertIn("list(manager.jobs.values())", inspect.getsource(runner.health_report))
+
     def test_jitter_stays_within_bounds(self):
         beat = runner.Heartbeat(FakeManager(), "t", dict)
         delays = [beat.next_delay() for _ in range(200)]

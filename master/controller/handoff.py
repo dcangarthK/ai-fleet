@@ -111,8 +111,8 @@ def build_attempts(task_id: str) -> list[tuple[str, str | None]]:
     """Resolved (agent, model) of every build attempt in the work item (4.7)."""
     out = []
     for t in _item(task_id):
-        if t.get("review_of") or t.get("link") in ("review", "check", "merge") or t.get("kind") in budget.REVIEW_KINDS:
-            continue
+        if t.get("review_of") or t.get("link") in ("review", "check", "merge") or t.get("kind") in tasks.INDEPENDENT_KINDS:
+            continue  # reviews and tests never count as builders
         found = resolved_model(t)
         if found not in out:
             out.append(found)

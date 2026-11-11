@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { post, type FleetNode, type Mode } from "../lib/api";
-import { useFleet, useRun, useTasks, useUsage } from "../lib/data";
+import { post, type Enrollment, type FleetNode, type Mode } from "../lib/api";
+import { useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
 import { ago, duration, nodeSignal, SIGNAL_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel, Tags } from "../components/bits";
 
@@ -13,12 +14,15 @@ function useNodeActions() {
       run(() => post(`/api/nodes/${encodeURIComponent(n.id)}/drain`)),
     ceiling: (n: FleetNode, mode: Mode) => run(() => post(`/api/nodes/${encodeURIComponent(n.id)}/ceiling`, { mode })),
     refresh: () => run(() => post("/api/refresh")),
+    enroll: async () => (await run(() => post<Enrollment>("/api/enroll", {}))) ?? null,
   };
 }
 
 function CeilingSelect({ node, modes, onChange, disabled }: { node: FleetNode; modes: Mode[]; onChange: (m: Mode) => void; disabled: boolean }) {
+  const can = useCan();
   if (node.status !== "approved") return <span className="quiet">—</span>;
   const set = node.ceiling ?? "auto-edit";
+  if (!can.admin) return <>{set}{node.effective_ceiling && node.effective_ceiling !== set && <div className="sub">The node's runner caps it at {node.effective_ceiling}</div>}</>;
   return (
     <>
       <select aria-label={`Highest permission mode on ${node.name}`} value={set} disabled={disabled} onChange={(e) => onChange(e.target.value as Mode)}>
@@ -33,6 +37,8 @@ function CeilingSelect({ node, modes, onChange, disabled }: { node: FleetNode; m
 
 export function NodesPage() {
   const fleet = useFleet();
+  const can = useCan();
+  const [enroll, setEnroll] = useState<Enrollment | null>(null);
   const nav = useNavigate();
   const a = useNodeActions();
   const nodes = fleet.data?.nodes ?? [];
@@ -41,8 +47,22 @@ export function NodesPage() {
       <PageHead
         title="Nodes"
         intro="Machines in the fleet, found on your tailnet. New nodes wait for your approval before they get work."
-        actions={<button disabled={a.busy} onClick={a.refresh}>Rescan tailnet</button>}
+        actions={<>
+          {can.operate && <button disabled={a.busy} onClick={a.refresh}>Rescan tailnet</button>}
+          {can.admin && <button className="primary" disabled={a.busy} onClick={async () => setEnroll(await a.enroll())}>Add a node</button>}
+        </>}
       />
+      {enroll && (
+        <div className="panel" style={{ padding: 14, marginBottom: 16 }} role="status">
+          <b>Run this on the new machine</b> (it must already be on your tailnet):
+          <pre className="out" style={{ userSelect: "all" }}>{enroll.command}</pre>
+          <div className="row small">
+            <button type="button" onClick={() => navigator.clipboard?.writeText(enroll.command)}>Copy command</button>
+            <span className="quiet">Works once, until {new Date(enroll.expires_at * 1000).toLocaleTimeString()}. The node then shows up here waiting for your approval.</span>
+            <button type="button" className="ghost" onClick={() => setEnroll(null)}>Done</button>
+          </div>
+        </div>
+      )}
       <LoadError error={fleet.error} />
       <ErrorBanner error={a.error} onDismiss={a.clearError} />
       <div className="panel">
@@ -55,15 +75,18 @@ export function NodesPage() {
                   <Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: 8 }}><NodeLight node={n} /><b>{n.name}</b></Link>
                   <div className="sub">{n.os} · <span className="mono">{n.ip}</span> · seen {ago(n.last_seen)}</div>
                 </td>
-                <td>{SIGNAL_LABEL[nodeSignal(n)]}</td>
+                <td>{SIGNAL_LABEL[nodeSignal(n)]}
+                  {n.runner?.power?.on_battery && <div className={`sub ${n.runner.power.ok ? "" : "tone-warn"}`}>on battery{n.runner.power.battery_pct != null && ` (${n.runner.power.battery_pct}%)`}{!n.runner.power.ok && ": no agent tasks"}</div>}
+                  {n.update_available && <div className="sub tone-info">runner update available</div>}
+                </td>
                 <td className="hide-sm">
                   <Tags items={Object.entries(n.runner?.agents ?? {}).filter(([, v]) => v).map(([k]) => k)} />
                   <div><Tags items={n.models} max={5} /></div>
                 </td>
                 <td><CeilingSelect node={n} modes={fleet.data?.modes ?? []} disabled={a.busy} onChange={(m) => a.ceiling(n, m)} /></td>
                 <td>
-                  {n.id !== "master" && n.status !== "approved" && <button className="primary" disabled={a.busy} onClick={() => a.approve(n)}>Approve</button>}
-                  {n.id !== "master" && n.status === "approved" && <button disabled={a.busy} onClick={() => a.drain(n)}>Drain</button>}
+                  {can.admin && n.id !== "master" && n.status !== "approved" && <button className="primary" disabled={a.busy} onClick={() => a.approve(n)}>Approve</button>}
+                  {can.admin && n.id !== "master" && n.status === "approved" && <button disabled={a.busy} onClick={() => a.drain(n)}>Drain</button>}
                   {" "}<button className="ghost" onClick={() => nav(`/nodes/${encodeURIComponent(n.id)}`)}>Details</button>
                 </td>
               </tr>
@@ -80,6 +103,7 @@ export function NodesPage() {
 
 export function NodeDetailPage() {
   const { id } = useParams();
+  const can = useCan();
   const fleet = useFleet();
   const tasks = useTasks();
   const usage = useUsage(7);
@@ -100,7 +124,7 @@ export function NodeDetailPage() {
       <PageHead
         title={node.name}
         intro={<span className="row" style={{ gap: 8 }}><NodeLight node={node} />{SIGNAL_LABEL[nodeSignal(node)]} · seen {ago(node.last_seen)}</span>}
-        actions={node.id !== "master" && (node.status !== "approved"
+        actions={can.admin && node.id !== "master" && (node.status !== "approved"
           ? <button className="primary" disabled={a.busy} onClick={() => a.approve(node)}>Approve node</button>
           : <button disabled={a.busy} onClick={() => a.drain(node)}>Drain node</button>)}
       />
@@ -115,6 +139,9 @@ export function NodeDetailPage() {
         <dd>{r ? `version ${r.version} · ${r.running} running · capped at ${r.max_mode}` : "not reachable"}</dd>
         {r?.allowed_roots && (<><dt>Folders</dt><dd>{r.allowed_roots.length ? <Tags items={r.allowed_roots} /> : <span className="tone-warn">No folders allowed yet; tasks can only use scratch space.</span>}</dd></>)}
         {r?.gate_profiles && (<><dt>Gates</dt><dd>{r.gate_profiles.length ? <Tags items={r.gate_profiles} /> : "none defined"}</dd></>)}
+        {r?.power && (<><dt>Power</dt><dd>{r.power.on_battery == null ? "unknown" : r.power.on_battery ? `on battery${r.power.battery_pct != null ? ` (${r.power.battery_pct}%)` : ""}` : "plugged in"}
+          {!r.power.ok && <span className="tone-warn"> · below {r.power.min_battery_pct}%, so Claude and Codex tasks wait</span>}</dd></>)}
+        {node.update_available && (<><dt>Update</dt><dd className="tone-info">This node runs an older runner. Re-run <span className="mono">nodes/onboard.sh</span> on it to update; it keeps its settings.</dd></>)}
         <dt>Highest mode</dt><dd><CeilingSelect node={node} modes={fleet.data?.modes ?? []} disabled={a.busy} onChange={(m) => a.ceiling(node, m)} /></dd>
       </dl>
 

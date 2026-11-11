@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { get, post, type Pipeline, type PipelineState } from "../lib/api";
-import { useFleet, useRun } from "../lib/data";
+import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
@@ -22,6 +22,7 @@ export function PipelinesPage() {
   const [params, setParams] = useSearchParams();
   const open = params.get("pipeline");
   const [creating, setCreating] = useState(false);
+  const can = useCan();
   const list = useQuery({
     queryKey: ["pipelines"],
     queryFn: () => get<Pipeline[]>("/api/pipelines"),
@@ -35,7 +36,7 @@ export function PipelinesPage() {
       <PageHead
         title="Pipelines"
         intro="One feature through the team's process: a builder writes it in its own branch, the gate must pass, different models review the diff, review issues go back to the builder, and you merge when it's ready."
-        actions={<button className="primary" onClick={() => setCreating(true)}>New pipeline</button>}
+        actions={can.operate && <button className="primary" onClick={() => setCreating(true)}>New pipeline</button>}
       />
       <LoadError error={list.error} />
       <div className="panel">
@@ -63,7 +64,8 @@ export function PipelinesPage() {
 
 function PipelineDetail({ p }: { p: Pipeline }) {
   const { run, busy, error, clearError } = useRun();
-  const active = ["building", "reviewing", "resolving"].includes(p.state);
+  const can = useCan();
+  const active = can.operate && ["building", "reviewing", "resolving"].includes(p.state);
   return (
     <Section title={p.title} aside={`${STATE[p.state].label} · round ${p.round} of ${p.max_rounds}`}>
       <div className="panel" style={{ padding: 16 }}>

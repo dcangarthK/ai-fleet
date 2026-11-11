@@ -17,6 +17,8 @@ export interface RunnerHealth {
   allow_raw_gates?: boolean;
   allowed_roots?: string[];
   max_jobs?: number;
+  power?: { on_battery: boolean | null; battery_pct: number | null; min_battery_pct: number; ok: boolean };
+  digest?: string;
   models?: { remote_management: boolean; disk_reserve_gb?: number; ram_reserve_gb?: number; max_loaded?: number };
 }
 
@@ -52,6 +54,7 @@ export interface FleetNode {
   effective_ceiling: Mode | null;
   last_seen: number | null;
   fails: number;
+  update_available?: boolean;
 }
 
 export type AssignmentState = "pending_install" | "active" | "blocked" | "failed";
@@ -63,6 +66,8 @@ export interface Assignment {
   node: string | null;
   state?: AssignmentState;
   catalog_id?: string | null;
+  routed?: boolean | null;
+  route_reason?: string | null;
 }
 
 export type InstallState =
@@ -110,6 +115,7 @@ export interface Fleet {
   assignments: Assignment[];
   max_fails: number;
   modes: Mode[];
+  roles?: RoleInfo[];
 }
 
 export interface GateResult {
@@ -290,3 +296,13 @@ export interface Pipeline {
   created_at: number;
   updated_at: number;
 }
+
+export interface Me { scope: "view" | "operate" | "admin"; label: string; local: boolean }
+
+export interface RoleInfo { name: string; fallback: string | null; description: string | null }
+
+export interface Enrollment { code: string; expires_at: number; command: string }
+
+export interface NotifyRule { id: string; event_glob: string; plugin: string; enabled: boolean }
+
+export interface CallStat { role: string; model: string; count: number; error_rate: number; p50_ms: number; p95_ms: number; fallbacks: number }

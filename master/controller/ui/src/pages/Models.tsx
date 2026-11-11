@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { post, put, type CatalogModel, type FleetNode, type ModelParams, type NodeModelState } from "../lib/api";
-import { BUSY, useFleet, useModels, useRun } from "../lib/data";
+import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
 
@@ -12,6 +12,7 @@ export function ModelsPage() {
   const fleet = useFleet();
   const { run, busy, error, clearError } = useRun();
   const [adding, setAdding] = useState(false);
+  const can = useCan();
   const [installing, setInstalling] = useState<{ model: CatalogModel; node?: string } | null>(null);
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved");
   const catalog = models.data ?? [];
@@ -35,7 +36,7 @@ export function ModelsPage() {
       <PageHead
         title="Models"
         intro="The models your fleet can run. Add one to the catalog, then install it on a node; the node downloads and tests it in the background, and roles that use it switch on when it's ready."
-        actions={<button className="primary" onClick={() => setAdding(true)}>Add model</button>}
+        actions={can.admin && <button className="primary" onClick={() => setAdding(true)}>Add model</button>}
       />
       <LoadError error={models.error ?? fleet.error} />
       <ErrorBanner error={error} onDismiss={clearError} />
@@ -64,7 +65,7 @@ export function ModelsPage() {
                 <td className="hide-sm small">{scores(m.evals)}</td>
                 {nodes.map((n) => (
                   <td key={n.id}>
-                    <InstallCell state={m.nodes[n.id]} busy={busy}
+                    <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
                       onInstall={() => setInstalling({ model: m, node: n.id })}
                       onRemove={() => remove(m, n.id, m.nodes[n.id])}
                       onRetry={() => run(() => put(`/api/nodes/${encodeURIComponent(n.id)}/models/${encodeURIComponent(m.id)}`,
@@ -80,7 +81,7 @@ export function ModelsPage() {
         )}
       </div>
 
-      {uncatalogued.length > 0 && (
+      {can.admin && uncatalogued.length > 0 && (
         <Section title="On nodes but not in the catalog" aside="Add them to manage and route them from here">
           <div className="row">
             {uncatalogued.map((ref) => (

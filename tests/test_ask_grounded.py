@@ -139,6 +139,34 @@ class Decision(unittest.TestCase):
         self.assertIn("escalation failed: claude: node busy", result["reason"])
         self.assertEqual(h.reports[0]["outcome"], "abstained")
 
+    def test_node_policy_refusal_abstains_with_the_controller_reason(self):
+        h = Harness({"fast": reply("ABSTAIN", "", [], "no")}, agents=["claude"],
+                    spawn_error={"claude": "error 409: no node can run claude in read-only mode: "
+                                           "{'m': 'node policy does not allow escalation to claude'}"})
+        result = h.run()
+        self.assertEqual((result["status"], result["answer"]), ("ABSTAIN", ""))
+        self.assertIn("does not allow escalation to claude", result["reason"])
+        self.assertNotIn("task_id", result)
+
+    def test_spawn_marks_the_task_request_as_an_escalation(self):
+        try:
+            import server  # noqa: F401  (needs the mcp package; the gate installs it)
+        except ImportError:
+            self.skipTest("mcp package not installed")
+        sent = []
+
+        class Response:
+            is_error, content = False, b"x"
+            def json(self): return {"id": "t-1"}
+        original = server.httpx.post
+        server.httpx.post = lambda url, **kw: sent.append(kw["json"]) or Response()
+        try:
+            self.assertEqual(server._spawn_escalation("fast")("claude", "t", "p"), "t-1")
+        finally:
+            server.httpx.post = original
+        self.assertIs(sent[0]["escalation"], True)
+        self.assertEqual(sent[0]["mode"], "read-only")
+
     def test_unavailable_policy_means_no_escalation_and_says_so(self):
         h = Harness({"fast": reply("ABSTAIN", "", [], "no")})
         deps = h.deps()

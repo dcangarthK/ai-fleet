@@ -166,7 +166,8 @@ def _spawn_escalation(role: str):
     def spawn(agent: str, title: str, prompt: str) -> str:
         response = httpx.post(f"{CONTROLLER}/api/tasks", headers={"X-Fleet": "1"}, timeout=30, json={
             "agent": agent, "prompt": _redact(prompt), "title": title, "mode": "read-only", "worktree": False,
-            "role": role})
+            "role": role,
+            "escalation": True})  # the controller also checks the chosen node's escalation policy
         if response.is_error:
             detail = response.json().get("detail", response.text) if response.content else ""
             raise RuntimeError(f"error {response.status_code}: {detail}")

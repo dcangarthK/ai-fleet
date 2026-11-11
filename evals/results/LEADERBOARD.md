@@ -1,25 +1,16 @@
 # Local model leaderboard
 
-Scores are % of the role's checks passed. 'Fits 16GB' = loaded size + 3GB headroom <= 16GB. Generated 2026-11-11 05:18.
+Scores are % of the role's checks passed. 'Fits 16GB' = loaded size + 3GB headroom <= 16GB. Generated 2026-11-11 13:16.
 
-| Model | Coder | Reviewer | Fast | Review JSON valid | Median s | Tok/s | Size GB | Fits 16GB |
+| Model | Grounded | Review JSON valid | Hallucination rate | Correct abstain rate | Median s | Tok/s | Size GB | Fits 16GB |
 |---|---|---|---|---|---|---|---|---|
-| qwen2.5-coder:14b | 93 | 96 | 100 | 100 | 8.72 | 16.3 | 10.9 | yes |
-| glm-4.7-flash:latest | 96 | 93 | 100 | 100 | 17.35 | 38.6 | 20.0 | no |
-| qwen3:14b | 85 | 93 | 97 | 100 | 34.73 | 12.5 | 10.8 | yes |
-| qwen3:8b | 76 | 93 | 97 | 100 | 9.95 | 37.4 | 6.6 | yes |
-| phi4:14b | 86 | 96 | 81 | 100 | 11.01 | 11.2 | 11.6 | yes |
-| qwen2.5-coder:7b | 69 | 86 | 81 | 100 | 1.87 | 48.4 | 5.3 | yes |
-| deepseek-coder-v2:16b | 85 | 61 | 78 | 100 | 1.25 | 108.0 | 11.4 | yes |
-| llama3.2:latest | 71 | 64 | 67 | 100 | 1.37 | 87.9 | 3.4 | yes |
-| qwen2.5:3b | 54 | 61 | 64 | 100 | 1.61 | 85.2 | 2.5 | yes |
-| codellama:latest | 69 | 39 | 56 | 100 | 0.86 | 54.7 | 8.6 | yes |
+| qwen2.5-coder:14b | 97 |  | 0.0% | 100.0% | 3.09 | 24.7 | 10.1 | yes |
+| glm-4.7-flash:latest | 87 | 100 | 0.0% | 93.3% | 23.09 | 26.1 | 19.6 | no |
+| phi4:14b | 87 |  | 6.7% | 93.3% | 2.33 | 21.7 | 10.2 | yes |
 
 ## Recommendation
 
-- **coder**: glm-4.7-flash:latest (96%); on a 16GB laptop: qwen2.5-coder:14b (93%)
-- **reviewer**: phi4:14b (96%)
-- **fast**: glm-4.7-flash:latest (100%); on a 16GB laptop: qwen2.5-coder:14b (100%)
+- **grounded**: qwen2.5-coder:14b (97%)
 
 Treat role scores below ~70% as 'second opinion only'; tests and Claude make the final call.
 
@@ -29,7 +20,15 @@ Signals are kept only when a training-selected threshold halves held-out error a
 
 | Model | Signal | Decision |
 |---|---|---|
-| — | logprob_min | dropped |
-| — | logprob_mean | dropped |
-| — | confidence | dropped |
-| — | agreement | dropped |
+| glm-4.7-flash:latest | logprob_min | dropped |
+| glm-4.7-flash:latest | logprob_mean | dropped |
+| glm-4.7-flash:latest | confidence | dropped |
+| glm-4.7-flash:latest | agreement | dropped |
+| phi4:14b | logprob_min | dropped |
+| phi4:14b | logprob_mean | dropped |
+| phi4:14b | confidence | dropped |
+| phi4:14b | agreement | dropped |
+| qwen2.5-coder:14b | logprob_min | dropped |
+| qwen2.5-coder:14b | logprob_mean | dropped |
+| qwen2.5-coder:14b | confidence | dropped |
+| qwen2.5-coder:14b | agreement | dropped |

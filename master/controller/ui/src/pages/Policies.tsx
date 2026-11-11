@@ -168,11 +168,11 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
             </label>
           </div>
           <div className="grid-form">
-            <label className="field">Claude tools allowed (empty means no limit at this layer)
+            <label className="field">Claude tools pre-approved (empty means no list at this layer; use "denied" to block)
               <textarea className="mono" style={{ minHeight: 60 }} value={joinLines(body.tools?.claude_allow)} placeholder={"Read\nEdit\nBash(npm test:*)"}
                         onChange={(e) => set((b) => ({ ...b, tools: { ...b.tools, claude_allow: lines(e.target.value) } }))} />
             </label>
-            <label className="field">Claude tools denied
+            <label className="field">Claude tools blocked
               <textarea className="mono" style={{ minHeight: 60 }} value={joinLines(body.tools?.claude_deny)} placeholder="WebFetch"
                         onChange={(e) => set((b) => ({ ...b, tools: { ...b.tools, claude_deny: lines(e.target.value) } }))} />
             </label>
@@ -300,7 +300,7 @@ function Simulator({ roles }: { roles: string[] }) {
               <dt>Off limits</dt><dd>{p?.filesystem?.denied?.join(", ") || "node's built-in list only"}{src("filesystem.denied")}</dd>
               <dt>Internet</dt><dd>{p?.network?.agents === "allow" ? "allowed if the node allows it" : p?.network?.agents === "deny" ? "blocked" : "no policy: Codex has no network by default; Claude's web tools aren't blocked"}{src("network.agents")}</dd>
               <dt>Highest mode</dt><dd>{p?.mode_ceiling ?? "node ceiling"}{src("mode_ceiling")}</dd>
-              <dt>Claude tools</dt><dd>{p?.tools?.claude_allow ? `only ${p.tools.claude_allow.join(", ")}` : "no allow-list"}{p?.tools?.claude_deny?.length ? `; never ${p.tools.claude_deny.join(", ")}` : ""}{src("tools.claude_deny")}</dd>
+              <dt>Claude tools</dt><dd>{p?.tools?.claude_allow ? `pre-approved: ${p.tools.claude_allow.join(", ")}` : "no pre-approved list"}{p?.tools?.claude_deny?.length ? `; blocked: ${p.tools.claude_deny.join(", ")}` : ""}{src("tools.claude_deny")}</dd>
               <dt>Task time</dt><dd>{p?.limits?.task_minutes ? `${p.limits.task_minutes} min` : "node limit"}{src("limits.task_minutes")}</dd>
               <dt>At once</dt><dd>{p?.limits?.max_concurrent ?? "node limit"}{src("limits.max_concurrent")}</dd>
               <dt>Daily budget</dt><dd>{p?.limits?.agent_minutes_per_day ? `${p.limits.agent_minutes_per_day} min` : "none"}{src("limits.agent_minutes_per_day")}</dd>

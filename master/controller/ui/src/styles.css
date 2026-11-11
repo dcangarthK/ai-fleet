@@ -344,3 +344,31 @@ label.check { gap: 6px; }
   .show-sm { display: block; }
   .kv { grid-template-columns: 90px minmax(0, 1fr); }
 }
+
+/* Live (docs/SPEC-live-monitor.md 5) */
+.live-presence { margin: 0 0 6px; }
+.live-alerts { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.live-rows { display: grid; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
+.live-rows:empty { display: none; }
+.live-row { display: grid; grid-template-columns: minmax(180px, 2fr) repeat(auto-fit, minmax(110px, 1fr)); gap: 4px 12px;
+  align-items: baseline; padding: 9px 12px; border-bottom: 1px solid var(--line); color: inherit; text-decoration: none; min-width: 0; }
+.live-row:last-child { border-bottom: 0; }
+a.live-row:hover { background: var(--surface-2); }
+.live-row > * { min-width: 0; overflow-wrap: anywhere; }
+.live-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-idle { color: var(--ink-2); }
+.live-self { border-left: 3px dashed var(--info); }
+.live-meter { display: grid; gap: 3px; }
+.live-cards { background: transparent; border: 0; gap: 8px; }
+.live-cards .live-row { grid-template-columns: 1fr; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
+.live-cards .live-title, .live-cards .live-branch { white-space: normal; }
+.stages { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; }
+.stage { font-size: 12px; font-family: var(--mono); padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line-strong); color: var(--ink-2); }
+.stage-done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.stage-current { color: var(--action-ink); background: var(--action); border-color: var(--action); font-weight: 600; }
+.stage-failed { color: var(--bad); border-color: var(--bad); }
+.stage-failed a { color: inherit; }
+.stage-superseded { color: var(--ink-3); text-decoration: line-through; }
+.stage-next { color: var(--ink-3); border-style: dashed; }
+@media (max-width: 860px) { .live-row { grid-template-columns: 1fr; } }

@@ -741,6 +741,85 @@ class LivenessTests(unittest.TestCase):
         self.assertIsNone(off(self.node(heartbeat_at=now - 26, polled_at=now - 66), now, grace=True))
 
 
+class AlertTests(LiveBase):
+    """The alerts strip lists only what still needs attention now."""
+
+    def task(self, state, **cols):
+        tid = "t" + secrets.token_hex(4)
+        row = {"id": tid, "title": "Fable final review", "agent": "claude", "state": state,
+               "created_at": time.time(), "updated_at": time.time()} | cols
+        with db() as c:
+            c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+        return tid
+
+    def event(self, task_id, kind, **data):
+        with db() as c:
+            c.execute("INSERT INTO events (ts, task_id, type, data) VALUES (?,?,?,?)",
+                      (time.time(), task_id, kind, json.dumps(data | {"title": "Fable final review"})))
+
+    def kinds(self, task_id=None):
+        return [a["id"] for a in self.live()["alerts"] if a["task_id"] == task_id and task_id]
+
+    def test_a_resolved_failed_task_is_gone(self):
+        tid = self.task("failed", resolution=json.dumps({"kind": "done_elsewhere"}))
+        self.event(tid, "task.failed")
+        self.assertEqual(self.kinds(tid), [])
+
+    def test_a_task_with_an_outcome_is_gone(self):
+        tid = self.task("failed", outcome="dismissed")
+        self.event(tid, "task.failed")
+        self.assertEqual(self.kinds(tid), [])
+
+    def test_a_done_tasks_blocked_event_is_gone(self):
+        tid = self.task("done")
+        self.event(tid, "task.blocked")
+        self.assertEqual(self.kinds(tid), [])
+
+    def test_an_unresolved_failure_stays(self):
+        tid = self.task("failed")
+        self.event(tid, "task.failed")
+        self.assertEqual(len(self.kinds(tid)), 1)
+
+    def test_a_later_success_in_the_work_item_clears_it(self):
+        tid = self.task("failed")
+        self.event(tid, "task.failed")
+        self.task("done", parent_id=tid, created_at=time.time() + 1)
+        self.assertEqual(self.kinds(tid), [])
+
+    def test_a_cleared_limit_is_gone_and_a_live_one_stays(self):
+        account = "claude:test-acct"
+        tid = self.task("done")
+        self.event(tid, "budget.limit", agent="claude", account=account)
+        self.assertNotIn("budget.limit", [a["type"] for a in self.live()["alerts"]])
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (task_id, ts, agent, model, identity, outcome, resets_at, account) "
+                      "VALUES (?,?,?,?,?,?,?,?)", (tid, time.time(), "claude", None, "claude", "limit",
+                                                   time.time() + 3600, account))
+        self.assertIn("budget.limit", [a["type"] for a in self.live()["alerts"]])
+        with db() as c:
+            c.execute("INSERT INTO limit_resets (account, at, actor) VALUES (?,?,?)", (account, time.time() + 1, "t"))
+        self.assertNotIn("budget.limit", [a["type"] for a in self.live()["alerts"]])
+
+    def test_duplicates_for_one_task_collapse_to_the_latest(self):
+        tid = self.task("blocked")
+        self.event(tid, "task.failed")
+        self.event(tid, "task.blocked")
+        self.event(tid, "task.blocked")
+        alerts = [a for a in self.live()["alerts"] if a["task_id"] == tid]
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["type"], "task.blocked")
+
+    def test_the_cap_applies_after_filtering(self):
+        for _ in range(12):
+            self.event(self.task("done"), "task.failed")
+        keep = [self.task("failed") for _ in range(3)]
+        for tid in keep:
+            self.event(tid, "task.failed")
+        for _ in range(12):
+            self.event(self.task("done"), "task.failed")
+        self.assertTrue(set(keep) <= {a["task_id"] for a in self.live()["alerts"]})
+
+
 class SweepTests(LiveBase):
     def node_ages(self, heartbeat_age, poll_age):
         now = time.time()

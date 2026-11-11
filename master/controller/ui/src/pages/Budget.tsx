@@ -11,6 +11,7 @@ import {
   type BudgetStatus, type BudgetUsage, type Decision, type LocalReviewer, type RulesForm, type RulesVersion,
   type Savings,
 } from "../lib/budget";
+import { canMarkSignedIn, slotName, slotPill, type ResourceSlot } from "../lib/handoff";
 
 const FLEET_ONLY = "Fleet tasks only: your own interactive use draws on the same limits, so real headroom is lower.";
 // Categorical slots 1-3 of the validated reference palette (dataviz skill); everything else folds into Other.
@@ -35,6 +36,7 @@ export function BudgetPage() {
       <PageHead title="Budget" intro={<>Paid-model spend, the rules the controller enforces, and what local models saved. {FLEET_ONLY}</>} />
       <LoadError error={status.error} />
       <StatusStrip status={status.data} loading={status.isLoading} />
+      <ResourcesSection />
       <UsageSection />
       <SavingsSection />
       <RulesSection />
@@ -395,6 +397,54 @@ function RulesSection() {
           )}
         </div>
       )}
+    </Section>
+  );
+}
+
+/** Resources board (docs/SPEC-limit-handoff.md 5): one row per slot. Labels only; directories are never sent. */
+function ResourcesSection() {
+  const slots = useQuery({ queryKey: ["budget", "resources"], queryFn: () => get<ResourceSlot[]>("/api/resources"),
+    refetchInterval: 30_000 });
+  const rows = slots.data ?? [];
+  const admin = useCan().admin;
+  const { run, busy, error, clearError } = useRun();
+  return (
+    <Section title="Resources" aside="paid accounts per node: limits and concurrency are per account label">
+      <LoadError error={slots.error} />
+      <ErrorBanner error={error} onDismiss={clearError} />
+      <div className="panel">
+        <table>
+          <thead><tr><th>Node</th><th>Agent</th><th>Account</th><th>Model</th><th>State</th><th>Kinds</th><th className="num">Tokens today</th></tr></thead>
+          <tbody>
+            {rows.map((s) => {
+              const pill = slotPill(s);
+              return (
+                <tr key={`${s.node}/${s.agent}/${s.profile}/${s.model}`}>
+                  <td>{s.node_name ?? s.node}</td>
+                  <td>{s.agent}</td>
+                  <td>{s.label ?? <span className="quiet">{s.profile}</span>}</td>
+                  <td className="mono">{slotName(s)}</td>
+                  <td>
+                    <span className={`state tone-${pill.tone}`}>{pill.label}</span>
+                    {admin && canMarkSignedIn(s) && (
+                      <button className="small" disabled={busy}
+                              onClick={() => confirm(`Has ${s.label ?? s.profile} on ${s.node_name ?? s.node} been signed in again?`)
+                                && run(() => post("/api/resources/signed-in", { node: s.node, agent: s.agent, profile: s.profile }))}>
+                        Signed in again
+                      </button>
+                    )}
+                  </td>
+                  <td className="small">{s.kinds.join(", ")}</td>
+                  <td className="num">{formatTokens(s.today_tokens)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!slots.isLoading && rows.length === 0 && (
+          <p className="empty">No paid agents on any node yet. Each runner lists its signed-in profiles in runner.json.</p>
+        )}
+      </div>
     </Section>
   );
 }

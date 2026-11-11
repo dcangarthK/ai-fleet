@@ -11,6 +11,7 @@ via ps, and Claude's variadic --allowedTools would otherwise swallow a trailing 
 """
 
 import datetime
+import fnmatch
 import glob
 import hashlib
 import hmac
@@ -49,7 +50,14 @@ JOB_REQUEST_KEYS = {
     "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
     "allowed_tools", "resume_session", "instructions", "policy", "policy_hash",
     "effort", "tools", "max_turns",
+    # account pools and limit handoff (docs/SPEC-limit-handoff.md 3.1, 4.3)
+    "profile", "base_branch", "source_job",
 }
+PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+PROFILE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+HANDOFF_BRANCH = re.compile(r"^fleet/t-[0-9a-f]{8}$")
+# Never committed by a checkpoint (matched against each path's file name).
+CHECKPOINT_SECRET_GLOBS = (".env*", "*.pem", "*.key", "id_*", "*credentials*")
 EFFORTS = ("low", "medium", "high")
 BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
@@ -288,6 +296,7 @@ class JobManager:
                                and math.isfinite(ram) and ram >= 0 else 4),
             "max_loaded": loaded if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0 else 1,
         }
+        self.profile_config = self._profiles_from(config.get("profiles"))
         self.request_context = threading.local()
         self.agents = find_agents(self.ollama_url)
         self.model_manager = ModelManager(self.root, self.ollama_url, self.models_config)
@@ -516,8 +525,71 @@ class JobManager:
         home = self.codex_profile_dir()
         return home.is_dir() and (home / "auth.json").exists()
 
-    def agent_env(self, agent, base):
+    @classmethod
+    def _profiles_from(cls, value):
+        """The `profiles` block of runner.json: {agent: [{id, dir, label}]}, or None when there is none.
+        Entries with a bad id or label, or a directory outside the user's home, are left out."""
+        if not isinstance(value, dict):
+            return None
+        home = str(Path.home())
+        out = {}
+        for agent in ("claude", "codex"):
+            entries = value.get(agent)
+            if not isinstance(entries, list):
+                continue
+            kept = []
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                    continue
+                if not PROFILE_ID.fullmatch(entry["id"]) or any(e["id"] == entry["id"] for e in kept):
+                    continue
+                label = entry.get("label")
+                if label is not None and (not isinstance(label, str) or not PROFILE_LABEL.fullmatch(label)):
+                    continue
+                folder = entry.get("dir")
+                if folder is not None:
+                    if not isinstance(folder, str) or not (folder.startswith("~/") or os.path.isabs(folder)):
+                        continue
+                    folder = os.path.expanduser(folder)
+                    if not cls._within(folder, home) or cls._comparable(folder) == cls._comparable(home):
+                        continue
+                elif entry["id"] != "fleet":
+                    continue  # only the inherited profile may name no directory
+                kept.append({"id": entry["id"], "dir": folder, "label": label})
+            out[agent] = kept
+        return out
+
+    def profile_entries(self, agent):
+        """This agent's profiles. With no `profiles` block: one, `fleet` (the inherited environment)."""
+        if self.profile_config is None or agent not in self.profile_config:
+            return [{"id": "fleet", "dir": None, "label": None}]
+        return self.profile_config[agent]
+
+    def profile_entry(self, agent, profile_id):
+        for entry in self.profile_entries(agent):
+            if entry["id"] == profile_id:
+                return entry
+        return None
+
+    @staticmethod
+    def profile_ready(entry):
+        # Ready only means the directory exists; nothing in it is read. "fleet" is the inherited environment,
+        # which doesn't use the listed directory, so it is always ready.
+        return entry["id"] == "fleet" or entry["dir"] is None or os.path.isdir(entry["dir"])
+
+    def profile_report(self):
+        """For /health: per agent [{id, label, ready}]. No directories, no account identity."""
+        return {agent: [{"id": e["id"], "label": e["label"], "ready": self.profile_ready(e)}
+                        for e in self.profile_entries(agent)] for agent in ("claude", "codex")}
+
+    def agent_env(self, agent, base, profile=None):
         env = dict(base)
+        entry = self.profile_entry(agent, profile) if profile and profile != "fleet" else None
+        if entry and entry["dir"]:
+            # A named profile: its directory from this runner's own config (the request only carries the id).
+            env["CLAUDE_CONFIG_DIR" if agent == "claude" else "CODEX_HOME"] = entry["dir"]
+            return env
+        # "fleet" (or no profile): the inherited environment, exactly as before.
         if agent == "codex" and self.codex_profile_ready():
             env["CODEX_HOME"] = str(self.codex_profile_dir())
         return env
@@ -791,11 +863,39 @@ class JobManager:
         self._save(job)
         threading.Thread(target=self._gate_worker, args=(job,), name="gate-" + job["id"], daemon=True).start()
 
-    def _make_worktree(self, job_id, repo, policy=None):
+    def _handoff_source(self, body, repo):
+        """(base_branch, source job) for a handoff job, or (None, None). The new worktree starts from the source's
+        checkpoint branch; refused unless that branch is a fleet task branch of a job this runner ran in the
+        same repo, and it exists."""
+        base_branch, source_id = body.get("base_branch"), body.get("source_job")
+        if base_branch is None and source_id is None:
+            return None, None
+        if not isinstance(base_branch, str) or not HANDOFF_BRANCH.fullmatch(base_branch):
+            self.audit("handoff_denied", "base_branch is not a fleet task branch")
+            raise HttpError(400, "base_branch must be a fleet task branch (fleet/t-xxxxxxxx)")
+        if not isinstance(source_id, str) or not JOB_ID.fullmatch(source_id):
+            raise HttpError(400, "base_branch needs source_job")
+        source = self.jobs.get(source_id)
+        if source is None:
+            raise HttpError(400, "source job not found")
+        if not repo or not body.get("worktree"):
+            raise HttpError(400, "a handoff job needs a repo and its own worktree")
+        if not source.get("repo") or self._comparable(source["repo"]) != self._comparable(repo):
+            self.audit("handoff_denied", "source job is in another repo")
+            raise HttpError(400, "source job is in another repo")
+        if source.get("branch") != base_branch:
+            raise HttpError(400, "base_branch is not the source job's branch")
+        found = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + base_branch],
+                               capture_output=True, text=True, timeout=15)
+        if found.returncode:
+            raise HttpError(400, "base_branch does not exist")
+        return base_branch, source
+
+    def _make_worktree(self, job_id, repo, policy=None, start=None):
         repo = self.check_path(repo, policy)
         self._check_git_common_dir(repo, policy)
         base = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True,
+            ["git", "-C", repo, "rev-parse", start or "HEAD"], capture_output=True,
             text=True, timeout=15,
         )
         if base.returncode:
@@ -803,7 +903,7 @@ class JobManager:
         target = self.worktrees_dir / job_id
         branch = "fleet/" + job_id
         made = subprocess.run(
-            ["git", "-C", repo, "worktree", "add", "-b", branch, str(target)],
+            ["git", "-C", repo, "worktree", "add", "-b", branch, str(target)] + ([start] if start else []),
             capture_output=True, text=True, timeout=60,
         )
         if made.returncode:
@@ -855,12 +955,23 @@ class JobManager:
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
             self.audit("gate_denied", "gate requested below auto-edit mode")
             raise HttpError(400, "a gate needs auto-edit or full mode")
+        profile = body.get("profile")
+        profile_entry = None
+        if profile is not None:
+            # Only an id from this runner's own config; never a path from the request.
+            profile_entry = (self.profile_entry(agent, profile)
+                             if isinstance(profile, str) and PROFILE_ID.fullmatch(profile) and agent != "ollama"
+                             else None)
+            if profile_entry is None:
+                self.audit("profile_denied", "unknown profile id")
+                raise HttpError(400, "unknown profile for %s on this runner" % agent)
         if not self.agents.get(agent):
             raise HttpError(400, "%s agent is unavailable" % agent)
         gate = self._gate(body.get("gate"), body.get("gate_args"))
         repo = self.check_path(body["repo"], policy) if body.get("repo") else None
         if repo:
             self._check_git_common_dir(repo, policy)
+        base_branch, source = self._handoff_source(body, repo)
         requested_cwd = None
         if body.get("cwd"):
             # A read-only review may run inside a build job's worktree (it lives under this runner's own
@@ -884,10 +995,13 @@ class JobManager:
             base = None
             if use_worktree:
                 try:
-                    repo, cwd, branch, base = self._make_worktree(job_id, repo, policy)
+                    repo, cwd, branch, base = self._make_worktree(job_id, repo, policy, base_branch)
                 except Exception:
                     shutil.rmtree(job_dir, ignore_errors=True)
                     raise
+                if source is not None:
+                    # Diff from where the source started, so its checkpointed work shows as part of this job's.
+                    base = source.get("base") or base
             else:
                 cwd = requested_cwd or repo
                 if cwd:
@@ -912,7 +1026,11 @@ class JobManager:
                 "exit_file": "exit_code.1",
                 "instructions": instructions, "policy": policy, "policy_hash": policy_hash,
                 "effort": body.get("effort"), "tools": tools, "max_turns": max_turns,
-                "profile": self.profile_of(agent), "account_label": None,
+                "profile": profile_entry["id"] if profile_entry else self.profile_of(agent),
+                "account_label": profile_entry["label"] if profile_entry else None,
+                # the requested profile id: what every run of this job (resumes too) uses for its environment
+                "profile_id": profile_entry["id"] if profile_entry else None,
+                "base_branch": base_branch, "source_job": source["id"] if source else None,
                 "timeout_minutes": min(self.max_job_minutes,
                                        policy.get("limits", {}).get("task_minutes", self.max_job_minutes)),
             }
@@ -1025,7 +1143,7 @@ class JobManager:
             job["events_offset"] = 0
         job.update({"usage": None, "num_turns": None, "error": None, "limits_applied": self.limits_applied(job)})
         raw = open(events_path, "ab", buffering=0)
-        env = self.agent_env(job["agent"], os.environ.copy())
+        env = self.agent_env(job["agent"], os.environ.copy(), job.get("profile_id"))
         env["PATH"] = agent_search_path()
         try:
             if os.name == "nt":
@@ -1063,6 +1181,11 @@ class JobManager:
         text = body.get("text")
         if not isinstance(text, str) or not text:
             raise HttpError(400, "text is required")
+        if "profile" in body:
+            raise HttpError(400, "a resumed job keeps the profile it started with")
+        if job.get("profile_id") and self.profile_entry(job["agent"], job["profile_id"]) is None:
+            # Its session lives in that profile; under another one it would not be found.
+            raise HttpError(409, "this job's profile is no longer configured on this runner")
         with self.lock:
             self.refresh(job)
             if job["state"] == "running":
@@ -1149,6 +1272,68 @@ class JobManager:
                 if removed.returncode:
                     raise HttpError(500, trim(removed.stderr or "could not remove worktree"))
             return self.public(job)
+
+    @staticmethod
+    def _secret_path(relative, denied):
+        name = relative.rsplit("/", 1)[-1]
+        return (any(fnmatch.fnmatch(name, pattern) for pattern in CHECKPOINT_SECRET_GLOBS)
+                or any(fnmatch.fnmatch(relative, pattern) for pattern in denied))
+
+    def checkpoint(self, job, body=None):
+        """Commit a stopped job's uncommitted work on its own branch, for a handoff (docs/SPEC-limit-handoff.md
+        4.3 step 2). Secret-looking and policy-denied paths stay out and are reported. No hooks, no signing."""
+        body = body or {}
+        label = body.get("label") if isinstance(body.get("label"), str) else ""
+        label = re.sub(r"[^A-Za-z0-9._:/ -]", "", label)[:80] or job.get("agent") or "agent"
+        with self.lock:
+            self.refresh(job)
+            if job["state"] == "running":
+                raise HttpError(409, "job is running")
+            cwd = job.get("cwd")
+            if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
+                raise HttpError(409, "job has no worktree")
+            branch = "fleet/" + job["id"]
+
+            def git(*args, check=True):
+                out = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, errors="replace",
+                                     timeout=120)
+                if check and out.returncode:
+                    raise HttpError(500, trim(out.stderr or "git %s failed" % args[0], 500))
+                return out
+
+            head = git("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+            if head != "refs/heads/" + branch or job.get("branch") != branch:
+                raise HttpError(409, "worktree is not on its own branch %s" % branch)
+            git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
+            for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
+                if (git_dir / name).exists():
+                    raise HttpError(409, "worktree is mid-merge, mid-rebase or locked")
+            denied = []
+            for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
+                full = os.path.realpath(os.path.expanduser(path))
+                if self._within(full, cwd):
+                    denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
+            git("add", "-A")
+            staged = [p for p in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if p]
+            excluded = sorted(p for p in staged if self._secret_path(p, denied))
+            if excluded:
+                git("reset", "-q", "--", *excluded)
+            if not git("diff", "--cached", "--name-only").stdout.strip():
+                tip = git("rev-parse", "HEAD").stdout.strip()
+                return {"sha": tip, "committed": False, "excluded": excluded, "branch": branch, "stat": ""}
+            committed = subprocess.run(
+                ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                 "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
+                 "commit", "-q", "--no-verify", "--no-gpg-sign", "-m",
+                 "checkpoint: stopped at usage limit (%s)" % label],
+                capture_output=True, text=True, errors="replace", timeout=120)
+            if committed.returncode:
+                git("reset", "-q", check=False)
+                raise HttpError(500, trim(committed.stderr or "checkpoint commit failed", 500))
+            sha = git("rev-parse", "HEAD").stdout.strip()
+            stat = git("show", "--stat", "--format=", sha).stdout
+            self.audit("checkpoint", "job %s checkpointed (%d paths left out)" % (job["id"], len(excluded)))
+            return {"sha": sha, "committed": True, "excluded": excluded, "branch": branch, "stat": trim(stat, 4000)}
 
     def log(self, job, offset):
         self.refresh(job)
@@ -1743,6 +1928,7 @@ class Handler(BaseHTTPRequestHandler):
                     "models": self.manager.models_config,
                     "policy": True, "network": self.manager.network,
                     "budget": self.manager.budget_support(), **self.manager.profiles(),
+                    "profiles": self.manager.profile_report(), "checkpoint": True,
                     "default_models": self.manager.default_models()}
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
@@ -1781,6 +1967,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.manager.cancel(job)
             if method == "POST" and len(parts) == 3 and parts[2] == "cleanup":
                 return self.manager.cleanup(job)
+            if method == "POST" and len(parts) == 3 and parts[2] == "checkpoint":
+                return self.manager.checkpoint(job, self._body())
         raise HttpError(404, "not found")
 
     def _handle(self, method):

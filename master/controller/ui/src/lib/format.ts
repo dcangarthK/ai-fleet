@@ -81,13 +81,16 @@ export function denialTools(t: Task): string[] {
 
 /** Which task actions make sense in a state; mirrors the controller's own rules. */
 export function taskActions(t: Task) {
+  // A handed-off task's work moved to another attempt: it can't be resumed or approved here (the controller refuses).
+  const moved = t.resolution?.kind === "handed_off" || t.resolution?.kind === "handing_off";
   return {
-    approve: t.state === "awaiting_approval" || t.state === "blocked",
+    approve: (t.state === "awaiting_approval" || t.state === "blocked") && !moved,
     reject: t.state === "awaiting_approval" || t.state === "blocked",
     cancel: t.state === "working" || t.state === "starting" || t.state === "queued",
     complete: ["review", "failed", "interrupted", "blocked"].includes(t.state),
     cleanup: ["done", "cancelled", "review", "failed", "interrupted"].includes(t.state) && !!t.branch,
-    message: ["review", "failed", "blocked", "interrupted"].includes(t.state),
+    message: ["review", "failed", "blocked", "interrupted"].includes(t.state) && !moved,
+    handoff: ["failed", "interrupted"].includes(t.state) && !t.resolution && (t.agent === "claude" || t.agent === "codex"),
     resolve: ["failed", "interrupted", "blocked", "cancelled", "review"].includes(t.state) && !t.resolution,
     diff: !!t.branch,
   };

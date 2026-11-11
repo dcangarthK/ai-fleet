@@ -146,6 +146,10 @@ export interface Task {
   runs: number;
   error: string | null;
   agent_seconds: number;
+  role?: string | null;
+  instructions?: string | null;
+  policy?: PolicyBody | null;
+  policy_hash?: string | null;
 }
 
 export interface UsageRow {
@@ -197,3 +201,31 @@ export const get = <T>(path: string) => api<T>(path);
 export const post = <T>(path: string, body?: unknown) => api<T>(path, "POST", body);
 export const del = <T>(path: string, body?: unknown) => api<T>(path, "DELETE", body);
 export const put = <T>(path: string, body?: unknown) => api<T>(path, "PUT", body);
+
+export type Scope = "fleet" | "node" | "role" | "agent";
+
+export interface PolicyBody {
+  filesystem?: { allowed_roots?: string[]; denied?: string[] };
+  tools?: { claude_allow?: string[]; claude_deny?: string[] };
+  network?: { agents?: "allow" | "deny" };
+  mode_ceiling?: Mode;
+  limits?: { task_minutes?: number; max_concurrent?: number; agent_minutes_per_day?: number; quiet_hours?: string[] };
+}
+
+export interface Versioned {
+  scope: Scope;
+  scope_id: string;
+  version: number;
+  author: string;
+  created_at: number;
+}
+
+export interface InstructionSet extends Versioned { text: string }
+export interface PolicyDoc extends Versioned { body: PolicyBody }
+
+export interface Effective {
+  instructions: string;
+  policy: PolicyBody;
+  sources: Record<string, string | string[]>;
+  hash: string;
+}

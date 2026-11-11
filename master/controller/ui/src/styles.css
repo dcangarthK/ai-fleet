@@ -223,6 +223,17 @@ pre.diff .hunk { color: var(--info); }
 .banner.error { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 7%, var(--surface)); }
 .banner.note { color: var(--ink-2); border-color: var(--line); background: var(--surface); }
 
+/* Policies: layer list beside the editor */
+.split { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.layers { padding: 6px; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+.layer { display: flex; justify-content: space-between; align-items: center; width: 100%; text-align: left;
+         border: 0; background: transparent; padding: 6px 8px; border-radius: var(--radius-s); }
+.layer:hover { background: var(--surface-2); }
+.layer.on { background: var(--action-soft); font-weight: 500; }
+.dot-set { width: 6px; height: 6px; border-radius: 50%; background: var(--action); }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+@media (max-width: 860px) { .split { grid-template-columns: 1fr; } .layers { position: static; max-height: none; } }
+
 /* Install progress */
 .bar { display: block; width: 100%; max-width: 160px; height: 4px; margin-top: 5px; border-radius: 2px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
 .bar > span { display: block; height: 100%; background: var(--action); transition: width 400ms ease-out; }

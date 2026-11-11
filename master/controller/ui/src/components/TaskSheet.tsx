@@ -115,6 +115,13 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
 
       <h3>Prompt</h3>
       <pre className="out">{task.prompt}</pre>
+      {(task.instructions || (task.policy && Object.keys(task.policy).length > 0)) && (
+        <details>
+          <summary className="small">Instructions and policy this task runs with{task.policy_hash && <span className="mono quiet"> · {task.policy_hash.slice(0, 12)}</span>}</summary>
+          {task.instructions && <pre className="out">{task.instructions}</pre>}
+          {task.policy && <pre className="out">{JSON.stringify(task.policy, null, 2)}</pre>}
+        </details>
+      )}
       {task.result && (<><h3>Result</h3><pre className="out">{task.result}</pre></>)}
       {gate?.output_tail && (<><h3>Gate output</h3><pre className="out">{gate.output_tail}</pre></>)}
       {diff && (<><h3>Changes</h3><pre className="out">{diff.stat}</pre><Diff text={diff.diff} /></>)}

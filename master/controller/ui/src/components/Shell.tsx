@@ -10,7 +10,7 @@ const NAV: { to: string; label: string; later?: string }[] = [
   { to: "/models", label: "Models" },
   { to: "/roles", label: "Roles" },
   { to: "/nodes", label: "Nodes" },
-  { to: "/policies", label: "Policies", later: "soon" },
+  { to: "/policies", label: "Policies" },
   { to: "/skills", label: "Skills", later: "soon" },
   { to: "/evals", label: "Evals", later: "soon" },
   { to: "/activity", label: "Activity" },

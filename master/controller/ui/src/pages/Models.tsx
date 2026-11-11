@@ -144,21 +144,21 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
       </div>
     );
   }
-  if (state.installed || s === "ready") {
-    return (
-      <div className="small">
-        <span className="state tone-ok">Installed</span>
-        {state.ownership === "pre-existing" && <div className="sub">was already on the node</div>}
-        <div><button className="ghost small" disabled={busy} onClick={onRemove}>Remove</button></div>
-      </div>
-    );
-  }
   if (s === "blocked" || s === "failed") {
     return (
       <div className="small">
         <span className={`state tone-${INSTALL_LABEL[s].tone}`}>{INSTALL_LABEL[s].label}</span>
         <div className="sub" style={{ maxWidth: 260 }}>{explainReason(state.reason)}</div>
         <button className="ghost small" disabled={busy} onClick={onRetry}>Retry</button>
+      </div>
+    );
+  }
+  if (state.installed || s === "ready") {
+    return (
+      <div className="small">
+        <span className="state tone-ok">Installed</span>
+        {state.ownership === "pre-existing" && <div className="sub">was already on the node</div>}
+        <div><button className="ghost small" disabled={busy} onClick={onRemove}>Remove</button></div>
       </div>
     );
   }
@@ -258,6 +258,7 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
   const [params, setParams] = useState<ModelParams>(model.defaults ?? {});
   const [override, setOverride] = useState(false);
   const fit = node ? model.nodes[node]?.fit ?? "unknown" : "unknown";
+  const chosen = nodes.find((n) => n.id === node);
   const canManage = (n: FleetNode) => n.runner?.models?.remote_management !== false;
 
   async function submit(e: FormEvent) {
@@ -285,6 +286,9 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
             ))}
           </select>
         </label>
+        {chosen && chosen.runner?.models?.remote_management === false && (
+          <div className="banner note small">{chosen.name} doesn't allow remote model installs. Its owner can turn this on in the node's runner.json.</div>
+        )}
         {model.download_gb && <p className="small quiet" style={{ margin: 0 }}>Downloads {model.download_gb.toFixed(1)} GB. The node keeps its own disk reserve and refuses if there isn't room.</p>}
         <ParamFields value={params} onChange={setParams} />
         {(fit === "wont_fit" || fit === "tight") && (
@@ -296,7 +300,7 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
           </label>
         )}
         <div className="row">
-          <button className="primary" disabled={busy || !node || (fit === "wont_fit" && !override)}>Install</button>
+          <button className="primary" disabled={busy || !node || (fit === "wont_fit" && !override) || !canManage(nodes.find((n) => n.id === node)!)}>Install</button>
           <span className="small quiet">You can keep working; progress shows at the top of every page.</span>
         </div>
         <p className="small quiet" style={{ margin: 0 }}>To use it for a role, assign it on <Link to="/roles">Roles</Link> once it's installed, or assign it now and the role switches on when it's ready.</p>

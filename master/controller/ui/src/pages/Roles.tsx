@@ -57,7 +57,7 @@ export function RolesPage() {
         title="Roles"
         intro={<>A role is a name agents call (for example <span className="mono">coder</span>). Each role routes to one or more models on the fleet; with several, requests are balanced between them.</>}
       />
-      <LoadError error={fleet.error} />
+      <LoadError error={fleet.error ?? models.error} />
       <ErrorBanner error={error} onDismiss={clearError} />
 
       <div className="panel">

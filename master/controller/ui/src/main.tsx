@@ -16,6 +16,9 @@ import { RolesPage } from "./pages/Roles";
 import { ModelsPage } from "./pages/Models";
 import { ActivityPage, LaterPage, SettingsPage } from "./pages/Misc";
 import { PoliciesPage } from "./pages/Policies";
+import { SkillsPage } from "./pages/Skills";
+import { EvalsPage } from "./pages/Evals";
+import { PipelinesPage } from "./pages/Pipelines";
 
 try {
   const t = localStorage.getItem("fleet-theme");
@@ -37,8 +40,9 @@ const router = createBrowserRouter(
         { path: "nodes", element: <NodesPage /> },
         { path: "nodes/:id", element: <NodeDetailPage /> },
         { path: "policies", element: <PoliciesPage /> },
-        { path: "skills", element: <LaterPage title="Skills" what="Reusable, versioned instructions you bind to the fleet, a node, a role or a task." /> },
-        { path: "evals", element: <LaterPage title="Evals" what="Score models per role on your own hardware, and get suggested role assignments." /> },
+        { path: "skills", element: <SkillsPage /> },
+        { path: "evals", element: <EvalsPage /> },
+        { path: "pipelines", element: <PipelinesPage /> },
         { path: "activity", element: <ActivityPage /> },
         { path: "settings", element: <SettingsPage /> },
         { path: "*", element: <LaterPage title="Page not found" what="That address isn't part of the console." /> },

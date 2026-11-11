@@ -229,3 +229,64 @@ export interface Effective {
   sources: Record<string, string | string[]>;
   hash: string;
 }
+
+export interface Skill {
+  id: string;
+  version: number;
+  description: string;
+  agents: ("claude" | "codex" | "ollama")[];
+  risk: "prompt-only" | "tool-aware" | "executable";
+  body: string;
+  digest: string;
+  author: string;
+  created_at: number;
+  bindings: { scope: Scope | "task"; scope_id: string }[];
+}
+
+export interface EvalRun {
+  id: string;
+  model: string;
+  node: string;
+  roles: string[];
+  state: "queued" | "running" | "done" | "failed";
+  started_at: number | null;
+  ended_at: number | null;
+  scores: Record<string, number> | null;
+  errors: string[] | null;
+  log_tail?: string | null;
+}
+
+export interface LeaderRow {
+  model: string;
+  roles: Record<string, { score: number }>;
+  size_gb: number | null;
+  fits_16gb: boolean | null;
+  median_s: number | null;
+  tokens_per_s: number | null;
+  errors: string[] | null;
+}
+
+export interface Recommendation { node: string; role: string; model: string; score: number; installed: boolean }
+
+export type PipelineState = "building" | "reviewing" | "resolving" | "ready" | "failed" | "escalated" | "cancelled";
+
+export interface ReviewIssue { severity: "high" | "medium" | "low"; file?: string; problem: string; evidence?: string; fix?: string }
+
+export interface Pipeline {
+  id: string;
+  title: string;
+  state: PipelineState;
+  round: number;
+  max_rounds: number;
+  spec: string;
+  repo: string | null;
+  gate: string | null;
+  mode: Mode;
+  builder: { agent: string; node?: string | null };
+  reviewers: ({ kind: "role"; role: string } | { kind: "agent"; agent: string })[];
+  build_task: string | null;
+  reviews: Record<string, { status: "valid" | "abstained" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; task_id?: string }>;
+  history: { round: number; state: PipelineState; at: number; issues?: number; unsupported?: number; note?: string }[];
+  created_at: number;
+  updated_at: number;
+}

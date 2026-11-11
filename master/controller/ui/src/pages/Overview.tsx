@@ -1,6 +1,8 @@
 import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { get, type CallStat } from "../lib/api";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel } from "../components/bits";
-import { taskAction, useFleet, useRun, useTasks, useUsage } from "../lib/data";
+import { taskAction, useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
 import { ago, denialTools, duration, needsYou, nodeName, nodeSignal } from "../lib/format";
 
 export function OverviewPage() {
@@ -9,6 +11,7 @@ export function OverviewPage() {
   const usage = useUsage(1);
   const nav = useNavigate();
   const { run, busy, error, clearError } = useRun();
+  const can = useCan();
 
   const nodes = fleet.data?.nodes ?? [];
   const all = tasks.data ?? [];
@@ -18,9 +21,11 @@ export function OverviewPage() {
   const problems = all.filter((t) => t.state === "failed" || t.state === "interrupted");
   const up = nodes.filter((n) => nodeSignal(n) === "up").length;
   const routed = (fleet.data?.assignments ?? []).filter((a) => {
+    if (a.routed != null) return a.routed;
     const n = nodes.find((x) => x.id === a.node_id);
     return n?.healthy && n.models.includes(a.model);
   }).length;
+  const calls = useQuery({ queryKey: ["calls"], queryFn: () => get<CallStat[]>("/api/usage/calls?days=7"), retry: 0 });
   const agentTime = (usage.data ?? []).reduce((s, r) => s + (r.seconds || 0), 0);
   const open = (id: string) => nav(`/tasks?tab=all&task=${encodeURIComponent(id)}`);
 
@@ -53,8 +58,8 @@ export function OverviewPage() {
                     : <>Stopped after being denied {denialTools(t).map((x) => <span className="tag" key={x}>{x}</span>)}</>}
                 </p>
                 <div className="row">
-                  <button className="primary" disabled={busy} onClick={() => run(() => taskAction(t.id, "approve"))}>Approve</button>
-                  <button className="danger" disabled={busy} onClick={() => run(() => taskAction(t.id, "reject"))}>Reject</button>
+                  {can.admin && <button className="primary" disabled={busy} onClick={() => run(() => taskAction(t.id, "approve"))}>Approve</button>}
+                  {can.admin && <button className="danger" disabled={busy} onClick={() => run(() => taskAction(t.id, "reject"))}>Reject</button>}
                   <button className="ghost" onClick={() => open(t.id)}>Details</button>
                 </div>
               </article>
@@ -81,6 +86,26 @@ export function OverviewPage() {
           {working.length + problems.length === 0 && <div className="empty">No tasks running and no failures. <Link to="/tasks">Start a task</Link>.</div>}
         </div>
       </Section>
+
+      {(calls.data ?? []).length > 0 && (
+        <Section title="Model calls" aside="last 7 days">
+          <div className="panel">
+            <table>
+              <thead><tr><th>Role</th><th>Model</th><th className="num">Calls</th><th className="num">Errors</th><th className="num hide-sm">Typical</th><th className="num hide-sm">Slowest 5%</th><th className="num hide-sm">Fallbacks</th></tr></thead>
+              <tbody>
+                {(calls.data ?? []).map((c) => (
+                  <tr key={c.role + c.model}>
+                    <td>{c.role}</td><td className="mono">{c.model}</td><td className="num">{c.count}</td>
+                    <td className={`num ${c.error_rate > 0.1 ? "tone-bad" : ""}`}>{Math.round(c.error_rate * 100)}%</td>
+                    <td className="num hide-sm">{(c.p50_ms / 1000).toFixed(1)}s</td><td className="num hide-sm">{(c.p95_ms / 1000).toFixed(1)}s</td>
+                    <td className="num hide-sm">{c.fallbacks}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
 
       <Section title="Nodes">
         <div className="panel">

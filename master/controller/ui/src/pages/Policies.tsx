@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get, post, put, type Effective, type InstructionSet, type Mode, type PolicyBody, type PolicyDoc, type Scope } from "../lib/api";
-import { useFleet, useRun } from "../lib/data";
+import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
@@ -89,6 +89,7 @@ export function PoliciesPage() {
 
 function LayerEditor({ layer, current, policy }: { layer: Layer; current?: InstructionSet; policy?: PolicyDoc }) {
   const { run, busy, error, clearError } = useRun();
+  const can = useCan();
   const fleet = useFleet();
   const [text, setText] = useState(current?.text ?? "");
   const [body, setBody] = useState<PolicyBody>(policy?.body ?? {});
@@ -209,7 +210,7 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
       )}
 
       <div className="row" style={{ marginTop: 16 }}>
-        <button className="primary" disabled={busy}>Save new version</button>
+        {can.admin ? <button className="primary" disabled={busy}>Save new version</button> : <span className="small">Read only: changing policy needs an admin token.</span>}
         <span className="small quiet">Running tasks keep the version they started with.</span>
       </div>
 

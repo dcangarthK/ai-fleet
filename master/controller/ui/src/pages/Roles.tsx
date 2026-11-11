@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { del, post, type Assignment, type FleetNode } from "../lib/api";
-import { useFleet, useModels, useRun } from "../lib/data";
+import { del, post, put, type Assignment, type FleetNode } from "../lib/api";
+import { useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead } from "../components/bits";
 
@@ -10,8 +10,11 @@ const SUGGESTED = ["coder", "reviewer", "fast"];
 function routing(a: Assignment, n: FleetNode | undefined, reason: string | null | undefined) {
   if (a.state === "pending_install") return { tone: "accent", label: "Waiting for install", why: "Switches on when the model is installed and tested." };
   if (a.state === "blocked" || a.state === "failed") return { tone: a.state === "blocked" ? "warn" : "bad", label: a.state === "blocked" ? "Install blocked" : "Install failed", why: explainReason(reason) };
+  if (a.routed === true) return { tone: "ok", label: "Live", why: "" };
+  if (a.routed === false) return { tone: "bad", label: "Not routed", why: a.route_reason ?? "No deployment exists in the gateway." };
+  // Older controllers don't report routing; fall back to node health.
   const live = !!n?.healthy && n.models.includes(a.model);
-  if (live) return { tone: "ok", label: "Live", why: "" };
+  if (live) return { tone: "ok", label: "Probably live", why: "The gateway didn't report routing; the node and model are up." };
   return { tone: "bad", label: "Not routed", why: !n ? "The node is gone." : !n.healthy ? "The node's model server isn't answering." : "The model is no longer on the node." };
 }
 
@@ -19,6 +22,7 @@ export function RolesPage() {
   const fleet = useFleet();
   const models = useModels();
   const { run, busy, error, clearError } = useRun();
+  const can = useCan();
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved");
   const [role, setRole] = useState("coder");
   const [node, setNode] = useState("");
@@ -79,8 +83,8 @@ export function RolesPage() {
                     <td>{a.node ?? a.node_id}</td>
                     <td><span className={`state tone-${st.tone}`}>{st.label}</span>{st.why && <div className="sub" style={{ maxWidth: 300 }}>{st.why}</div>}</td>
                     <td>
-                      <button disabled={busy} onClick={() => confirm(`Stop routing ${r} to ${a.model} on ${a.node ?? a.node_id}?`) &&
-                        run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }))}>Remove</button>
+                      {can.admin && <button disabled={busy} onClick={() => confirm(`Stop routing ${r} to ${a.model} on ${a.node ?? a.node_id}?`) &&
+                        run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }))}>Remove</button>}
                     </td>
                   </tr>
                 );
@@ -91,6 +95,33 @@ export function RolesPage() {
       </div>
 
       <section className="section">
+        <h2>When a role fails</h2>
+        <div className="panel">
+          <table>
+            <thead><tr><th>Role</th><th>Try next</th></tr></thead>
+            <tbody>
+              {roles.map((r) => {
+                const info = fleet.data?.roles?.find((x) => x.name === r);
+                return (
+                  <tr key={r}><td><b>{r}</b></td>
+                    <td>
+                      {can.admin ? (
+                        <select aria-label={`Fallback for ${r}`} value={info?.fallback ?? ""} disabled={busy}
+                                onChange={(e) => run(() => put(`/api/roles/${encodeURIComponent(r)}`, { fallback: e.target.value || null, description: info?.description ?? null }))}>
+                          <option value="">Nothing: report the error</option>
+                          {roles.filter((x) => x !== r).map((x) => <option key={x} value={x}>{x}</option>)}
+                        </select>
+                      ) : (info?.fallback ?? "nothing")}
+                    </td></tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <p className="small quiet">If a role's models error or time out, the request is tried once on the fallback role and the answer says which role replied.</p>
+      </section>
+
+      {can.admin && <section className="section">
         <h2>Assign a model to a role</h2>
         <form className="panel" style={{ padding: 14 }} onSubmit={assign}>
           <div className="grid-form">
@@ -121,7 +152,7 @@ export function RolesPage() {
             </span>
           </div>
         </form>
-      </section>
+      </section>}
     </>
   );
 }

@@ -37,7 +37,8 @@ tasks (reason `on battery (23%)`); Ollama one-shots are still allowed.
 
 ## 5. Role fallbacks
 `roles(name PK, fallback TEXT NULL, description)`; `PUT /api/roles/{name}` [admin] `{fallback, description}`.
-No cycles (400). MCP `ask_model`/`review_diff`: on an error or timeout from a role, try its fallback once and say
+No cycles (400). `/api/fleet` returns `roles: [{name, fallback, description}]` for every role that has a row or an
+assignment. MCP `ask_model`/`review_diff`: on an error or timeout from a role, try its fallback once and say
 in the reply which role answered. The console shows the chain on the Roles page.
 
 ## 6. Model-call stats
@@ -48,7 +49,8 @@ Overview shows a compact table; no external metrics stack.
 ## 7. Notifications
 `notify_rules(id, event_glob, plugin, enabled)`; defaults: `task.awaiting_approval`, `task.blocked`,
 `pipeline.escalated`, `model.state` with state `blocked|failed`, `node.offline`. Settings page lists rules with
-on/off switches and a "send a test" button. Plugins keep their existing contract.
+on/off switches and a "send a test" button. API: `GET /api/notify-rules` [view], `PUT /api/notify-rules/{id}`
+`{enabled}` [admin], `POST /api/notify-rules/{id}/test` [admin] (sends a `notify.test` event through that plugin). Plugins keep their existing contract.
 
 ## 8. Retention
 Daily: remove worktrees (runner `/cleanup`, which snapshots first) of tasks `done`/`cancelled` for more than

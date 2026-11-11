@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get, post, type EvalRun, type LeaderRow, type Recommendation } from "../lib/api";
-import { useFleet, useRun } from "../lib/data";
+import { useCan, useFleet, useRun } from "../lib/data";
 import { ago, duration } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
@@ -17,6 +17,7 @@ export function EvalsPage() {
   });
   const recs = useQuery({ queryKey: ["eval-recs"], queryFn: () => get<Recommendation[]>("/api/evals/recommendations") });
   const { run, busy, error, clearError } = useRun();
+  const can = useCan();
   const [model, setModel] = useState("");
   const [node, setNode] = useState("");
   const [sortRole, setSortRole] = useState("reviewer");
@@ -80,8 +81,8 @@ export function EvalsPage() {
                   <td>{fleet.data?.nodes.find((n) => n.id === r.node)?.name ?? r.node}</td><td>{r.role}</td>
                   <td className="mono">{r.model}{!r.installed && <div className="sub">not installed yet</div>}</td>
                   <td className="num">{Math.round(r.score)}</td>
-                  <td><button disabled={busy} onClick={() => run(() => post("/api/roles", { role: r.role, node: r.node, model: r.model, ensure_model: !r.installed }))}>
-                    {r.installed ? "Assign" : "Install and assign"}</button></td>
+                  <td>{can.admin && <button disabled={busy} onClick={() => run(() => post("/api/roles", { role: r.role, node: r.node, model: r.model, ensure_model: !r.installed }))}>
+                    {r.installed ? "Assign" : "Install and assign"}</button>}</td>
                 </tr>
               ))}
             </tbody>
@@ -90,7 +91,7 @@ export function EvalsPage() {
         </div>
       </Section>
 
-      <Section title="Run an eval">
+      {can.operate && <Section title="Run an eval">
         <form className="panel" style={{ padding: 14 }} onSubmit={start}>
           <div className="grid-form">
             <label className="field">Node
@@ -128,7 +129,7 @@ export function EvalsPage() {
           </table>
           {!(evals.data?.runs ?? []).length && <div className="empty">No eval runs from the console yet.</div>}
         </div>
-      </Section>
+      </Section>}
     </>
   );
 }

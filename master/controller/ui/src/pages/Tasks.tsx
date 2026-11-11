@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { NewTask } from "../components/NewTask";
 import { TaskSheet } from "../components/TaskSheet";
 import { LoadError, PageHead, StateLabel } from "../components/bits";
-import { useFleet, useTasks } from "../lib/data";
+import { useCan, useFleet, useTasks } from "../lib/data";
 import { ago, inTab, nodeName, TASK_TABS } from "../lib/format";
 
 export function TasksPage() {
@@ -12,6 +12,7 @@ export function TasksPage() {
   const open = params.get("task");
   const [creating, setCreating] = useState(false);
   const tasks = useTasks();
+  const can = useCan();
   const fleet = useFleet();
   const all = tasks.data ?? [];
   const shown = all.filter((t) => inTab(t, tab));
@@ -29,7 +30,7 @@ export function TasksPage() {
       <PageHead
         title="Tasks"
         intro="Work delegated to agents on the fleet. Each task runs in its own worktree and branch."
-        actions={<button className="primary" onClick={() => setCreating(true)}>New task</button>}
+        actions={can.operate && <button className="primary" onClick={() => setCreating(true)}>New task</button>}
       />
       <LoadError error={tasks.error} />
       <div className="panel">

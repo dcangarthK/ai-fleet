@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { get, post, type CatalogModel, type Fleet, type FleetEvent, type Task, type UsageRow } from "./api";
+import { get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageRow } from "./api";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -98,4 +98,17 @@ export function useTaskLog(id: string | undefined, active: boolean) {
     };
   }, [id, active]);
   return text;
+}
+
+const RANK = { view: 0, operate: 1, admin: 2 } as const;
+
+/** What this browser's token may do. While unknown, hide nothing; the server enforces either way. */
+export function useCan() {
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 300_000, refetchInterval: false, retry: 0 });
+  const scope = me.data?.scope;
+  return {
+    me: me.data,
+    operate: scope ? RANK[scope] >= RANK.operate : true,
+    admin: scope ? RANK[scope] >= RANK.admin : true,
+  };
 }

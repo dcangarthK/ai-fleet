@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { del, get, post, put, type Scope, type Skill } from "../lib/api";
-import { useFleet, useRun } from "../lib/data";
+import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
@@ -11,6 +11,7 @@ const BLANK = { id: "", description: "", agents: [...AGENTS] as Skill["agents"],
 export function SkillsPage() {
   const skills = useQuery({ queryKey: ["skills"], queryFn: () => get<Skill[]>("/api/skills") });
   const [editing, setEditing] = useState<Skill | typeof BLANK | null>(null);
+  const can = useCan();
   const list = skills.data ?? [];
 
   return (
@@ -18,7 +19,7 @@ export function SkillsPage() {
       <PageHead
         title="Skills"
         intro="Reusable, versioned instructions. Bind a skill to the fleet, a node, a role or an agent, and every task there receives it with its instructions. Skills can't grant permissions; policy still decides."
-        actions={<button className="primary" onClick={() => setEditing({ ...BLANK })}>New skill</button>}
+        actions={can.admin && <button className="primary" onClick={() => setEditing({ ...BLANK })}>New skill</button>}
       />
       <LoadError error={skills.error} />
       <div className="panel">
@@ -47,6 +48,7 @@ export function SkillsPage() {
 
 function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose: () => void }) {
   const isNew = !("version" in skill);
+  const can = useCan();
   const fleet = useFleet();
   const { run, busy, error, clearError } = useRun();
   const [id, setId] = useState(skill.id);
@@ -102,7 +104,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
           <textarea className="mono" style={{ minHeight: 240 }} value={body} onChange={(e) => setBody(e.target.value)} required maxLength={24576} />
         </label>
         <div className="row" style={{ marginTop: 12 }}>
-          <button className="primary" disabled={busy || !agents.length}>{isNew ? "Create skill" : "Save new version"}</button>
+          {can.admin && <button className="primary" disabled={busy || !agents.length}>{isNew ? "Create skill" : "Save new version"}</button>}
           <button type="button" className="ghost" onClick={onClose}>Close</button>
         </div>
 
@@ -119,7 +121,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
                 </span>
               ))}
             </div>
-            <div className="row">
+            {can.admin && <div className="row">
               <select aria-label="Bind to" value={bindScope} onChange={(e) => { setBindScope(e.target.value as Scope); setBindId(""); }}>
                 <option value="fleet">Whole fleet</option><option value="node">Node</option><option value="role">Role</option><option value="agent">Agent</option>
               </select>
@@ -133,7 +135,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
                       onClick={() => run(() => post(`/api/skills/${encodeURIComponent(skill.id)}/bindings`, { scope: bindScope, scope_id: bindScope === "fleet" ? "*" : bindId }))}>
                 Bind
               </button>
-            </div>
+            </div>}
             {(history.data ?? []).length > 1 && (
               <details style={{ marginTop: 16 }}>
                 <summary className="small">Version history ({history.data?.length})</summary>

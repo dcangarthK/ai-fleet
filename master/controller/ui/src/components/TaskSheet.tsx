@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { get, post, type Task } from "../lib/api";
-import { taskAction, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
+import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel } from "./bits";
 
@@ -12,6 +12,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
   const { run, busy, error: actionError, clearError } = useRun();
   const [diff, setDiff] = useState<{ stat: string; diff: string } | null>(null);
   const [message, setMessage] = useState("");
+  const can = useCan();
 
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -53,7 +54,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
           <ErrorBanner error={error instanceof Error ? error.message : null} />
           <ErrorBanner error={actionError} onDismiss={clearError} />
           {task && <TaskBody task={task} busy={busy} act={act} diff={diff} loadDiff={() => run(async () => setDiff(await get(`/api/tasks/${id}/diff`)))} />}
-          {task && taskActions(task).message && (
+          {task && can.operate && taskActions(task).message && (
             <form onSubmit={send} className="row" style={{ marginTop: 8 }}>
               <label className="field" style={{ flex: 1, minWidth: 220 }}>
                 Follow-up instructions (resumes the same session)
@@ -76,7 +77,10 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
   diff: { stat: string; diff: string } | null;
   loadDiff: () => void;
 }) {
-  const can = taskActions(task);
+  const scope = useCan();
+  const all = taskActions(task);
+  const can = { ...all, approve: all.approve && scope.admin, reject: all.reject && scope.admin,
+    cancel: all.cancel && scope.operate, complete: all.complete && scope.operate, cleanup: all.cleanup && scope.operate };
   const gate = task.gate_result;
   return (
     <>

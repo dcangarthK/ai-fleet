@@ -382,6 +382,58 @@ class ControllerTests(unittest.TestCase):
         finally:
             events.PLUGINS.pop()
 
+    def _escalation_task(self, **kw):
+        body = {"agent": "claude", "prompt": "q", "mode": "read-only", "worktree": False, "escalation": True} | kw
+        return self.c.post("/api/tasks", json=body, headers=W)
+
+    def _set_policy(self, scope, scope_id, body):
+        r = self.c.put(f"/api/policies/{scope}/{scope_id}", json={"body": body}, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_escalation_task_needs_the_selected_nodes_policy_to_allow_the_agent(self):
+        allow = {"escalation": {"agents": ["claude"]}}
+        try:
+            self._set_policy("fleet", "*", allow)
+            self._set_policy("node", "master", {"escalation": {"agents": []}})
+            before = len(FakeRunner.calls)
+            r = self._escalation_task()
+            self.assertEqual(r.status_code, 409, r.text)  # fleet allows, node layer denies: refused
+            self.assertIn("escalat", r.text)
+            r = self._escalation_task(node="master")
+            self.assertEqual(r.status_code, 409, r.text)
+            self.assertEqual([c for c in FakeRunner.calls[before:] if c[0] == "/jobs"], [])  # nothing ran
+            self._set_policy("node", "master", {"escalation": {"agents": ["codex"]}})
+            self.assertEqual(self._escalation_task().status_code, 409)  # node excludes this agent
+            self._set_policy("node", "master", allow)
+            r = self._escalation_task()
+            self.assertEqual(r.status_code, 200, r.text)  # fleet and node both allow: scheduled
+            self.assertEqual(r.json()["node_id"], "master")
+        finally:
+            self._set_policy("fleet", "*", {})
+            self._set_policy("node", "master", {})
+
+    def test_escalation_marker_only_narrows_never_widens(self):
+        try:
+            # No layer opts in: escalation is refused by default, but an ordinary task is unaffected.
+            self.assertEqual(self._escalation_task().status_code, 409)
+            self.assertEqual(self._escalation_task(policy={"escalation": {"agents": ["claude"]}}).status_code, 409)
+            r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "q", "mode": "read-only",
+                                                 "worktree": False}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            # An ordinary task is not blocked by a node that denies escalation.
+            self._set_policy("fleet", "*", {"escalation": {"agents": ["claude"]}})
+            self._set_policy("node", "master", {"escalation": {"agents": []}})
+            r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "q", "mode": "read-only",
+                                                 "worktree": False}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            # The marker doesn't lift other limits (mode ceiling) either.
+            self._set_policy("node", "master", {"escalation": {"agents": ["claude"]}, "mode_ceiling": "read-only"})
+            r = self._escalation_task(mode="auto-edit")
+            self.assertEqual(r.status_code, 409, r.text)
+        finally:
+            self._set_policy("fleet", "*", {})
+            self._set_policy("node", "master", {})
+
     def test_trusted_bypass_needs_policy_and_auto_approves(self):
         r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)
         self.assertEqual(r.status_code, 409, r.text)  # the node's ceiling doesn't allow full mode

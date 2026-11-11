@@ -161,8 +161,12 @@ def ceiling(node: dict) -> str:
 
 
 def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | None = None,
-             policy: dict | None = None) -> str | None:
-    """None if the node can take the task, else the reason it can't."""
+             policy: dict | None = None, escalation: bool = False) -> str | None:
+    """None if the node can take the task, else the reason it can't.
+
+    ``escalation`` marks a grounded-ask escalation task. It only ever adds a requirement: the agent must still be
+    in the merged (fleet, node, role, agent, task) ``escalation.agents`` allow-list. Default is none.
+    """
     if node["status"] != "approved":
         return "not approved"
     if not node["runner"] or (node.get("runner_fails") or 0) >= 3:
@@ -184,6 +188,8 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     policy_ceiling = (policy or {}).get("mode_ceiling")
     if policy_ceiling and rank(mode) > rank(policy_ceiling):
         return f"mode {mode} is above the effective policy ceiling ({policy_ceiling})"
+    if escalation and agent not in ((policy or {}).get("escalation") or {}).get("agents", []):
+        return f"node policy does not allow escalation to {agent}"
     return None
 
 
@@ -210,9 +216,25 @@ def temporary_reason(node: dict, policy: dict) -> str | None:
     return None
 
 
+def stored_escalation_policy(node: str, role: str | None, agent: str, snapshot: dict, task_policy: dict | None) -> dict:
+    """Policy used for the escalation check: a task's own layer may narrow escalation.agents but never grant it,
+    so when the request carries a policy the check also needs the stored layers alone to opt in."""
+    if task_policy is None:
+        return snapshot["policy"]
+    stored = effective_policy(node, role, agent, None)["policy"].get("escalation") or {}
+    merged = snapshot["policy"].get("escalation") or {}
+    allowed = [a for a in merged.get("agents", []) if a in stored.get("agents", [])]
+    return snapshot["policy"] | {"escalation": {"agents": allowed}}
+
+
+def _esc_view(node: dict, role, agent, snapshot, task_policy, escalation: bool) -> dict:
+    return (stored_escalation_policy(node["id"], role, agent, snapshot, task_policy)
+            if escalation else snapshot["policy"])
+
+
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
               role: str | None = None, task_policy: dict | None = None,
-              skill_ids: list[str] | None = None) -> tuple[dict, dict, str | None]:
+              skill_ids: list[str] | None = None, escalation: bool = False) -> tuple[dict, dict, str | None]:
     nodes = node_rows()
     if wanted:
         match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
@@ -221,15 +243,18 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
         if len(match) > 1:
             raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
         snapshot = effective_policy(match[0]["id"], role, agent, task_policy, skill_ids)
-        why = eligible(match[0], agent, model, mode, gate, snapshot["policy"])
+        why = eligible(match[0], agent, model, mode, gate,
+                       _esc_view(match[0], role, agent, snapshot, task_policy, escalation), escalation)
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
         return match[0], snapshot, temporary_reason(match[0], snapshot["policy"])
     candidates = [(n, effective_policy(n["id"], role, agent, task_policy, skill_ids)) for n in nodes]
     ok = [(n, snapshot) for n, snapshot in candidates
-          if not eligible(n, agent, model, mode, gate, snapshot["policy"])]
+          if not eligible(n, agent, model, mode, gate, _esc_view(n, role, agent, snapshot, task_policy, escalation),
+                          escalation)]
     if not ok:
-        reasons = {n["name"]: eligible(n, agent, model, mode, gate, snapshot["policy"])
+        reasons = {n["name"]: eligible(n, agent, model, mode, gate,
+                                       _esc_view(n, role, agent, snapshot, task_policy, escalation), escalation)
                    for n, snapshot in candidates}
         raise HTTPException(409, f"no node can run {agent} in {mode} mode: {reasons}")
     # Prefer a node that can start now, then least busy, then the bigger machine.
@@ -487,6 +512,7 @@ class TaskIn(BaseModel):
     role: str | None = None
     policy: dict | None = None
     skills: list[str] = Field(default_factory=list)
+    escalation: bool = False  # grounded-ask escalation: node selection also requires escalation.agents to allow it
     trusted_bypass: bool = False  # Claude/Codex: run in full mode without permission prompts
 
     @field_validator("prompt")
@@ -543,7 +569,7 @@ async def create_task(t: TaskIn) -> dict:
         if t.policy is not None:
             fleet_policy.validate(t.policy)
         node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy,
-                                                   t.skills)
+                                                   t.skills, t.escalation)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     task_id = "t-" + secrets.token_hex(4)

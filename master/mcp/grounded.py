@@ -78,8 +78,9 @@ def role_temperature(assignments: list, role: str) -> float:
 def escalation_agents(policy_rows: list, role: str) -> list[str]:
     """Agents the effective policy lets this role escalate to (fleet → role → agent layers, intersected).
 
-    Default none: escalation only happens when some layer opts in. Node layers are left to the spawned task's
-    own effective policy, since the node is only picked at spawn time.
+    Default none: escalation only happens when some layer opts in. This is a pre-filter only: node layers are
+    enforced by the controller, which refuses an escalation task unless the selected node's merged policy
+    still allows the agent (the spawn marks the request ``escalation``).
     """
     latest = {}
     for row in policy_rows if isinstance(policy_rows, list) else []:

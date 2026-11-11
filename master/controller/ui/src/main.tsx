@@ -19,6 +19,7 @@ import { PoliciesPage } from "./pages/Policies";
 import { SkillsPage } from "./pages/Skills";
 import { EvalsPage } from "./pages/Evals";
 import { PipelinesPage } from "./pages/Pipelines";
+import { BudgetPage } from "./pages/Budget";
 
 try {
   const t = localStorage.getItem("fleet-theme");
@@ -34,6 +35,7 @@ const router = createBrowserRouter(
       element: <Shell />,
       children: [
         { index: true, element: <OverviewPage /> },
+        { path: "budget", element: <BudgetPage /> },
         { path: "tasks", element: <TasksPage /> },
         { path: "models", element: <ModelsPage /> },
         { path: "roles", element: <RolesPage /> },

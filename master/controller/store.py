@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS call_usage (
     tokens_in INTEGER, tokens_out INTEGER, fallback_from TEXT);
 CREATE TABLE IF NOT EXISTS notify_rules (
     id TEXT PRIMARY KEY, event_glob TEXT, plugin TEXT, enabled INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS agent_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, run INTEGER, agent TEXT, model TEXT, kind TEXT,
+    input INTEGER, output INTEGER, cached INTEGER, cost_usd REAL, prompt_bytes INTEGER, effort TEXT, outcome TEXT,
+    num_turns INTEGER, UNIQUE (task_id, run));
+CREATE TABLE IF NOT EXISTS budget_rules (
+    version INTEGER PRIMARY KEY, body TEXT, author TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS review_agreement (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, pipeline_id TEXT, round INTEGER, local_model TEXT,
+    hint_id INTEGER, confirmed INTEGER, trusted INTEGER, reviewer TEXT);
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.
@@ -77,9 +86,23 @@ MIGRATIONS = {
               "approved_tools": "TEXT DEFAULT '[]'",
               # task lineage (docs/SPEC-task-lineage.md): all nullable, nothing is rewritten
               "link": "TEXT", "failure_reason": "TEXT", "resets_at": "REAL", "resolution": "TEXT",
-              "outcome": "TEXT", "hidden": "INTEGER DEFAULT 0"},
+              "outcome": "TEXT", "hidden": "INTEGER DEFAULT 0",
+              # paid-model budget (docs/SPEC-paid-budget.md): all nullable
+              "kind": "TEXT", "effort": "TEXT", "budget_override": "TEXT", "routed_from": "TEXT",
+              "budget_key": "TEXT", "budget_identity": "TEXT", "prompt_bytes": "INTEGER",
+              "prompt_stripped_bytes": "INTEGER DEFAULT 0", "prompt_omitted": "TEXT", "run_prompt_bytes": "INTEGER",
+              "usage": "TEXT", "num_turns": "INTEGER", "review_of": "TEXT", "launch_extra": "TEXT",
+              "limits_applied": "TEXT",
+              # why a queued task waits on the budget: 'limit' or 'slot' (null: not held by the budget)
+              "budget_wait": "TEXT",
+              # which agent profile and account ran it (docs/SPEC-limit-handoff.md 3.2); nothing acts on them yet
+              "profile": "TEXT DEFAULT 'fleet'", "account_label": "TEXT"},
+    # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
+    # later cancelling, completing or resuming of the task cannot erase
+    "agent_usage": {"resets_at": "REAL", "identity": "TEXT"},
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
-    "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0"},
+    "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
+                  "budget": "TEXT DEFAULT '{}'"},
 }
 
 
@@ -120,6 +143,7 @@ def _seed_notify_rules(c: sqlite3.Connection) -> None:
         ("pipeline-ready", "pipeline.ready"),
         ("pipeline-failed", "pipeline.failed"),
         ("auto-approve-exhausted", "task.auto_approve_exhausted"),
+        ("budget-soft", "budget.soft"),
     ]
     for identifier, event_glob in defaults:
         c.execute("INSERT OR IGNORE INTO notify_rules (id,event_glob,plugin,enabled) VALUES (?,?,?,1)",

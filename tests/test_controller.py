@@ -82,6 +82,11 @@ class FakeRunner(BaseHTTPRequestHandler):
     op_script: list = []  # states an ensure op goes through on successive polls; default ready
     agents: dict = {"claude": "/x/claude", "codex": None, "ollama": "http://o"}
     digest = hashlib.sha256((Path(__file__).resolve().parent.parent / "nodes" / "runner.py").read_bytes()).hexdigest()
+    # Budget support (docs/SPEC-paid-budget.md): tree hashes per job, the delta since one, an optional full diff.
+    trees: dict = {}
+    deltas: dict = {}
+    delta_text = None  # None: the delta is the same as the full diff
+    diff_text = None  # None: "+hello"
 
     def log_message(self, *a):
         pass
@@ -119,12 +124,15 @@ class FakeRunner(BaseHTTPRequestHandler):
                                     "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "models": {"remote_management": True, "disk_reserve_gb": 8},
-                                    "agents": dict(FakeRunner.agents)})
+                                    "agents": dict(FakeRunner.agents), "budget": True})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
             return self._send(404, {"detail": "no job"})
+        if "/diff?since=" in self.path:
+            delta = FakeRunner.delta_text if FakeRunner.delta_text is not None else (FakeRunner.diff_text or "+hello")
+            return self._send(200, {"stat": "", "diff": delta})
         if self.path.endswith("/diff"):
-            return self._send(200, {"stat": "1 file changed", "diff": "+hello"})
+            return self._send(200, {"stat": "1 file changed", "diff": FakeRunner.diff_text or "+hello"})
         if "/log" in self.path:
             return self._send(200, {"offset": 5, "text": "hello"})
         return self._send(200, self.jobs[jid])
@@ -151,6 +159,10 @@ class FakeRunner(BaseHTTPRequestHandler):
             self.jobs[body["id"]] = job
             return self._send(200, job)
         jid = self.path.split("/")[2]
+        if self.path.endswith("/tree") and jid in self.jobs:
+            made = FakeRunner.trees.setdefault(jid, [])
+            made.append(f"{len(made) + 1:040x}")
+            return self._send(200, {"tree": made[-1]})
         if self.path.endswith("/message"):
             self.jobs[jid].update(state="running", denials=[], runs=self.jobs[jid]["runs"] + 1)
         elif self.path.endswith("/cancel"):
@@ -170,6 +182,10 @@ import controller  # noqa: E402
 import events  # noqa: E402
 import tasks  # noqa: E402
 from store import db  # noqa: E402
+
+# Never probe the real model servers on this machine: a locally installed model (e.g. qwen3:8b) would leak into
+# the master node's inventory and break the install tests. The fake runner's /models report is the only source.
+controller.PROBES = []
 
 W = {"X-Fleet": "1"}
 
@@ -203,11 +219,31 @@ def settle_pipeline(client, pipeline_id, ready, timeout=15):
                          f"build={build and (build['state'], build['error'], build['updated_at'])} job={FakeRunner.jobs.get(current.get('build_task'))}")
 
 
+def unmetered_claude_rules():
+    """For suites that start many Claude tasks with no model and never finish them. The default claude:* rule
+    (which governs exactly those tasks) caps them at 2 running at once; here it keeps its limit breaker but has
+    no cap, so the tests are explicit about the concurrency they rely on."""
+    import copy
+
+    import budget
+    body = copy.deepcopy(budget.DEFAULT_RULES)
+    body["models"]["claude:*"]["max_concurrent"] = 10000
+    budget.save_rules(body, "test")
+
+
+def reset_limits():
+    """Every limit recorded so far has already reset: its reset time is in the past."""
+    with db() as c:
+        c.execute("UPDATE tasks SET resets_at=? WHERE failure_reason='limit'", (time.time() - 1,))
+        c.execute("UPDATE agent_usage SET resets_at=? WHERE outcome='limit'", (time.time() - 1,))
+
+
 class ControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
+        unmetered_claude_rules()
         wait_for(lambda: any(n["id"] == "master" and n["runner_ok"] for n in cls.c.get("/api/fleet").json()["nodes"]))
 
     @classmethod
@@ -545,7 +581,8 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(bad({"agent": "claude", "prompt": "   "}).status_code, 422)
         r = bad({"agent": "claude", "prompt": "x", "mode": "read-only", "gate": "true"})
         self.assertEqual(r.status_code, 400)
-        r = bad({"agent": "codex", "prompt": "x"})  # runner reports codex: null
+        # runner reports codex: null (kind build: the budget rules, checked first, keep Codex off drafts)
+        r = bad({"agent": "codex", "prompt": "x", "kind": "build"})
         self.assertEqual(r.status_code, 409)
         self.assertIn("no codex", r.text)
         r = bad({"agent": "ollama", "model": "nope:1b", "prompt": "x"})
@@ -571,6 +608,7 @@ class ControllerTests(unittest.TestCase):
         out = subprocess.run([sys.executable, str(ctl), "runner-token", "clear", "master"],
                              capture_output=True, text=True, env=os.environ.copy(), timeout=30)
         self.assertEqual(out.returncode, 0, out.stderr)
+        time.sleep(0.5)  # a background poll that read the old token just before the clear may still be in flight
         FakeRunner.tokens.clear()
         self.task()
         self.assertNotIn("tok-master-123", FakeRunner.tokens)
@@ -1018,6 +1056,14 @@ Imported body.
         def settle(pipeline_id, ready):
             # Drive the pipeline ourselves (see settle_pipeline) instead of waiting for the background pollers.
             return settle_pipeline(self.c, pipeline_id, ready)
+        # The default budget rules keep Codex for security and final reviews (one round); this pipeline exercises
+        # Codex as an ordinary two-round reviewer, so its rules allow that.
+        import budget
+        rules = json.loads(json.dumps(budget.DEFAULT_RULES))
+        rules["models"]["codex"]["kinds"] = ["*"]
+        rules["models"]["claude:*"]["max_concurrent"] = 10000  # earlier tests leave unfinished Claude tasks running
+        rules["reviews"]["max_codex_rounds"] = 2
+        self.assertEqual(self.c.put("/api/budget/rules", json={"body": rules}, headers=W).status_code, 200)
         try:
             body = {"title": "Phase 7 pipeline", "spec": "Keep the greeting correct", "repo": "/repo",
                     "gate": "pytest", "mode": "auto-edit", "builder": {"agent": "claude"},
@@ -1033,8 +1079,9 @@ Imported body.
                                p["reviews"].get("1", {}).get("task_id") else None)
             review_id = reviewing["reviews"]["1"]["task_id"]
             review_body = [sent for path, sent in FakeRunner.calls if path == "/jobs" and sent["id"] == review_id][0]
-            self.assertEqual((review_body["mode"], review_body["worktree"], review_body["repo"]),
-                             ("read-only", False, "/repo"))  # original repo; the builder worktree is under the runner's denied dir
+            # Read-only, inside the build's own worktree (so any file it reads is current), not the original repo.
+            self.assertEqual((review_body["mode"], review_body["worktree"], review_body["repo"], review_body["cwd"]),
+                             ("read-only", False, None, "/w"))
             FakeRunner.jobs[review_id].update(state="exited", exit_code=0,
                                               result=json.dumps({"verdict": "request_changes", "issues": [issue]}))
             building = settle(pipeline_id, lambda p: p if p["state"] == "building" and p["round"] == 2 else None)
@@ -1077,9 +1124,12 @@ Imported body.
         finally:
             controller.pipeline_model_call = original_call
             FakeRunner.agents["codex"] = None
+            unmetered_claude_rules()  # back to this suite's rules
             self.c.post("/api/refresh", headers=W)
 
-    def test_agent_reviewer_runs_in_the_original_repo_not_the_builder_worktree(self):
+    def test_agent_reviewer_runs_read_only_in_the_build_worktree(self):
+        # docs/SPEC-paid-budget.md 3.4 replaced "review in the original repo": that tree holds the code before the
+        # change, so any file the reviewer read there was stale. It now runs read-only in the build's worktree.
         FakeRunner.agents["codex"] = "/x/codex"
         self.c.post("/api/refresh", headers=W)
         try:
@@ -1091,9 +1141,10 @@ Imported body.
             wait_for(lambda: self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"].get("0", {}).get("task_id"), timeout=20)
             rid = self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"]["0"]["task_id"]
             sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
-            self.assertEqual(sent["repo"], "/r/project")
+            self.assertEqual((sent["repo"], sent["cwd"], sent["worktree"]), (None, "/w", False))
             self.assertEqual(sent["mode"], "read-only")
-            self.assertIn("the builder's changes are exactly the diff below", sent["prompt"])
+            self.assertIn("Review only the diff below.", sent["prompt"])
+            self.assertNotIn("Read surrounding files", sent["prompt"])
             self.assertIn('"verdict":"approve|request_changes|abstain"', sent["prompt"])
             self.assertIn('"expected":"","actual":""', sent["prompt"])
             self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)

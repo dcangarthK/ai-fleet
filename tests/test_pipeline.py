@@ -240,6 +240,20 @@ class Machine(unittest.TestCase):
         p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
         self.assertEqual(p["state"], "ready")
 
+    def test_no_trusted_findings_means_a_full_diff_review_next_round(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("request_changes", SQLI), "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual((p["state"], p["round"]), ("building", 2))  # the untrusted role's issue still goes back
+        self.assertIsNone(p["budget"]["last_findings"])              # but nothing trusted to re-check: full review
+
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("request_changes", SQLI), "diff": DIFF})
+        self.assertEqual([i["problem"] for i in p["budget"]["last_findings"]], [SQLI["problem"]])
+
     def test_rounds_run_out(self):
         p, _ = PL.start(PL.new(spec(max_rounds=1)))
         p, _ = PL.step(p, {"type": "build", "state": "review"})

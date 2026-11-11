@@ -13,7 +13,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # Reuse the controller test harness (fake runner, temp database, environment).
-from tests.test_controller import FakeRunner, TMP, W, settle_pipeline, wait_for  # noqa: E402
+from tests.test_controller import (FakeRunner, TMP, W, reset_limits, settle_pipeline,  # noqa: E402
+                                   unmetered_claude_rules, wait_for)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -68,6 +69,17 @@ class FailureReasonTests(unittest.TestCase):
         t = row(gate="pytest")
         job = {"exit_code": 1, "result": LIMIT_TEXT, "gate": {"state": "failed"}}
         self.assertEqual(self.fr(t, job), "limit")
+
+    def test_provider_limit_is_stricter_than_the_display_heuristic(self):
+        pl = tasks.provider_limit
+        self.assertTrue(pl(row(agent="claude", result=LIMIT_TEXT, exit_code=1)))
+        self.assertTrue(pl(row(agent="codex", result="", error="error: " + CODEX_LIMIT, exit_code=1)))
+        self.assertTrue(pl(row(agent="codex", result="", error=CODEX_LIMIT, exit_code=1)))
+        discussing = "Notes: when the usage limit is hit it says it resets at 2:30 PM, so retry later."
+        self.assertEqual(self.fr(row(), {"exit_code": 1, "result": discussing}), "limit")  # display unchanged
+        self.assertFalse(pl(row(agent="claude", result=discussing, exit_code=1)))
+        self.assertFalse(pl(row(agent="claude", result=LIMIT_TEXT, exit_code=0)))  # a clean exit is not a limit
+        self.assertFalse(pl(row(agent="claude", result="Summary. " + LIMIT_TEXT, exit_code=1)))  # must start with it
 
     def test_limit_needs_reset_or_retry_wording(self):
         self.assertEqual(self.fr(row(), {"exit_code": 1, "result": "rate limit of the function exceeded"}), "error")
@@ -251,6 +263,8 @@ class MigrationTests(unittest.TestCase):
         for column in ("link", "failure_reason", "resets_at", "resolution", "outcome"):
             self.assertIsNone(got[column], column)
         self.assertEqual(got["hidden"], 0)
+        # limit-handoff prerequisites and the budget wait reason: additive, nothing rewritten
+        self.assertEqual((got["profile"], got["account_label"], got["budget_wait"]), ("fleet", None, None))
         self.assertEqual((got["title"], got["state"]), ("Old", "failed"))
         self.assertEqual(view["failure_reason"], "error")  # derived on read, not stored
         self.assertEqual(view["display"], {"tone": "attention", "label": "Failed: error"})
@@ -335,11 +349,18 @@ class LineageApiTests(unittest.TestCase):
         fresh_loop_state()
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
+        unmetered_claude_rules()
         wait_for(lambda: any(n["id"] == "master" and n["runner_ok"] for n in cls.c.get("/api/fleet").json()["nodes"]))
 
     @classmethod
     def tearDownClass(cls):
         cls.ctx.__exit__(None, None, None)
+
+    def setUp(self):
+        reset_limits()  # a limit recorded by an earlier test is over: tasks here start straight away
+
+    def tearDown(self):
+        reset_limits()
 
     def task(self, **kw):
         r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "do the thing"} | kw, headers=W)
@@ -569,6 +590,7 @@ class LineageApiTests(unittest.TestCase):
     def test_work_groups_orders_and_lists_attempts(self):
         root = self.task(title="Grouped work", agent="claude")
         self.fail(root["id"], LIMIT_TEXT)
+        reset_limits()  # the retry starts after the limit has reset
         time.sleep(0.02)
         retry = self.task(title="Grouped retry", parent_id=root["id"], link="retry")
         self.succeed(retry["id"])
@@ -629,11 +651,18 @@ class NotificationTests(unittest.TestCase):
         fresh_loop_state()
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
+        unmetered_claude_rules()
         wait_for(lambda: any(n["id"] == "master" and n["runner_ok"] for n in cls.c.get("/api/fleet").json()["nodes"]))
 
     @classmethod
     def tearDownClass(cls):
         cls.ctx.__exit__(None, None, None)
+
+    def setUp(self):
+        reset_limits()
+
+    def tearDown(self):
+        reset_limits()
 
     def failed(self, parent=None, link=None, text=LIMIT_TEXT):
         body = {"agent": "claude", "prompt": "x", "title": "Notified work"}
@@ -649,6 +678,7 @@ class NotificationTests(unittest.TestCase):
         note = events.describe({"type": "task.failed", "task_id": tid, "data": {"title": "Notified work"}})
         self.assertEqual(note["title"], "Paused: usage limit")
         self.assertIn("resets", note["message"])
+        reset_limits()  # a later, unrelated failure happens after the limit has reset
         other = self.failed(text="boom")
         note = events.describe({"type": "task.failed", "task_id": other, "data": {"title": "Notified work"}})
         self.assertEqual(note["title"], "Task failed")
@@ -664,6 +694,7 @@ class NotificationTests(unittest.TestCase):
         events.PLUGINS.append({"name": "lineage", "events": {"task.failed"}, "command": [sys.executable, str(script)]})
         try:
             root = self.failed()
+            reset_limits()  # the retry starts after the limit has reset
             child = self.failed(parent=root, link="retry")
             for tid in (root, child):
                 events.run_plugins({"id": 1, "ts": 0, "task_id": tid, "type": "task.failed", "data": {"title": "Notified work"}})

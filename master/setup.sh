@@ -108,6 +108,19 @@ PY
 # Fleet Claude tasks use their own Claude Code profile, so they never share or disturb your own sessions.
 # Sign it in once: CLAUDE_CONFIG_DIR=~/.claude-fleet claude   (then /login)
 mkdir -p "$HOME/.claude-fleet" && chmod 700 "$HOME/.claude-fleet"
+# Fleet Codex tasks get a lean profile too (docs/SPEC-paid-budget.md 3.6): medium reasoning effort by default, no
+# plugins, memories or notify hook. Effort per task is passed on the command line, never written here.
+# Sign it in once: CODEX_HOME=~/.codex-fleet codex login   (until then the runner uses your default Codex home).
+# Setup never reads or copies your Codex credentials.
+mkdir -p "$HOME/.codex-fleet" && chmod 700 "$HOME/.codex-fleet"
+if [ ! -e "$HOME/.codex-fleet/config.toml" ]; then
+  {
+    # Only the model line is taken from your own Codex config, if it names one.
+    grep -m1 -E '^model[[:space:]]*=' "$HOME/.codex/config.toml" 2>/dev/null || true
+    echo 'model_reasoning_effort = "medium"'
+  } > "$HOME/.codex-fleet/config.toml"
+  chmod 600 "$HOME/.codex-fleet/config.toml"
+fi
 RPLIST="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
 write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
   "$HOME/Library/Logs/ai-fleet-runner.log" 5 \

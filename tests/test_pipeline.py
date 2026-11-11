@@ -78,6 +78,58 @@ class Machine(unittest.TestCase):
         with self.assertRaises(ValueError):
             PL.new(spec(reviewers=[]))
 
+    def test_models_are_stripped_before_comparing(self):
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude", "model": "claude-sonnet-5-5"},
+                        reviewers=[{"kind": "agent", "agent": "claude", "model": " claude-sonnet-5-5"}]))
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude", "model": " claude-sonnet-5-5 "},
+                        reviewers=[{"kind": "agent", "agent": "claude", "model": "claude-sonnet-5-5"}]))
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude"}, reviewers=[{"kind": "agent", "agent": "claude", "model": "   "}]))
+        p = PL.new(spec(builder={"agent": "claude", "model": " a "},
+                        reviewers=[{"kind": "agent", "agent": "claude", "model": " b "}]))
+        self.assertEqual(p["builder"]["model"], "a")
+        self.assertEqual(p["reviewers"][0]["model"], "b")
+        p = PL.new(spec(builder={"agent": "claude", "model": "  "},
+                        reviewers=[{"kind": "agent", "agent": "claude", "model": "b"}]))
+        self.assertNotIn("model", p["builder"])
+
+    def test_reviewer_may_differ_from_builder_by_model(self):
+        fable = {"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}
+        # builder claude with no model, reviewer claude with a model: allowed, and the model is kept.
+        p = PL.new(spec(builder={"agent": "claude"}, reviewers=[fable]))
+        self.assertEqual(p["reviewers"], [fable])
+        # different agent: allowed with or without a model
+        PL.new(spec(builder={"agent": "codex"}, reviewers=[fable]))
+        # builder with a model, reviewer a different model: allowed
+        PL.new(spec(builder={"agent": "claude", "model": "claude-sonnet-5-5"}, reviewers=[fable]))
+        # same agent and the same model, or both without: refused
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude", "model": "claude-fable-5-1"}, reviewers=[fable]))
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude"}, reviewers=[{"kind": "agent", "agent": "claude"}]))
+        # builder with a model, same-agent reviewer with none: refused (it would run on the node default)
+        with self.assertRaises(ValueError):
+            PL.new(spec(builder={"agent": "claude", "model": "claude-fable-5-1"},
+                        reviewers=[{"kind": "agent", "agent": "claude"}]))
+        # builder model must be a non-empty string; empty is normalised away
+        for bad in (["x"], 5, True):
+            with self.assertRaises(ValueError):
+                PL.new(spec(builder={"agent": "claude", "model": bad}, reviewers=[fable]))
+        p = PL.new(spec(builder={"agent": "claude", "model": ""}, reviewers=[fable]))
+        self.assertNotIn("model", p["builder"])
+        # a model only makes sense on agent reviewers
+        with self.assertRaises(ValueError):
+            PL.new(spec(reviewers=[{"kind": "role", "role": "reviewer", "model": "x"}]))
+
+    def test_model_reviewer_is_trusted_like_any_agent_reviewer(self):
+        p, _ = PL.start(PL.new(spec(builder={"agent": "claude"}, require_trusted=True,
+                                    reviewers=[{"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}])))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+
     def test_happy_path(self):
         p, actions = PL.start(PL.new(spec()))
         self.assertEqual(p["state"], "building")

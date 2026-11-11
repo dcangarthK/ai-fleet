@@ -23,6 +23,16 @@ def new(spec: dict) -> dict:
     reviewers = spec.get("reviewers")
     if not isinstance(builder, dict) or not isinstance(builder.get("agent"), str):
         raise ValueError("builder.agent is required")
+    builder = copy.deepcopy(builder)
+    builder_model = builder.get("model")
+    if builder_model is not None and not isinstance(builder_model, str):
+        raise ValueError("builder model must be a non-empty string")
+    builder_model = builder_model.strip() if builder_model else None
+    if builder_model:
+        builder["model"] = builder_model
+    else:
+        builder.pop("model", None)
+        builder_model = None
     if not isinstance(reviewers, list) or not reviewers:
         raise ValueError("at least one reviewer is required")
     clean_reviewers = []
@@ -33,9 +43,17 @@ def new(spec: dict) -> dict:
         name = reviewer.get(field)
         if not isinstance(name, str) or not name:
             raise ValueError(f"reviewer {field} is required")
-        if field == "agent" and name == builder["agent"]:
-            raise ValueError("builder cannot review itself")
-        clean_reviewers.append({"kind": field, field: name})
+        model = reviewer.get("model")
+        if model is not None and (field != "agent" or not isinstance(model, str) or not model.strip()):
+            raise ValueError("reviewer model must be a non-empty string and only applies to agent reviewers")
+        if model is not None:
+            model = model.strip()
+        # A same-agent reviewer must name a model different from the builder's. With no model it would run
+        # on the node default, which may be the builder's model. When the builder names no model we assume
+        # the reviewer's named model differs from the node default (accepted risk, orchestrator decision).
+        if field == "agent" and name == builder["agent"] and (model is None or model == builder_model):
+            raise ValueError("builder cannot review itself: a reviewer must differ in agent or model")
+        clean_reviewers.append({"kind": field, field: name} | ({"model": model} if model else {}))
     maximum = spec.get("max_rounds", 3)
     if not isinstance(maximum, int) or isinstance(maximum, bool) or not 1 <= maximum <= 20:
         raise ValueError("max_rounds must be between 1 and 20")
@@ -57,7 +75,7 @@ def new(spec: dict) -> dict:
         "max_rounds": maximum, "spec": spec.get("spec", ""),
         "repo": spec.get("repo"), "gate": spec.get("gate"), "mode": mode,
         "require_trusted": require_trusted, "bypass": bypass, "trusted_roles": list(dict.fromkeys(trusted_roles)),
-        "builder": copy.deepcopy(builder), "reviewers": clean_reviewers,
+        "builder": builder, "reviewers": clean_reviewers,
         "build_task": None, "reviews": {}, "history": [],
     }
 

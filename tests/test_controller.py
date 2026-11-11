@@ -724,6 +724,32 @@ Imported body.
         finally:
             self._forget_g5(instruction_scopes=scopes)
 
+    def test_repo_instructions_validate_scope_id_like_the_api(self):
+        root = TMP / "g5-instructions-scope"
+        for scope in ("role", "agent", "node"):
+            (root / scope).mkdir(parents=True, exist_ok=True)
+        files = {("role", "g5-ok-role"): True, ("role", "Bad_Role"): False,
+                 ("agent", "claude"): True, ("agent", "g5-nonagent"): False,
+                 ("node", "g5-real-node"): True, ("node", "g5-ghost-node"): False}
+        for (scope, scope_id) in files:
+            (root / scope / f"{scope_id}.md").write_text("Seed.\n")
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO nodes (id,name,status) VALUES ('g5-real-node','g5-real-host','pending')")
+        scopes = list(files)
+        self._forget_g5(instruction_scopes=scopes)
+        try:
+            imported = controller.fleet_instructions.import_repo(root)
+            self.assertCountEqual([(r["scope"], r["scope_id"]) for r in imported],
+                                  [key for key, ok in files.items() if ok])
+            with db() as c:
+                stored = {(r[0], r[1]) for r in c.execute("SELECT scope,scope_id FROM instructions")}
+            for key, ok in files.items():
+                self.assertEqual(key in stored, ok, key)
+        finally:
+            self._forget_g5(instruction_scopes=scopes)
+            with db() as c:
+                c.execute("DELETE FROM nodes WHERE id='g5-real-node'")
+
     def test_g5_skill_bind_front_matter_applies_on_first_import_only(self):
         root = TMP / "g5-skills"
         (root / "g5-bound").mkdir(parents=True, exist_ok=True)
@@ -917,6 +943,23 @@ Imported body.
         answers = [json.dumps({"verdict": "request_changes", "issues": [issue]}),
                    json.dumps({"verdict": "approve", "issues": []})]
         controller.pipeline_model_call = lambda role, spec, diff: answers.pop(0)
+
+        def settle(pipeline_id, ready):
+            # Drive the pipeline ourselves: poll the real tasks (the builder's gate result still comes
+            # through tasks.poll_task) and run a pipeline poll on the app's loop, instead of waiting for
+            # the background pollers to be scheduled.
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                current = self.c.get(f"/api/pipelines/{pipeline_id}").json()
+                found = ready(current)
+                if found:
+                    return found
+                ids = [current.get("build_task")] + [r.get("task_id") for r in current["reviews"].values()]
+                for task_id in filter(None, ids):
+                    self.c.portal.call(controller.tasks.poll_task, task_id)
+                self.c.portal.call(controller.poll_pipeline, pipeline_id)
+                self.c.portal.call(asyncio.sleep, 0.01)
+            raise AssertionError("pipeline did not reach the expected state")
         try:
             body = {"title": "Phase 7 pipeline", "spec": "Keep the greeting correct", "repo": "/repo",
                     "gate": "pytest", "mode": "auto-edit", "builder": {"agent": "claude"},
@@ -928,30 +971,26 @@ Imported body.
             build_id = response.json()["build_task"]
             FakeRunner.jobs[build_id].update(state="exited", exit_code=0, result="built",
                                              gate={"state": "passed", "exit_code": 0})
-            reviewing = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
-                                           p["reviews"].get("1", {}).get("task_id") else None)(
-                                               self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
+            reviewing = settle(pipeline_id, lambda p: p if p["state"] == "reviewing" and
+                               p["reviews"].get("1", {}).get("task_id") else None)
             review_id = reviewing["reviews"]["1"]["task_id"]
             review_body = [sent for path, sent in FakeRunner.calls if path == "/jobs" and sent["id"] == review_id][0]
             self.assertEqual((review_body["mode"], review_body["worktree"], review_body["repo"]),
                              ("read-only", False, "/repo"))  # original repo; the builder worktree is under the runner's denied dir
             FakeRunner.jobs[review_id].update(state="exited", exit_code=0,
                                               result=json.dumps({"verdict": "request_changes", "issues": [issue]}))
-            building = wait_for(lambda: (lambda p: p if p["state"] == "building" and p["round"] == 2 else None)(
-                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
+            building = settle(pipeline_id, lambda p: p if p["state"] == "building" and p["round"] == 2 else None)
             messages = [sent["text"] for path, sent in FakeRunner.calls if path == f"/jobs/{build_id}/message"]
             self.assertEqual(messages[-1].count("Greeting regression"), 1)
 
             FakeRunner.jobs[build_id].update(state="exited", exit_code=0, result="fixed",
                                              gate={"state": "passed", "exit_code": 0})
-            second_review = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
-                                                p["reviews"].get("1", {}).get("task_id") else None)(
-                                                    self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
+            second_review = settle(pipeline_id, lambda p: p if p["state"] == "reviewing" and
+                                   p["reviews"].get("1", {}).get("task_id") else None)
             second_review_id = second_review["reviews"]["1"]["task_id"]
             FakeRunner.jobs[second_review_id].update(
                 state="exited", exit_code=0, result=json.dumps({"verdict": "approve", "issues": []}))
-            ready = wait_for(lambda: (lambda p: p if p["state"] == "ready" else None)(
-                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
+            ready = settle(pipeline_id, lambda p: p if p["state"] == "ready" else None)
             self.assertEqual(ready["build_task"], build_id)
 
             controller.pipeline_model_call = lambda role, spec, diff: json.dumps(
@@ -960,8 +999,7 @@ Imported body.
                 {"kind": "role", "role": "reviewer"}], "max_rounds": 1}, headers=W).json()
             FakeRunner.jobs[escalated["build_task"]].update(state="exited", exit_code=0,
                                                             gate={"state": "passed", "exit_code": 0})
-            wait_for(lambda: self.c.get(f"/api/pipelines/{escalated['id']}").json()["state"] == "escalated",
-                     timeout=20)
+            settle(escalated["id"], lambda p: p["state"] == "escalated")
 
             cancelled = self.c.post("/api/pipelines", json={**body, "title": "Cancel me",
                 "reviewers": [{"kind": "role", "role": "reviewer"}]}, headers=W).json()
@@ -1001,6 +1039,67 @@ Imported body.
         finally:
             FakeRunner.agents["codex"] = None
             self.c.post("/api/refresh", headers=W)
+
+    def test_pipeline_loop_isolates_a_failing_pipeline(self):
+        p1 = self.c.post("/api/pipelines", json={
+            "title": "A", "spec": "x", "repo": "/r/a", "builder": {"agent": "claude"}, "max_rounds": 1,
+            "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}]}, headers=W).json()
+        p2 = self.c.post("/api/pipelines", json={
+            "title": "B", "spec": "x", "repo": "/r/b", "builder": {"agent": "claude"}, "max_rounds": 1,
+            "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}]}, headers=W).json()
+        seen = []
+        real_poll, real_secs = controller.poll_pipeline, controller.POLL_SECONDS
+
+        async def flaky(pipeline_id):
+            seen.append(pipeline_id)
+            if pipeline_id == p1["id"]:
+                raise RuntimeError("boom")
+
+        async def run_loop():
+            controller.poll_pipeline, controller.POLL_SECONDS = flaky, 0.01
+            task = asyncio.create_task(controller.pipeline_loop())
+            deadline = time.monotonic() + 5
+            while p2["id"] not in seen and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            task.cancel()
+        try:
+            self.c.portal.call(run_loop)
+        finally:
+            controller.poll_pipeline, controller.POLL_SECONDS = real_poll, real_secs
+            for p in (p1, p2):
+                self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
+        self.assertIn(p1["id"], seen)
+        self.assertIn(p2["id"], seen)
+
+    def test_agent_reviewer_model_is_passed_to_the_review_task(self):
+        body = {"title": "Model review", "spec": "do it", "repo": "/r/project", "gate": "pytest", "mode": "auto-edit",
+                "builder": {"agent": "claude"}, "max_rounds": 1,
+                "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}]}
+        refused = self.c.post("/api/pipelines", json=dict(
+            body, reviewers=[{"kind": "agent", "agent": "claude"}]), headers=W)
+        self.assertEqual(refused.status_code, 400)
+        for bad in (["x"], "", 7):
+            r = self.c.post("/api/pipelines", json=dict(body, builder={"agent": "claude", "model": bad}), headers=W)
+            self.assertEqual(r.status_code, 400 if bad != "" else 200, bad)
+            if r.status_code == 200:
+                self.assertNotIn("model", r.json()["builder"])
+                self.c.post(f"/api/pipelines/{r.json()['id']}/cancel", headers=W)
+        p = self.c.post("/api/pipelines", json=body, headers=W).json()
+        try:
+            self.assertEqual(p["reviewers"], body["reviewers"])
+            FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            for _ in range(200):
+                current = self.c.get(f"/api/pipelines/{p['id']}").json()
+                if current["reviews"].get("0", {}).get("task_id"):
+                    break
+                self.c.portal.call(controller.tasks.poll_task, p["build_task"])
+                self.c.portal.call(controller.poll_pipeline, p["id"])
+            rid = current["reviews"]["0"]["task_id"]
+            self.assertEqual(controller.tasks.get_task(rid)["model"], "claude-fable-5-1")
+            sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
+            self.assertEqual(sent["model"], "claude-fable-5-1")
+        finally:
+            self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
 
     def test_trusted_reviewer_threshold(self):
         import evaluations

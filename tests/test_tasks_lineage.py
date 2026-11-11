@@ -598,7 +598,12 @@ class LineageApiTests(unittest.TestCase):
         self.succeed(retry["id"])
         time.sleep(0.02)
         review = self.task(title="Grouped review", parent_id=retry["id"], link="review")
+        # Starts run in the background and bump updated_at: let the review's start land before the other item's
+        # activity, then settle the other item so it is unambiguously the newest (was flaky 1 in 4).
+        wait_for(lambda: self.get(review["id"])["state"] == "working")
+        time.sleep(0.02)
         other = self.task(title="Separate item")
+        self.succeed(other["id"])
         items = self.c.get("/api/work?limit=500").json()
         ids = [i["root_id"] for i in items]
         self.assertIn(root["id"], ids)

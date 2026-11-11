@@ -189,6 +189,10 @@ def describe(event: dict) -> dict | None:
         model, node = data.get("model") or "A model", data.get("node") or "a node"
         return {"title": f"Model install {data['state']}", "subtitle": f"{model} on {node}",
                 "message": (data.get("reason") or "See Models in AI Fleet.")[:160]}
+    if kind == "budget.soft":
+        return {"title": "Soft token budget reached", "subtitle": str(data.get("key") or "A paid model"),
+                "message": f"Fleet tasks used {data.get('used')} tokens today (soft budget {data.get('soft')}). "
+                           "Tasks still start; see Budget in AI Fleet."}
     if kind == "node.offline":
         return {"title": "Node offline", "subtitle": data.get("node") or data.get("name") or "A node",
                 "message": "It stopped answering. Tasks won't be sent to it until it's back."}

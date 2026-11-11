@@ -46,6 +46,28 @@ def is_limit_text(text: str | None) -> bool:
     return "limit" in low and bool(re.search(r"\breset|try again", low))
 
 
+_PROVIDER_LIMIT_RE = re.compile(
+    r"^\s*(?:error\s*[:\-]\s*)?(?:you(?:'|\u2019)ve hit your\b|you have hit your\b|claude(?: ai)? usage limit reached)",
+    re.IGNORECASE)
+
+
+def provider_limit(task: dict, job: dict | None = None) -> bool:
+    """Whether a failed run hit the provider's own usage limit; this, not is_limit_text, drives enforcement.
+
+    The run must have exited non-zero, and the provider's own message must open the text: Claude's result
+    ("You've hit your 5-hour limit ... resets ...") or the Codex error line the runner captured (job.error).
+    A report that merely talks about limits and reset times doesn't count."""
+    job = job or {}
+    code = job.get("exit_code") if job.get("exit_code") is not None else task.get("exit_code")
+    if code in (0, None):
+        return False
+    for text in (job.get("result") or task.get("result"), job.get("error") or task.get("error")):
+        head = (text or "").lstrip()
+        if _PROVIDER_LIMIT_RE.match(head) and is_limit_text(tail(head)):
+            return True
+    return False
+
+
 def failure_reason(task: dict, job: dict | None = None, state: str | None = None) -> str | None:
     """Why `task` ended badly (first match wins), or None when `state` is not a failure state.
 

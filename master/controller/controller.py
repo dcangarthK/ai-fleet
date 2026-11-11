@@ -735,13 +735,21 @@ def set_node_model(name: str, catalog_id: str, request: NodeModelRequest) -> dic
         derived_ok = not params or ("fleet-" + catalog_id) in _json(node["models"], [])
         state = "ready" if request.desired == "present" and installed and derived_ok else (
             "removed" if request.desired == "absent" and not installed else "checking")
-        c.execute(
-            "INSERT OR REPLACE INTO node_models "
-            "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
-            "VALUES (?,?,?,?,NULL,NULL,'{}',?,?,?,?,?)",
-            (node["id"], catalog_id, request.desired, state, ownership, json.dumps(params),
-             int(request.override_fit), int(request.confirm_preexisting), time.time()),
-        )
+        values = (request.desired, state, ownership, json.dumps(params), int(request.override_fit),
+                  int(request.confirm_preexisting), time.time())
+        if old:
+            # Conditional on the row not being claimed or busy *now*, so a concurrent reconcile claim always wins.
+            written = c.execute(
+                "UPDATE node_models SET desired=?,state=?,reason=NULL,op_id=NULL,progress='{}',ownership=?,params=?,"
+                "override_fit=?,confirm_preexisting=?,updated_at=? WHERE node=? AND catalog_id=? AND NOT " + _BUSY_SQL,
+                (*values, node["id"], catalog_id)).rowcount
+        else:
+            written = c.execute(
+                "INSERT OR IGNORE INTO node_models (desired,state,ownership,params,override_fit,confirm_preexisting,"
+                "updated_at,node,catalog_id,reason,op_id,progress) VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL,'{}')",
+                (*values, node["id"], catalog_id)).rowcount
+        if not written:
+            raise HTTPException(409, f"{model['reference']} has an operation in progress on {node['name']}; wait for it to finish")
         result = dict(c.execute("SELECT * FROM node_models WHERE node=? AND catalog_id=?",
                                 (node["id"], catalog_id)).fetchone())
     result["params"] = _json(result["params"], {})
@@ -817,23 +825,26 @@ async def assign(a: Assignment) -> dict:
         if not installed and not catalog:
             raise HTTPException(400, f"{model} is not in the model catalog")
         params = validate_model_params((_json(catalog["defaults"], {}) if catalog else {}) | a.params)
-        state = "active" if installed else "pending_install"
         catalog_id = catalog["id"] if catalog else None
-        if not installed:
+        if params and not catalog_id:
+            raise HTTPException(400, "model settings need a catalog model (they're applied as a fleet-* derived model)")
+        # What will actually be routed: the derived fleet-* model when there are settings, else the base model.
+        routed_name = ("fleet-" + catalog_id) if params else model
+        installed = installed and routed_name in json.loads(node["models"])
+        if not installed and not a.ensure_model:
+            raise HTTPException(400, f"{a.node} does not have {routed_name} yet; pass ensure_model to install it")
+        state = "active" if installed else "pending_install"
+        row = c.execute("SELECT * FROM node_models WHERE node=? AND catalog_id=?", (node["id"], catalog_id)).fetchone() if catalog_id else None
+        busy = row is not None and (row["state"] == "starting" or (row["op_id"] and row["state"] in BUSY_INSTALL))
+        if busy and (row["desired"] != "present" or _json(row["params"], {}) != params):
+            raise HTTPException(409, f"{model} is being changed on {node['name']} with different settings; wait for it to finish")
+        if not installed and not busy:
             c.execute(
                 "INSERT INTO node_models "
                 "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
                 "VALUES (?,?, 'present','checking',NULL,NULL,'{}','fleet-managed',?,0,0,?) "
-                "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',"
-                "state=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
-                "AND node_models.desired='present' THEN node_models.state ELSE 'checking' END,"
-                "reason=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
-                "AND node_models.desired='present' THEN node_models.reason ELSE NULL END,"
-                "op_id=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
-                "AND node_models.desired='present' THEN node_models.op_id ELSE NULL END,"
-                "params=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
-                "AND node_models.desired='present' THEN node_models.params ELSE excluded.params END,"
-                "updated_at=excluded.updated_at",
+                "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',state='checking',reason=NULL,op_id=NULL,"
+                "params=excluded.params,updated_at=excluded.updated_at WHERE NOT " + _BUSY_SQL.replace("state", "node_models.state").replace("op_id", "node_models.op_id"),
                 (node["id"], catalog_id, json.dumps(params), time.time()),
             )
         c.execute(
@@ -866,6 +877,8 @@ def dashboard() -> str:
 
 UI_DIST = Path(__file__).with_name("ui") / "dist"
 BUSY_INSTALL = ("starting", "checking", "pulling", "configuring", "verifying", "removing")
+_BUSY_SQL = ("(state='starting' OR (op_id IS NOT NULL AND state IN ('starting','checking','pulling','configuring',"
+             "'verifying','removing')))")
 
 
 @app.get("/app", include_in_schema=False)

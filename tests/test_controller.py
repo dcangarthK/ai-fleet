@@ -620,6 +620,31 @@ class ControllerTests(unittest.TestCase):
         with db() as c:
             c.execute("DELETE FROM node_models WHERE node='master' AND catalog_id='tiny-1b'")
 
+    def test_role_with_settings_waits_for_the_derived_model(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b", "defaults": {"temperature": 0.1}}, headers=W)
+        FakeRunner.models["tiny:1b"] = True
+        FakeRunner.models.pop("fleet-tiny-1b", None)
+        FakeRunner.op_script = ["configuring"] * 50
+        try:
+            self.c.post("/api/refresh", headers=W)
+            r = self.c.post("/api/roles", json={"role": "fast", "node": "master", "model": "tiny:1b", "ensure_model": True}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            a = [x for x in r.json()["assignments"] if x["role"] == "fast" and x["model"] == "tiny:1b"][0]
+            self.assertEqual(a["state"], "pending_install")
+            # A different setting while that install runs is refused rather than silently ignored.
+            self.wait_install("tiny-1b", "configuring")
+            r = self.c.post("/api/roles", json={"role": "coder", "node": "master", "model": "tiny:1b", "ensure_model": True,
+                                                 "params": {"temperature": 0.9}}, headers=W)
+            self.assertEqual(r.status_code, 409, r.text)
+        finally:
+            FakeRunner.op_script = []
+            for op in FakeRunner.ops.values():
+                op["script"] = ["ready"]
+            self.wait_install("tiny-1b", "ready")
+            self.c.request("DELETE", "/api/roles", json={"role": "fast", "node": "master", "model": "tiny:1b"}, headers=W)
+            self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent", "confirm_preexisting": True}, headers=W)
+            self.wait_install("tiny-1b", "removed")
+
     def test_preexisting_model_is_marked(self):
         self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
         FakeRunner.models["tiny:1b"] = False  # on the node before the fleet managed it

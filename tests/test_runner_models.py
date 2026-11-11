@@ -264,6 +264,15 @@ class RunnerModels(unittest.TestCase):
         self.assertEqual(op["id"], again["id"])
         self.wait_op(op["id"])
 
+    def test_same_ref_with_different_settings_is_a_conflict(self):
+        FakeOllama.state["pull_delay"] = 0.3
+        self.start()
+        _, op = self.req("POST", "/models/ensure", {"ref": "qwen3:8b"})
+        status, _ = self.req("POST", "/models/ensure", {"ref": "qwen3:8b", "derived": "fleet-qwen3-8b",
+                                                        "params": {"temperature": 0}})
+        self.assertEqual(409, status)
+        self.wait_op(op["id"])
+
     def test_refused_without_remote_management(self):
         self.start({"remote_management": False})
         self.assertEqual(403, self.req("POST", "/models/ensure", {"ref": "tiny:1b"})[0])

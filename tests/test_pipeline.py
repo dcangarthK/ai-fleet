@@ -91,6 +91,65 @@ class Machine(unittest.TestCase):
         self.assertEqual(p["state"], "ready")
         self.assertEqual(actions, [])
 
+    def test_agent_review_is_trusted(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        self.assertFalse(p["reviews"]["0"]["trusted"])
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+        self.assertTrue(p["reviews"]["1"]["trusted"])
+
+    def test_role_review_is_trusted_only_when_listed(self):
+        reviewers = [{"kind": "role", "role": "reviewer"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers, trusted_roles=["reviewer"])))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+        self.assertTrue(p["reviews"]["0"]["trusted"])
+
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers)))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "escalated")
+        self.assertFalse(p["reviews"]["0"]["trusted"])
+
+    def test_role_fallback_answer_is_never_trusted(self):
+        reviewers = [{"kind": "role", "role": "reviewer"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers, trusted_roles=["reviewer"])))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"),
+                           "diff": DIFF, "fallback": True})
+        self.assertEqual(p["state"], "escalated")
+        self.assertTrue(p["reviews"]["0"]["fallback"])
+        self.assertFalse(p["reviews"]["0"]["trusted"])
+
+    def test_require_trusted_false_keeps_old_behaviour(self):
+        reviewers = [{"kind": "role", "role": "reviewer"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers, require_trusted=False)))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+
+    def test_no_trusted_review_escalation_keeps_untrusted_issues_in_history(self):
+        reviewers = [{"kind": "role", "role": "reviewer"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers)))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0,
+                           "raw": review("request_changes", SQLI), "diff": DIFF})
+        self.assertEqual(p["state"], "escalated")
+        self.assertEqual(p["history"][-1]["note"], "no trusted review")
+        self.assertEqual(p["history"][-1]["issues"], 1)
+        self.assertEqual(p["reviews"]["0"]["issues"], [SQLI])
+
+    def test_explicit_agent_abstention_is_trusted(self):
+        reviewers = [{"kind": "agent", "agent": "claude"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers)))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("abstain"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+        self.assertTrue(p["reviews"]["0"]["trusted"])
+
     def test_issues_go_back_to_the_builder_then_ready(self):
         p, _ = PL.start(PL.new(spec()))
         p, _ = PL.step(p, {"type": "build", "state": "review"})
@@ -140,7 +199,7 @@ class Machine(unittest.TestCase):
         self.assertEqual(p["state"], "ready")
 
     def test_reasons_for_unusable_reviews_are_kept(self):
-        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.start(PL.new(spec(require_trusted=False)))
         p, _ = PL.step(p, {"type": "build", "state": "review"})
         p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "", "diff": DIFF, "reason": "model call failed: ReadTimeout"})
         p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": "", "diff": DIFF, "reason": "master: on battery (28%)"})

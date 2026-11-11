@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -1135,15 +1136,19 @@ class PipelineRequest(BaseModel):
     reviewers: list[dict]
     max_rounds: int = 3
     mode: str = "auto-edit"
+    require_trusted: bool = True
+    trusted_roles: list[str] = Field(default_factory=list)
 
 
 def pipeline_view(row) -> dict:
     value = dict(row)
-    for field, fallback in (("builder", {}), ("reviewers", []), ("reviews", {}), ("history", [])):
+    for field, fallback in (("builder", {}), ("reviewers", []), ("reviews", {}), ("history", []),
+                            ("trusted_roles", [])):
         try:
-            value[field] = json.loads(value[field])
+            value[field] = json.loads(value.get(field))
         except (ValueError, TypeError):
             value[field] = fallback
+    value["require_trusted"] = bool(value.get("require_trusted", 1))
     return value
 
 
@@ -1181,6 +1186,7 @@ async def model_call(role: str, spec: str, diff: str) -> str:
 
 
 REVIEW_TIMEOUT = float(os.environ.get("FLEET_REVIEW_TIMEOUT", "1200"))
+FLEET_REVIEW_MAX_CHARS = int(os.environ.get("FLEET_REVIEW_MAX_CHARS", "12000"))
 
 
 async def pipeline_model_call(role: str, spec: str, diff: str) -> str:
@@ -1195,17 +1201,83 @@ def role_fallback(role: str) -> str | None:
     return row["fallback"] if row and row["fallback"] else None
 
 
-async def role_review(role: str, spec: str, diff: str) -> tuple[str, str | None]:
-    """Ask a role for a review; on an error or timeout try its fallback once. Returns (raw, reason-if-failed)."""
+def _review_diff_chunks(diff: str) -> list[str]:
+    """Pack whole-file git diff sections into model-sized chunks."""
+    if len(diff) <= FLEET_REVIEW_MAX_CHARS:
+        return [diff]
+    boundaries = [match.start() for match in re.finditer(r"^diff --git ", diff, re.MULTILINE)]
+    if not boundaries:
+        return [diff]
+    files = []
+    for index, start in enumerate(boundaries):
+        begin = 0 if index == 0 else start
+        end = boundaries[index + 1] if index + 1 < len(boundaries) else len(diff)
+        files.append(diff[begin:end])
+    chunks = []
+    current = ""
+    for file_diff in files:
+        if current and len(current) + len(file_diff) > FLEET_REVIEW_MAX_CHARS:
+            chunks.append(current)
+            current = ""
+        current += file_diff
+        if len(current) > FLEET_REVIEW_MAX_CHARS:
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _review_chunk_name(diff: str, index: int) -> str:
+    files = []
+    for line in diff.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            parts = []
+        name = parts[3].strip('"') if len(parts) >= 4 else ""
+        files.append(name[2:] if name.startswith("b/") else name)
+    return ", ".join(files) if files else f"diff chunk {index + 1}"
+
+
+async def _role_review_chunk(role: str, spec: str, diff: str) -> tuple[str, str | None, bool]:
+    """Call one role for one chunk, trying its fallback only after a call failure."""
     reasons = []
     for name in dict.fromkeys(r for r in (role, role_fallback(role)) if r):
         try:
             result = pipeline_model_call(name, spec, diff)
             raw = await result if inspect.isawaitable(result) else result
-            return raw, (f"answered by fallback role {name} after: {reasons[0]}" if reasons else None)
+            used_fallback = name != role
+            reason = f"answered by fallback role {name} after: {reasons[0]}" if used_fallback else None
+            return raw, reason, used_fallback
         except Exception as exc:  # noqa: BLE001 - any failure means "try the fallback, then give up"
             reasons.append(f"{name}: {exc.__class__.__name__}{(': ' + str(exc)[:120]) if str(exc) else ''}")
-    return "", "model call failed (" + "; ".join(reasons) + ")"
+    return "", "model call failed (" + "; ".join(reasons) + ")", False
+
+
+async def role_review(role: str, spec: str, diff: str) -> tuple[str, str | None, bool]:
+    """Review each whole-file chunk and return one grounded merged review plus fallback provenance."""
+    issues = []
+    verdict = "approve"
+    fallback = False
+    notes = []
+    for index, chunk in enumerate(_review_diff_chunks(diff)):
+        name = _review_chunk_name(chunk, index)
+        raw, reason, chunk_fallback = await _role_review_chunk(role, spec, chunk)
+        fallback = fallback or chunk_fallback
+        if not raw:
+            return "", (f"{reason} for {name}" if reason else f"invalid review for {name}"), fallback
+        parsed = pipeline_machine.parse_review(raw, chunk)
+        if parsed.get("status") != "valid" and parsed.get("verdict") != "abstain":
+            return "", f"invalid review for {name}", fallback
+        if parsed.get("verdict") == "request_changes":
+            verdict = "request_changes"
+        issues.extend(parsed.get("issues", []))
+        if reason:
+            notes.append(f"{name}: {reason}")
+    return json.dumps({"verdict": verdict, "issues": issues}), ("; ".join(notes) or None), fallback
 
 
 def review_prompt(spec: str, diff: str, branch: str | None = None) -> str:
@@ -1255,9 +1327,10 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
             reviewer = p["reviewers"][index]
             diff = await _pipeline_diff(p)
             if reviewer["kind"] == "role":
-                raw, reason = await role_review(reviewer["role"], p["spec"], diff)
+                raw, reason, fallback = await role_review(reviewer["role"], p["spec"], diff)
                 p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
-                                                       "raw": raw, "diff": diff, "reason": reason})
+                                                       "raw": raw, "diff": diff, "reason": reason,
+                                                       "fallback": fallback})
             else:
                 builder = tasks.get_task(p["build_task"])
                 try:
@@ -1361,6 +1434,8 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
             raise HTTPException(400, f"reviewer agent must be one of {sorted(tasks.AGENTS)}")
         if reviewer.get("kind") == "role" and not ROLE_RE.fullmatch(str(reviewer.get("role", ""))):
             raise HTTPException(400, "reviewer role must be a role name")
+    if any(not ROLE_RE.fullmatch(role) for role in raw["trusted_roles"]):
+        raise HTTPException(400, "trusted_roles must contain role names")
     try:
         p = pipeline_machine.new(raw)
     except ValueError as exc:
@@ -1369,11 +1444,15 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
     p, actions = pipeline_machine.start(p)
     p |= {"id": identifier, "created_at": now, "updated_at": now}
     with db() as c:
-        c.execute("INSERT INTO pipelines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-            p["id"], p["title"], p["state"], p["round"], p["max_rounds"], p["spec"], p.get("repo"),
-            p.get("gate"), p["mode"], json.dumps(p["builder"]), json.dumps(p["reviewers"]), p.get("build_task"),
-            json.dumps(p["reviews"]), json.dumps(p["history"]), now, now,
-        ))
+        c.execute("""INSERT INTO pipelines
+            (id,title,state,round,max_rounds,spec,repo,gate,mode,builder,reviewers,build_task,reviews,history,
+             created_at,updated_at,require_trusted,trusted_roles)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                p["id"], p["title"], p["state"], p["round"], p["max_rounds"], p["spec"], p.get("repo"),
+                p.get("gate"), p["mode"], json.dumps(p["builder"]), json.dumps(p["reviewers"]), p.get("build_task"),
+                json.dumps(p["reviews"]), json.dumps(p["history"]), now, now, int(p["require_trusted"]),
+                json.dumps(p["trusted_roles"]),
+            ))
     _pipeline_events(p, 0)
     try:
         p = await _pipeline_actions(p, actions)

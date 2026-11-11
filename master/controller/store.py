@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 CREATE TABLE IF NOT EXISTS pipelines (
     id TEXT PRIMARY KEY, title TEXT, state TEXT, round INTEGER, max_rounds INTEGER,
     spec TEXT, repo TEXT, gate TEXT, mode TEXT, builder TEXT, reviewers TEXT,
-    build_task TEXT, reviews TEXT, history TEXT, created_at REAL, updated_at REAL);
+    build_task TEXT, reviews TEXT, history TEXT, created_at REAL, updated_at REAL,
+    require_trusted INTEGER DEFAULT 1, trusted_roles TEXT DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, type TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS tokens (
@@ -73,6 +74,7 @@ MIGRATIONS = {
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
               "cleaned_at": "REAL"},
+    "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'"},
 }
 
 

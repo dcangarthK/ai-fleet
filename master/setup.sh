@@ -105,10 +105,14 @@ with open(tmp, "w", encoding="utf-8") as handle:
 os.chmod(tmp, 0o600)
 os.replace(tmp, path)
 PY
+# Fleet Claude tasks use their own Claude Code profile, so they never share or disturb your own sessions.
+# Sign it in once: CLAUDE_CONFIG_DIR=~/.claude-fleet claude   (then /login)
+mkdir -p "$HOME/.claude-fleet" && chmod 700 "$HOME/.claude-fleet"
 RPLIST="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
 write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
-  "$HOME/Library/Logs/ai-fleet-runner.log" 4 \
+  "$HOME/Library/Logs/ai-fleet-runner.log" 5 \
   RUNNER_BIND "127.0.0.1:11436" \
+  CLAUDE_CONFIG_DIR "$HOME/.claude-fleet" \
   FLEET_DIR "$HOME/.ai-fleet" \
   OLLAMA_URL "http://127.0.0.1:11434" \
   PATH "$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \

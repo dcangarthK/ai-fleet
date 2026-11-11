@@ -99,6 +99,38 @@ class Collection(unittest.TestCase):
         self.assertIsNone(runner.MetricsCollector("/tmp", "x", collect=slow).snapshot())  # never collected: no data
 
 
+class OllamaProbe(unittest.TestCase):
+    """Up means /api/tags answers (as the old inline probe); /api/ps only lists what's loaded."""
+    def serve(self, paths):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path in paths:
+                    data = json.dumps(paths[self.path]).encode()
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_up_from_tags_loaded_from_ps(self):
+        url = self.serve({"/api/tags": {"models": []}, "/api/ps": {"models": [{"name": "qwen3:8b"}]}})
+        self.assertEqual(runner.ollama_status(url), {"up": True, "loaded": ["qwen3:8b"]})
+        no_ps = self.serve({"/api/tags": {"models": []}})
+        self.assertEqual(runner.ollama_status(no_ps), {"up": True, "loaded": []})
+        self.assertEqual(runner.ollama_status("http://127.0.0.1:1", timeout=0.5), {"up": False, "loaded": []})
+
+
 class Controller(unittest.TestCase):
     def test_allowed_controller_urls(self):
         ok = ["https://master.tail.ts.net:8701", "http://127.0.0.1:8700", "http://localhost:8700",

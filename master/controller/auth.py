@@ -71,6 +71,12 @@ def token_identity(token: str | None) -> tuple[str, str] | None:
     return (row["scope"], row["label"]) if row else None
 
 
+def token_id(token: str) -> str:
+    with db() as c:
+        row = c.execute("SELECT id FROM tokens WHERE hash=?", (_hash(token),)).fetchone()
+    return row["id"] if row else "?"
+
+
 def token_scope(token: str | None) -> str | None:
     identity = token_identity(token)
     return identity[0] if identity else None
@@ -115,7 +121,7 @@ async def access_control(request: Request, call_next):
             if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
                 return _deny(f"needs {required_scope(request)} access; this request asked for {scope}")
         request.state.scope = scope
-        request.state.actor = "local"
+        request.state.actor = request.state.actor_id = "local"
         if not public_enrollment:
             _presence(request)
         return await call_next(request)
@@ -132,6 +138,7 @@ async def access_control(request: Request, call_next):
     if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
         return _deny(f"needs {required_scope(request)} access; this token is {scope}")
     request.state.scope = scope
-    request.state.actor = label
+    request.state.actor = label  # for display and audit
+    request.state.actor_id = "token:" + token_id(token)  # unique: for rate limits and ownership
     _presence(request)
     return await call_next(request)

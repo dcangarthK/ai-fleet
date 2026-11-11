@@ -137,7 +137,8 @@ def activity_view(row) -> dict:
 def report_activity(body: ActivityIn, request: Request) -> dict:
     """Operate scope. A record of paid work that couldn't run as a fleet task: labelled "self-reported" everywhere,
     never used for enforcement, outcomes, pipelines or independence."""
-    actor = getattr(request.state, "actor", None) or "local"
+    # The token's unique id (labels aren't unique): rate limits and record ownership key on it (Codex review).
+    actor = getattr(request.state, "actor_id", None) or getattr(request.state, "actor", None) or "local"
     session = presence.session_of(request.headers)
     now = time.time()
     if not _rate(ACTIVITY_POSTS[actor], 60, 60, now):  # 60 a minute per actor, in total (Fable's note a)
@@ -554,11 +555,14 @@ async def heartbeat(request: Request):
         length = int(request.headers.get("content-length") or 0)
     except ValueError:
         length = HEARTBEAT_MAX_BYTES + 1
-    if length > HEARTBEAT_MAX_BYTES:
+    if length > HEARTBEAT_MAX_BYTES:  # an early refusal only: the stream below enforces the cap
         return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
-    raw = await request.body()
-    if len(raw) > HEARTBEAT_MAX_BYTES:
-        return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
+    buffer = bytearray()
+    async for part in request.stream():  # never buffer more than the cap, whatever Content-Length said (chunked too)
+        buffer += part
+        if len(buffer) > HEARTBEAT_MAX_BYTES:
+            return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
+    raw = bytes(buffer)
     node_id = request.headers.get("x-fleet-node") or ""
     sig = (request.headers.get("x-fleet-sig") or "").lower()
     try:

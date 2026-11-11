@@ -305,15 +305,22 @@ def parse_meminfo(text):
 
 
 def ollama_status(ollama_url, timeout=METRICS_COMMAND_TIMEOUT):
-    """{"up", "loaded"}: Ollama answering, and the models it has in memory (/api/ps)."""
+    """{"up", "loaded"}: Ollama answering /api/tags (the same probe as before), and the models it has in memory
+    (/api/ps; an Ollama without it is still up, with nothing listed)."""
     base = ollama_url.rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/api/tags", timeout=timeout) as response:
+            if not 200 <= response.status < 300:
+                return {"up": False, "loaded": []}
+    except (OSError, ValueError, urllib.error.URLError):
+        return {"up": False, "loaded": []}
     try:
         with urllib.request.urlopen(base + "/api/ps", timeout=timeout) as response:
             body = json.loads(response.read() or b"{}")
         loaded = [m.get("name") or m.get("model") for m in body.get("models") or [] if isinstance(m, dict)]
         return {"up": True, "loaded": sorted(m for m in loaded if isinstance(m, str))}
     except (OSError, ValueError, urllib.error.URLError, AttributeError):
-        return {"up": False, "loaded": []}
+        return {"up": True, "loaded": []}
 
 
 def collect_metrics(root, ollama_url, run=run_capped, read=None, ollama=ollama_status, platform=None):

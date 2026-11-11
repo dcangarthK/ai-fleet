@@ -252,6 +252,19 @@ class ActivityTests(LiveBase):
         self.assertEqual(done.json()["status"], "done")
         self.assertIsNotNone(done.json()["ended_at"])
 
+    def test_tokens_with_the_same_label_are_separate_actors(self):
+        # Codex t-960c3797 (low): labels aren't unique; rate limits and ownership key on the token id.
+        remote = TestClient(controller.app, base_url=PUBLIC)
+        first, second = auth.create_token("operate", "twin"), auth.create_token("operate", "twin")
+        body = {"title": "x", "kind": "subagent", "account_label": "spare", "model": OPUS, "status": "running"}
+        rec = remote.post("/api/activity", json=body, headers=W | {"Authorization": f"Bearer {first}"}).json()
+        other = remote.post("/api/activity", json={"id": rec["id"], "status": "done"},
+                            headers=W | {"Authorization": f"Bearer {second}"})
+        self.assertEqual(other.status_code, 404)
+        mine = remote.post("/api/activity", json={"id": rec["id"], "status": "done"},
+                           headers=W | {"Authorization": f"Bearer {first}"})
+        self.assertEqual(mine.status_code, 200, mine.text)
+
     def test_rate_limit_per_actor(self):
         for _ in range(60):
             self.assertEqual(self.post(note="n").status_code, 200)
@@ -372,6 +385,28 @@ class PinningTests(LiveBase):
         self.c.put("/api/budget/rules", json={"body": body}, headers=W)
         r = self.c.post("/api/tasks", json={"agent": "claude", "model": SONNET, "prompt": "x", "profile": "spare"}, headers=W)
         self.assertEqual(r.status_code, 409)
+
+    def test_a_named_profile_needs_an_explicit_model(self):
+        # Codex t-960c3797 (high): a named profile has its own config dir, so the runner's reported default
+        # (the fleet profile's) may not be what it runs.
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "x", "kind": "draft", "profile": "spare"}, headers=W)
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("model", r.json()["detail"])
+        self.ok(agent="claude", model=SONNET, kind="draft", profile="spare")  # with a model it runs there
+
+    def test_independence_with_no_model_on_a_named_profile_is_unresolvable(self):
+        build = self.ok(agent="claude", model=SONNET, kind="draft")
+        node = next(n for n in tasks.node_rows() if n["id"] == "master")
+        t = tasks.TaskIn(agent="claude", prompt="review", kind="review", parent_id=build["id"])
+        original = budget.node_default_model
+        budget.node_default_model = lambda agent, node_id=None: "claude-fable-5-2"
+        try:
+            self.assertIsNone(tasks.check_independence(t, "review", "claude", None, node, False, profile="fleet"))
+            with self.assertRaises(tasks.HTTPException) as caught:
+                tasks.check_independence(t, "review", "claude", None, node, False, profile="spare")
+            self.assertIn("can't tell which", caught.exception.detail)
+        finally:
+            budget.node_default_model = original
 
     def test_test_kind_exists_and_fable_may_not_test(self):
         self.assertIn("test", budget.KINDS)
@@ -529,6 +564,21 @@ class HeartbeatTests(LiveBase):
         self.assertEqual(self.beat(ts=ts + 1).status_code, 401)  # ...but its ts advanced: no replay later
         big = {"ok": True, "pad": "x" * (65 * 1024)}
         self.assertEqual(self.beat(body=big, ts=ts + 3).status_code, 413)
+
+    def test_a_chunked_body_is_cut_off_at_the_cap_whatever_content_length_says(self):
+        # Codex t-960c3797 (medium): no Content-Length (chunked) must not let a huge body be buffered.
+        def body():
+            for _ in range(80):
+                yield b"x" * 1024
+
+        r = self.c.post("/api/nodes/heartbeat", content=body(),
+                        headers={"X-Fleet-Node": "master", "X-Fleet-Ts": str(int(time.time())), "X-Fleet-Sig": "0" * 64})
+        self.assertEqual(r.status_code, 413)
+        lying = self.c.post("/api/nodes/heartbeat", content=b"x" * (70 * 1024),
+                            headers={"Content-Length": "10", "X-Fleet-Node": "master", "X-Fleet-Ts": "1",
+                                     "X-Fleet-Sig": "0" * 64})
+        self.assertIn(lying.status_code, (400, 413, 401))
+        self.assertNotEqual(lying.status_code, 200)
 
     def test_bad_posts_never_use_up_the_nodes_own_allowance(self):
         for _ in range(5):

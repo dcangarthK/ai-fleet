@@ -997,15 +997,19 @@ def profile_slots(agent: str, profile: str, wanted_node: str | None) -> list[dic
     raise HTTPException(400, f"{agent} profile {profile} isn't ready or isn't signed in")
 
 
-def check_independence(t: "TaskIn", kind: str, agent: str, model: str | None, node: dict, pipeline: bool) -> dict | None:
+def check_independence(t: "TaskIn", kind: str, agent: str, model: str | None, node: dict, pipeline: bool,
+                       profile: str | None = "fleet") -> dict | None:
     """Ad-hoc review/test independence (docs/SPEC-live-monitor.md 6), after admission, on the resolved model. Raises
-    400 on a match with a recorded builder, or an unresolvable model, unless waived; returns the waiver or None."""
+    400 on a match with a recorded builder, or an unresolvable model, unless waived; returns the waiver or None.
+    The runner's reported default describes its fleet profile only: with no model named on any other profile the
+    model can't be resolved."""
     if pipeline or kind not in INDEPENDENT_KINDS or not t.parent_id:
         return None
     if t.independence == "waived":
         return {"waived": True, "reason": (t.independence_reason or "").strip()[:300]}
     import handoff  # local import: handoff builds on this module
-    resolved = model or (budget.node_default_model(agent, node["id"]) if agent in budget.PAID_AGENTS else None)
+    resolved = model or (budget.node_default_model(agent, node["id"])
+                         if agent in budget.PAID_AGENTS and (profile or "fleet") == "fleet" else None)
     if not resolved:
         raise HTTPException(400, f"independence: can't tell which {agent} model this {kind} would run, so it can't be "
                                  "checked against the builders; name a model, or set independence 'waived' with a reason")
@@ -1049,6 +1053,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             raise HTTPException(400, "profile is for Claude and Codex tasks")
         if not PROFILE_RE.fullmatch(t.profile):
             raise HTTPException(400, "profile must be a runner profile id")
+        if t.profile != "fleet" and not t.model:
+            # A named profile has its own config dir: the runner's reported default (the fleet profile's) may not be
+            # what it runs, so budget identity, kinds, limits and independence need the model named (Codex review).
+            raise HTTPException(400, f"name a model for a task pinned to profile {t.profile}")
     if t.independence is not None:
         if t.independence != "waived":
             raise HTTPException(400, "independence can only be 'waived'")
@@ -1140,7 +1148,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         slot = next((s for s in mine if usable(s)), mine[0] if mine else None)
     account = (slot["account"] if slot else None) if agent in budget.PAID_AGENTS else None
     # Before the row and any budget decision is logged, so a refused task leaves no trace (Fable's note b).
-    waiver = check_independence(t, kind, agent, model, node, pipeline)
+    waiver = check_independence(t, kind, agent, model, node, pipeline, slot["profile"] if slot else "fleet")
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None}

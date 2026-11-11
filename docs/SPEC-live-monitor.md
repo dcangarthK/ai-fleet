@@ -318,3 +318,15 @@ names.
 - (b) The independence check runs before the task row is inserted and before `log_decision`, so a refused task
   leaves no trace.
 - (c) The shared bridge helper must keep `wait_tasks` at local/operate scope, so presence from waits still counts.
+
+## 13. Owner requirement (2026-11-11 20:40): the console shows what's happening now
+- (a) **Limit state from the account.** A task's "Paused: limit, resets T" comes from the **account's** current
+  limit state (`agent_usage` limit and `resets_at`, per account label and identity), not from the copy saved on
+  the task row. Once the account's limit has cleared, by a later successful run or by the owner reset in (b), a
+  paused task shows "Limit cleared: resume or hand off" (attention). It never shows a stale reset time.
+- (b) **Owner reset.** An admin-only "Limit reset by owner" action per account on the Budget and Live pages
+  (`POST /api/budget/accounts/<label>/reset`, admin scope). It records an event and clears that account's active
+  limit. The owner can reset subscription limits by hand, and the controller can't detect that on its own.
+- (c) **Handoffs shown automatically.** When work moves to another task, whether by `parent_id` + `link: retry` or by
+  Part C's handoff, the source shows "Handed off to <task>" without anyone recording it.
+- Tests for (a), (b) and (c).

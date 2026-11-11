@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Master node (Laptop 1): Tailscale tag, LiteLLM gateway, fleet controller, Claude Code MCP servers.
 # Run once; safe to re-run.
+#   --services-only   (re)install just the controller, runner and Ollama services; skip the Tailscale
+#                     re-tag, the gateway bootstrap and the Claude Code MCP registration.
 set -euo pipefail
+SERVICES_ONLY=0
+[ "${1:-}" = "--services-only" ] && SERVICES_ONLY=1
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$HERE/.." && pwd)"
 CODEX="$(command -v codex || echo /Applications/Codex.app/Contents/Resources/codex)"
@@ -39,6 +43,7 @@ command -v python3 >/dev/null || brew install python
 command -v uv >/dev/null || brew install uv
 UV="$(command -v uv)"
 
+if [ "$SERVICES_ONLY" = 0 ]; then
 # 1. Tailnet identity: the policy lets only tag:master reach node model ports.
 [ -x "$TS" ] || { brew install --cask tailscale; open -a Tailscale; echo "Sign in to Tailscale, then press Enter."; read -r; }
 "$TS" up --advertise-tags=tag:master --reset
@@ -51,13 +56,19 @@ if [ -s "$HERE/litellm/.vkey" ]; then
   security add-generic-password -s litellm-laptop1 -a "$USER" -w "$(cat "$HERE/litellm/.vkey")"
 fi
 rm -f "$HERE/litellm/.vkey"
+fi
+
+# Ollama as a login service so the master's own models stay up (and reachable from LiteLLM's container).
+if command -v brew >/dev/null && brew list ollama >/dev/null 2>&1; then
+  brew services start ollama >/dev/null || true
+fi
 
 # 3. Fleet controller as a login agent (dashboard: http://127.0.0.1:8700).
 mkdir -p "$HOME/Library/LaunchAgents"
 PLIST="$HOME/Library/LaunchAgents/local.ai-fleet.controller.plist"
 write_launchd_plist "$PLIST" "local.ai-fleet.controller" 1 1 "" \
-  "$HOME/Library/Logs/ai-fleet-controller.log" "$HOME/Library/Logs/ai-fleet-controller.log" 1 \
-  TAILSCALE_BIN "$TS" \
+  "$HOME/Library/Logs/ai-fleet-controller.log" "$HOME/Library/Logs/ai-fleet-controller.log" 2 \
+  TAILSCALE_BIN "$TS" FLEET_MASTER_MODEL_HOST "host.docker.internal" \
   "/bin/bash" "-c" 'set -a; . "$0/../litellm/.env"; set +a; exec "$1" run --script "$0/controller.py"' \
   "$HERE/controller" "$UV"
 launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
@@ -117,6 +128,8 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ "$registered" = 1 ] || { echo "Could not register the master runner token; re-run setup."; exit 1; }
+
+[ "$SERVICES_ONLY" = 1 ] && { echo "Services ready. Console: http://127.0.0.1:8700/app/"; exit 0; }
 
 # 5. Claude Code: Codex as a sub-agent, fleet bridge for local models + fleet management + tasks.
 claude mcp remove --scope user codex >/dev/null 2>&1 || true

@@ -58,6 +58,9 @@ check, draft). `budget_override` is the owner's (admin) decision; the orchestrat
 | Summaries, triage, commit messages, drafts | local `fast`/`coder` | Haiku |
 
 **Rules:**
+0. **Fable never builds, fixes or tests.** It's an expensive model, so it gives guidance only: it reviews plans,
+   specs and diffs, and gives the final review and green light. Builds, fixes, merges and test runs go to the
+   smaller models (Sonnet, Haiku, local), or to Opus where the owner names it as the builder.
 1. **Codex is the scarcest model.** Use it for final reviews, security-sensitive reviews and hard builds only.
    Never use it for merges, benchmarks, availability checks or routine re-reviews.
 2. **One reviewer per round.** A second paid reviewer only for security-sensitive changes or the final review.

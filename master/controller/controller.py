@@ -28,6 +28,7 @@ import inspect
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -523,6 +524,13 @@ class CallUsage(BaseModel):
     tokens_in: int | None = Field(default=None, ge=0)
     tokens_out: int | None = Field(default=None, ge=0)
     fallback_from: str | None = None
+    # Grounded ask_model calls only (SPEC-grounding §G4); plain calls leave these unset.
+    outcome: Literal["answered", "abstained", "escalated", "check_failed"] | None = None
+    logprob_min: float | None = Field(default=None, ge=0, le=1)
+    logprob_mean: float | None = Field(default=None, ge=0, le=1)
+
+
+CALL_OUTCOMES = ("answered", "abstained", "escalated", "check_failed")
 
 
 class NotifyToggle(BaseModel):
@@ -620,9 +628,10 @@ def put_role(name: str, body: RoleBody) -> dict:
 @app.post("/api/usage/calls")
 def record_call(body: CallUsage) -> dict:
     with db() as c:
-        c.execute("INSERT INTO call_usage (ts,role,model,ms,ok,tokens_in,tokens_out,fallback_from) "
-                  "VALUES (?,?,?,?,?,?,?,?)", (now(), body.role, body.model, body.ms, int(body.ok),
-                                               body.tokens_in, body.tokens_out, body.fallback_from))
+        c.execute("INSERT INTO call_usage (ts,role,model,ms,ok,tokens_in,tokens_out,fallback_from,outcome,"
+                  "logprob_min,logprob_mean) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                  (now(), body.role, body.model, body.ms, int(body.ok), body.tokens_in, body.tokens_out,
+                   body.fallback_from, body.outcome, body.logprob_min, body.logprob_mean))
     return {"recorded": True}
 
 
@@ -646,10 +655,18 @@ def call_stats(days: int = 7) -> list[dict]:
     result = []
     for (role, model), calls in sorted(grouped.items()):
         latencies = [call["ms"] for call in calls]
+        outcomes = {name: sum(call["outcome"] == name for call in calls) for name in CALL_OUTCOMES}
+        grounded = sum(outcomes.values())
+        scored = [call["logprob_mean"] for call in calls if call["logprob_mean"] is not None]
         result.append({"role": role, "model": model, "count": len(calls),
                        "error_rate": sum(not bool(call["ok"]) for call in calls) / len(calls),
                        "p50_ms": _percentile(latencies, .50), "p95_ms": _percentile(latencies, .95),
-                       "fallbacks": sum(call["fallback_from"] is not None for call in calls)})
+                       "fallbacks": sum(call["fallback_from"] is not None for call in calls),
+                       "grounded": grounded, "outcomes": outcomes,
+                       "abstain_rate": outcomes["abstained"] / grounded if grounded else None,
+                       "escalation_rate": outcomes["escalated"] / grounded if grounded else None,
+                       "check_failed_rate": outcomes["check_failed"] / grounded if grounded else None,
+                       "logprob_mean": sum(scored) / len(scored) if scored else None})
     return result
 
 

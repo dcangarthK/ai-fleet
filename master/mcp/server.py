@@ -21,6 +21,8 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "controller"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import grounded as grounded_logic  # noqa: E402
 import grounding  # noqa: E402
 
 GATEWAY = os.environ.get("LLM_GATEWAY_URL", "http://127.0.0.1:4000").rstrip("/")
@@ -54,7 +56,7 @@ def _redact(text: str) -> str:
     return text
 
 
-def _chat_once(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> tuple[str, str, dict]:
+def _chat_request(role: str, system: str, user: str, timeout: float, extra: dict) -> dict:
     if not ROLE_RE.match(role):
         raise ValueError("role must be a role name like 'coder'; see fleet_status")
     user = _redact(user)
@@ -63,17 +65,18 @@ def _chat_once(role: str, system: str, user: str, timeout: float = 600, json_mod
     resp = httpx.post(
         f"{GATEWAY}/v1/chat/completions",
         headers={"Authorization": f"Bearer {_api_key()}"},
-        json={
-            "model": role,
-            "temperature": 0.2,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            # Constrained JSON output, the same setting evals/run_evals.py scores reviewers with.
-            **({"response_format": {"type": "json_object"}} if json_mode else {}),
-        },
+        json={"model": role, "temperature": 0.2,
+              "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], **extra},
         timeout=timeout,
     )
     resp.raise_for_status()
-    body = resp.json()
+    return resp.json()
+
+
+def _chat_once(role: str, system: str, user: str, timeout: float = 600, json_mode: bool = False) -> tuple[str, str, dict]:
+    # Constrained JSON output, the same setting evals/run_evals.py scores reviewers with.
+    body = _chat_request(role, system, user, timeout,
+                         {"response_format": {"type": "json_object"}} if json_mode else {})
     content = body["choices"][0]["message"]["content"] or ""
     return (re.sub(r"<think>[\s\S]*?</think>", "", content).strip(),
             str(body.get("model") or role), body.get("usage") if isinstance(body.get("usage"), dict) else {})
@@ -131,12 +134,76 @@ def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bo
     return _chat_with_role(role, system, user, timeout, json_mode)[0]
 
 
+def _fleet_json(path: str):
+    response = httpx.get(f"{CONTROLLER}{path}", headers={"X-Fleet": "1"}, timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+def _grounded_chat(prompt: str, context: str):
+    try:
+        assignments = _fleet_json("/api/fleet").get("assignments", [])
+    except (httpx.HTTPError, ValueError, AttributeError):
+        assignments = []  # role temperature falls back to the grounded default
+    user = grounded_logic.user_message(prompt, context)
+
+    def chat(role: str) -> grounded_logic.Reply:
+        body = _chat_request(role, grounded_logic.system_prompt(role, bool(context)), user, 600, {
+            "temperature": grounded_logic.role_temperature(assignments, role),
+            "response_format": grounded_logic.response_format(role),
+            "logprobs": True,  # telemetry only
+        })
+        choice = body["choices"][0]
+        logprobs = choice.get("logprobs")
+        tokens = logprobs.get("content") if isinstance(logprobs, dict) else None
+        return grounded_logic.Reply(content=choice["message"]["content"] or "", model=str(body.get("model") or role),
+                                    usage=body.get("usage") if isinstance(body.get("usage"), dict) else {},
+                                    logprobs=tokens if isinstance(tokens, list) else None)
+    return chat
+
+
+def _spawn_escalation(role: str):
+    def spawn(agent: str, title: str, prompt: str) -> str:
+        response = httpx.post(f"{CONTROLLER}/api/tasks", headers={"X-Fleet": "1"}, timeout=30, json={
+            "agent": agent, "prompt": _redact(prompt), "title": title, "mode": "read-only", "worktree": False,
+            "role": role})
+        if response.is_error:
+            detail = response.json().get("detail", response.text) if response.content else ""
+            raise RuntimeError(f"error {response.status_code}: {detail}")
+        task_id = response.json().get("id")
+        if not isinstance(task_id, str):
+            raise RuntimeError("controller returned no task id")
+        return task_id
+    return spawn
+
+
+def _report_body(body: dict) -> None:
+    httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers={"X-Fleet": "1"}, timeout=5)
+
+
 @mcp.tool()
-def ask_model(role: str, prompt: str) -> str:
+def ask_model(role: str, prompt: str, context: str = "", grounded: bool = False) -> str:
     """Ask whichever fleet model holds a role. Usual roles: 'coder' (write/explain code),
-    'reviewer' (critique), 'fast' (quick summaries). fleet_status lists live roles."""
-    answer, answered_by = _chat_with_role(role, "You are a precise senior engineer. Be concise.", prompt)
-    return (f"Answered by fallback role {answered_by}.\n\n" + answer) if answered_by != role else answer
+    'reviewer' (critique), 'fast' (quick summaries). fleet_status lists live roles.
+    grounded=True returns JSON {status: ANSWER|ABSTAIN|ESCALATED, answer, quotes, tags, reason, ...}: quotes are
+    checked against `context` when given; on abstain or a failed check the role's fallback is tried once, then
+    (if fleet policy `escalation.agents` allows) a read-only Claude/Codex task is spawned and its task_id
+    returned for wait_tasks. A grounded call never returns an unchecked answer."""
+    if not grounded:
+        answer, answered_by = _chat_with_role(role, "You are a precise senior engineer. Be concise.", prompt)
+        return (f"Answered by fallback role {answered_by}.\n\n" + answer) if answered_by != role else answer
+    if not ROLE_RE.match(role):
+        return json.dumps({"status": "ABSTAIN", "answer": "", "quotes": [], "tags": [],
+                           "reason": "role must be a role name like 'coder'; see fleet_status"})
+    context = _redact(context)  # the quote check must run against exactly what the model saw
+    deps = grounded_logic.Deps(
+        chat=_grounded_chat(prompt, context),
+        fallback_for=_fallback_for,
+        escalation_agents=lambda r: grounded_logic.escalation_agents(_fleet_json("/api/policies"), r),
+        spawn=_spawn_escalation(role),
+        report=_report_body,
+    )
+    return json.dumps(grounded_logic.run(role, prompt, context, deps), indent=2)
 
 
 @mcp.tool()

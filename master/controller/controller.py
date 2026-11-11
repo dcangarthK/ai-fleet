@@ -1670,14 +1670,16 @@ async def assign(a: Assignment) -> dict:
         if busy and (row["desired"] != "present" or _json(row["params"], {}) != params):
             raise HTTPException(409, f"{model} is being changed on {node['name']} with different settings; wait for it to finish")
         if not installed and not busy:
-            c.execute(
+            written = c.execute(
                 "INSERT INTO node_models "
                 "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
                 "VALUES (?,?, 'present','checking',NULL,NULL,'{}','fleet-managed',?,0,0,?) "
                 "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',state='checking',reason=NULL,op_id=NULL,"
                 "params=excluded.params,updated_at=excluded.updated_at WHERE NOT " + _BUSY_SQL.replace("state", "node_models.state").replace("op_id", "node_models.op_id"),
                 (node["id"], catalog_id, json.dumps(params), time.time()),
-            )
+            ).rowcount
+            if not written:  # reconciliation claimed the row after we read it: don't record mismatched settings
+                raise HTTPException(409, f"{model} is being changed on {node['name']}; try again in a moment")
         c.execute(
             "INSERT INTO assignments (role,node,model,state,catalog_id,params) VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(role,node,model) DO UPDATE SET state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params",

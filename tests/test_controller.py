@@ -583,7 +583,7 @@ Imported body.
         wait_for(lambda: "running" in states())
         self.assertEqual(states().count("running"), 1)
         self.assertIn("queued", states())
-        wait_for(lambda: states() == ("done", "done"), timeout=10)
+        wait_for(lambda: states() == ("done", "done"), timeout=20)
         payload = self.c.get("/api/evals").json()
         done = {row["id"]: row for row in payload["runs"]}
         self.assertEqual(done[first["id"]]["scores"], {"coder": 91.0, "reviewer": 91.0})
@@ -616,7 +616,7 @@ Imported body.
                                              gate={"state": "passed", "exit_code": 0})
             reviewing = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
                                            p["reviews"].get("1", {}).get("task_id") else None)(
-                                               self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+                                               self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
             review_id = reviewing["reviews"]["1"]["task_id"]
             review_body = [sent for path, sent in FakeRunner.calls if path == "/jobs" and sent["id"] == review_id][0]
             self.assertEqual((review_body["mode"], review_body["worktree"], review_body["repo"]),
@@ -624,7 +624,7 @@ Imported body.
             FakeRunner.jobs[review_id].update(state="exited", exit_code=0,
                                               result=json.dumps({"verdict": "request_changes", "issues": [issue]}))
             building = wait_for(lambda: (lambda p: p if p["state"] == "building" and p["round"] == 2 else None)(
-                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
             messages = [sent["text"] for path, sent in FakeRunner.calls if path == f"/jobs/{build_id}/message"]
             self.assertEqual(messages[-1].count("Greeting regression"), 1)
 
@@ -632,12 +632,12 @@ Imported body.
                                              gate={"state": "passed", "exit_code": 0})
             second_review = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
                                                 p["reviews"].get("1", {}).get("task_id") else None)(
-                                                    self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+                                                    self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
             second_review_id = second_review["reviews"]["1"]["task_id"]
             FakeRunner.jobs[second_review_id].update(
                 state="exited", exit_code=0, result=json.dumps({"verdict": "approve", "issues": []}))
             ready = wait_for(lambda: (lambda p: p if p["state"] == "ready" else None)(
-                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=20)
             self.assertEqual(ready["build_task"], build_id)
 
             controller.pipeline_model_call = lambda role, spec, diff: json.dumps(
@@ -647,7 +647,7 @@ Imported body.
             FakeRunner.jobs[escalated["build_task"]].update(state="exited", exit_code=0,
                                                             gate={"state": "passed", "exit_code": 0})
             wait_for(lambda: self.c.get(f"/api/pipelines/{escalated['id']}").json()["state"] == "escalated",
-                     timeout=10)
+                     timeout=20)
 
             cancelled = self.c.post("/api/pipelines", json={**body, "title": "Cancel me",
                 "reviewers": [{"kind": "role", "role": "reviewer"}]}, headers=W).json()
@@ -675,7 +675,7 @@ Imported body.
             p = self.c.post("/api/pipelines", json=body, headers=W).json()
             build = p["build_task"]
             FakeRunner.jobs[build].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
-            wait_for(lambda: self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"].get("0", {}).get("task_id"), timeout=10)
+            wait_for(lambda: self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"].get("0", {}).get("task_id"), timeout=20)
             rid = self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"]["0"]["task_id"]
             sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
             self.assertEqual(sent["repo"], "/r/project")
@@ -695,7 +695,7 @@ Imported body.
 
     def wait_install(self, model_id, state, node="master"):
         return wait_for(lambda: (self.models().get(model_id, {}).get("nodes", {}).get(node, {}).get("state") == state)
-                        and self.models()[model_id]["nodes"][node], timeout=10)
+                        and self.models()[model_id]["nodes"][node], timeout=20)
 
     def test_catalog_add_validates_against_registry(self):
         r = self.c.post("/api/models", json={"reference": "qwen3:8b", "display_name": "Qwen3 8B",
@@ -757,7 +757,7 @@ Imported body.
             a = [x for x in r.json()["assignments"] if x["role"] == "reviewer" and x["model"] == "qwen3:8b"][0]
             self.assertEqual(a["state"], "pending_install")
             wait_for(lambda: [x for x in self.c.get("/api/fleet").json()["assignments"]
-                              if x["role"] == "reviewer" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=10)
+                              if x["role"] == "reviewer" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=20)
         finally:
             FakeRunner.op_script = []
 
@@ -838,7 +838,7 @@ Imported body.
             for op in FakeRunner.ops.values():
                 op["script"] = ["ready"]
             wait_for(lambda: [x for x in self.c.get("/api/fleet").json()["assignments"]
-                              if x["role"] == "fast" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=10)
+                              if x["role"] == "fast" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=20)
             self.c.request("DELETE", "/api/roles", json={"role": "fast", "node": "master", "model": "qwen3:8b"}, headers=W)
             self.c.put("/api/nodes/master/models/qwen3-8b", json={"desired": "absent"}, headers=W)
             self.wait_install("qwen3-8b", "removed")

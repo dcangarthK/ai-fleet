@@ -10,8 +10,10 @@ const SUGGESTED = ["coder", "reviewer", "fast"];
 function routing(a: Assignment, n: FleetNode | undefined, reason: string | null | undefined) {
   if (a.state === "pending_install") return { tone: "accent", label: "Waiting for install", why: "Switches on when the model is installed and tested." };
   if (a.state === "blocked" || a.state === "failed") return { tone: a.state === "blocked" ? "warn" : "bad", label: a.state === "blocked" ? "Install blocked" : "Install failed", why: explainReason(reason) };
-  if (a.routed === true) return { tone: "ok", label: "Live", why: "" };
-  if (a.routed === false) return { tone: "bad", label: "Not routed", why: a.route_reason ?? "No deployment exists in the gateway." };
+  // SQLite stores routed as 0/1; treat any non-null value as the gateway's answer.
+  const routed = a.routed == null ? null : Boolean(a.routed);
+  if (routed === true) return { tone: "ok", label: "Live", why: "" };
+  if (routed === false) return { tone: "bad", label: "Not routed", why: a.route_reason ?? "No deployment exists in the gateway." };
   // Older controllers don't report routing; fall back to node health.
   const live = !!n?.healthy && n.models.includes(a.model);
   if (live) return { tone: "ok", label: "Probably live", why: "The gateway didn't report routing; the node and model are up." };
@@ -28,7 +30,7 @@ export function RolesPage() {
   const [node, setNode] = useState("");
   const [model, setModel] = useState("");
   const assignments = fleet.data?.assignments ?? [];
-  const roles = Array.from(new Set([...SUGGESTED, ...assignments.map((a) => a.role)]));
+  const roles = Array.from(new Set([...SUGGESTED, ...assignments.map((a) => a.role), ...(fleet.data?.roles ?? []).map((r) => r.name)]));
   const chosen = nodes.find((n) => n.id === node);
   const catalog = models.data ?? [];
 

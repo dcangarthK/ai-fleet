@@ -21,7 +21,7 @@ export function OverviewPage() {
   const problems = all.filter((t) => t.state === "failed" || t.state === "interrupted");
   const up = nodes.filter((n) => nodeSignal(n) === "up").length;
   const routed = (fleet.data?.assignments ?? []).filter((a) => {
-    if (a.routed != null) return a.routed;
+    if (a.routed != null) return Boolean(a.routed);
     const n = nodes.find((x) => x.id === a.node_id);
     return n?.healthy && n.models.includes(a.model);
   }).length;

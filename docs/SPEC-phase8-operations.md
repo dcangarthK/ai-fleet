@@ -30,7 +30,8 @@ policies, skills, catalog edits.
 - Wrong/expired/used code → 403 and an audit event; 5 failures from one source in 10 minutes → 429.
 
 ## 4. Laptop awareness
-Runner `/health` adds `power: {on_battery: bool|null, battery_pct: int|null}` (macOS `pmset -g batt`, Linux
+Runner `/health` adds `power: {on_battery: bool|null, battery_pct: int|null, min_battery_pct: int, ok: bool}`
+(`ok` is false only when on battery and below the minimum) (macOS `pmset -g batt`, Linux
 `/sys/class/power_supply/*/`, Windows `GetSystemPowerStatus`; unknown → nulls). `runner.json` gains
 `"power": {"min_battery_pct": 30}`. A node on battery below its minimum is not eligible for `claude`/`codex`
 tasks (reason `on battery (23%)`); Ollama one-shots are still allowed.

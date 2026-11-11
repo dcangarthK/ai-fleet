@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageRow } from "./api";
+import { ApiError, get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageRow } from "./api";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -102,13 +102,18 @@ export function useTaskLog(id: string | undefined, active: boolean) {
 
 const RANK = { view: 0, operate: 1, admin: 2 } as const;
 
-/** What this browser's token may do. While unknown, hide nothing; the server enforces either way. */
+/**
+ * What this browser's token may do. Fails closed: while the scope is loading or can't be read, mutation
+ * controls stay hidden. (A controller too old to have /api/me answers 404; then show them and let the
+ * server enforce, as before.)
+ */
 export function useCan() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 300_000, refetchInterval: false, retry: 0 });
+  const legacy = me.error instanceof ApiError && me.error.status === 404;
   const scope = me.data?.scope;
   return {
     me: me.data,
-    operate: scope ? RANK[scope] >= RANK.operate : true,
-    admin: scope ? RANK[scope] >= RANK.admin : true,
+    operate: legacy || (scope ? RANK[scope] >= RANK.operate : false),
+    admin: legacy || (scope ? RANK[scope] >= RANK.admin : false),
   };
 }

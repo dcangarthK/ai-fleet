@@ -76,7 +76,7 @@ export function NodesPage() {
                   <div className="sub">{n.os} · <span className="mono">{n.ip}</span> · seen {ago(n.last_seen)}</div>
                 </td>
                 <td>{SIGNAL_LABEL[nodeSignal(n)]}
-                  {n.runner?.power?.on_battery && <div className={`sub ${n.runner.power.ok ? "" : "tone-warn"}`}>on battery{n.runner.power.battery_pct != null && ` (${n.runner.power.battery_pct}%)`}{!n.runner.power.ok && ": no agent tasks"}</div>}
+                  {n.runner?.power?.on_battery && <div className={`sub ${n.runner.power.ok === false ? "tone-warn" : ""}`}>on battery{n.runner.power.battery_pct != null && ` (${n.runner.power.battery_pct}%)`}{n.runner.power.ok === false && ": no agent tasks"}</div>}
                   {n.update_available && <div className="sub tone-info">runner update available</div>}
                 </td>
                 <td className="hide-sm">
@@ -140,8 +140,9 @@ export function NodeDetailPage() {
         {r?.allowed_roots && (<><dt>Folders</dt><dd>{r.allowed_roots.length ? <Tags items={r.allowed_roots} /> : <span className="tone-warn">No folders allowed yet; tasks can only use scratch space.</span>}</dd></>)}
         {r?.gate_profiles && (<><dt>Gates</dt><dd>{r.gate_profiles.length ? <Tags items={r.gate_profiles} /> : "none defined"}</dd></>)}
         {r?.power && (<><dt>Power</dt><dd>{r.power.on_battery == null ? "unknown" : r.power.on_battery ? `on battery${r.power.battery_pct != null ? ` (${r.power.battery_pct}%)` : ""}` : "plugged in"}
-          {!r.power.ok && <span className="tone-warn"> · below {r.power.min_battery_pct}%, so Claude and Codex tasks wait</span>}</dd></>)}
-        {node.update_available && (<><dt>Update</dt><dd className="tone-info">This node runs an older runner. Re-run <span className="mono">nodes/onboard.sh</span> on it to update; it keeps its settings.</dd></>)}
+          {r.power.ok === false && <span className="tone-warn"> · below {r.power.min_battery_pct ?? 30}%, so Claude and Codex tasks wait</span>}</dd></>)}
+        {node.update_available && (<><dt>Update</dt><dd><span className="tone-info">This node runs an older runner.</span> Run this on it (onboarding is safe to re-run and keeps its settings):
+          <pre className="out" style={{ userSelect: "all" }}>{`curl -fsS ${window.location.origin}/enroll/onboard.sh | bash`}</pre></dd></>)}
         <dt>Highest mode</dt><dd><CeilingSelect node={node} modes={fleet.data?.modes ?? []} disabled={a.busy} onChange={(m) => a.ceiling(node, m)} /></dd>
       </dl>
 

@@ -733,8 +733,9 @@ async def pipeline_model_call(role: str, spec: str, diff: str) -> str:
 
 
 def review_prompt(spec: str, diff: str, branch: str | None = None) -> str:
-    where = (f"The builder's work is on branch {branch} of this repository; read its files with "
-             f"`git show {branch}:<path>` and don't check it out. " if branch else "")
+    # The builder's worktree isn't committed until cleanup, so its branch still shows the code before the change.
+    where = ("This repository shows the code before the change; the builder's changes are exactly the diff below. "
+             "Read surrounding files here for context, but judge the change from the diff. ")
     return (
         "Independently review the builder's branch against the spec below. Do not edit anything. " + where +
         "Reply with JSON only using this schema: "

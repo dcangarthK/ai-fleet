@@ -674,7 +674,7 @@ Imported body.
             sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
             self.assertEqual(sent["repo"], "/r/project")
             self.assertEqual(sent["mode"], "read-only")
-            self.assertIn(f"fleet/{build}", sent["prompt"])
+            self.assertIn("the builder's changes are exactly the diff below", sent["prompt"])
             self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
         finally:
             FakeRunner.agents["codex"] = None

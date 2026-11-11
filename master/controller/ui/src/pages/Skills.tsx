@@ -116,8 +116,8 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
               {bindings.map((b) => (
                 <span key={b.scope + b.scope_id} className="tag">
                   {b.scope === "fleet" ? "whole fleet" : `${b.scope}: ${b.scope_id}`}{" "}
-                  <button type="button" className="ghost small" aria-label={`Unbind from ${b.scope} ${b.scope_id}`} disabled={busy}
-                          onClick={() => run(() => del(`/api/skills/${encodeURIComponent(skill.id)}/bindings`, b))}>remove</button>
+                  {can.admin && <button type="button" className="ghost small" aria-label={`Unbind from ${b.scope} ${b.scope_id}`} disabled={busy}
+                          onClick={() => run(() => del(`/api/skills/${encodeURIComponent(skill.id)}/bindings`, b))}>remove</button>}
                 </span>
               ))}
             </div>

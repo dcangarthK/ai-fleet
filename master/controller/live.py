@@ -559,9 +559,9 @@ async def heartbeat(request: Request):
         return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
     buffer = bytearray()
     async for part in request.stream():  # never buffer more than the cap, whatever Content-Length said (chunked too)
-        buffer += part
-        if len(buffer) > HEARTBEAT_MAX_BYTES:
+        if len(part) > HEARTBEAT_MAX_BYTES - len(buffer):  # checked before extending: a huge chunk is never held
             return JSONResponse({"detail": "heartbeat too large"}, status_code=413)
+        buffer += part
     raw = bytes(buffer)
     node_id = request.headers.get("x-fleet-node") or ""
     sig = (request.headers.get("x-fleet-sig") or "").lower()

@@ -394,6 +394,26 @@ class PinningTests(LiveBase):
         self.assertIn("model", r.json()["detail"])
         self.ok(agent="claude", model=SONNET, kind="draft", profile="spare")  # with a model it runs there
 
+    def test_a_model_less_paid_task_stays_on_the_fleet_profile(self):
+        # Codex t-dd1f0248 (high): admission accounts a model-less task at the fleet default, so a named profile
+        # must never run it.
+        try:
+            FakeRunner.profiles = {"claude": [{"id": "spare", "label": "spare", "ready": True}],
+                                   "codex": [{"id": "fleet", "label": "owner-plus", "ready": True}]}
+            self.refresh()
+            r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "x", "kind": "draft"}, headers=W)
+            self.assertEqual(r.status_code, 400, r.text)
+            self.assertIn("model", r.json()["detail"])
+            FakeRunner.profiles = {"claude": [{"id": "spare", "label": "spare", "ready": True},
+                                              {"id": "fleet", "label": "owner-max", "ready": True}],
+                                   "codex": [{"id": "fleet", "label": "owner-plus", "ready": True}]}
+            self.refresh()
+            t = self.ok(agent="claude", kind="draft")
+            self.assertEqual((t["profile"], t["account_label"]), ("fleet", "owner-max"))
+        finally:
+            FakeRunner.profiles = PROFILES
+            self.refresh()
+
     def test_independence_with_no_model_on_a_named_profile_is_unresolvable(self):
         build = self.ok(agent="claude", model=SONNET, kind="draft")
         node = next(n for n in tasks.node_rows() if n["id"] == "master")
@@ -579,6 +599,40 @@ class HeartbeatTests(LiveBase):
                                      "X-Fleet-Sig": "0" * 64})
         self.assertIn(lying.status_code, (400, 413, 401))
         self.assertNotEqual(lying.status_code, 200)
+
+    def _stream_request(self, chunks, pulled):
+        async def stream():
+            for chunk in chunks:
+                pulled.append(len(chunk))
+                yield chunk
+
+        return type("Req", (), {"headers": {}, "client": None, "stream": staticmethod(stream)})()
+
+    def test_one_huge_chunk_is_refused_without_being_buffered(self):
+        pulled, held = [], []
+
+        class Spy(bytearray):
+            def __iadd__(self, other):
+                held.append(len(other))
+                return super().__iadd__(other)
+
+        big = self._stream_request([b"x" * (50 * 1024 * 1024), b"never pulled"], pulled)
+        live.bytearray = Spy  # the handler's buffer: records every extension
+        try:
+            r = self.c.portal.call(live.heartbeat, big)
+        finally:
+            del live.bytearray
+        self.assertEqual(r.status_code, 413)
+        self.assertEqual(held, [])  # the oversized chunk was never appended
+        self.assertEqual(pulled, [50 * 1024 * 1024])  # stopped at the first chunk, before extending the buffer
+
+    def test_chunks_that_cross_the_cap_are_refused_at_the_chunk_that_does(self):
+        pulled = []
+        half = live.HEARTBEAT_MAX_BYTES // 2
+        req = self._stream_request([b"x" * half, b"x" * half, b"x", b"never pulled"], pulled)
+        r = self.c.portal.call(live.heartbeat, req)
+        self.assertEqual(r.status_code, 413)
+        self.assertEqual(pulled, [half, half, 1])
 
     def test_bad_posts_never_use_up_the_nodes_own_allowance(self):
         for _ in range(5):

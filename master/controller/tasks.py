@@ -1108,11 +1108,19 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             if t.profile and of_agent == t.agent:
                 slot_cache[of_agent] = profile_slots(of_agent, t.profile, t.node)
             else:
-                slot_cache[of_agent] = placement(of_agent, t.node) if of_agent in budget.PAID_AGENTS else []
+                found = placement(of_agent, t.node) if of_agent in budget.PAID_AGENTS else []
+                if of_agent == t.agent and of_agent in budget.PAID_AGENTS and not t.model:
+                    # No model named: admission accounts it at the fleet default, which only the fleet profile
+                    # runs (a named profile has its own config dir), so only fleet slots are candidates.
+                    found = [s for s in found if s["profile"] == "fleet"]
+                slot_cache[of_agent] = found
         return slot_cache[of_agent]
 
     if t.profile:
         slots_for(t.agent)  # an unknown or unready profile is a 400 before admission
+    elif t.agent in budget.PAID_AGENTS and not t.model and not slots_for(t.agent):
+        if any(s["profile"] != "fleet" for s in placement(t.agent, t.node)):
+            raise HTTPException(400, f"no usable fleet profile for {t.agent}: name a model to run on another profile")
 
     try:
         decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
@@ -1145,6 +1153,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     slot = next((s for s in on_account if s["node"] == node["id"]), None)
     if slot is None and agent in budget.PAID_AGENTS:
         mine = node_slots(node, agent)
+        if not t.model and agent == t.agent:
+            mine = [s for s in mine if s["profile"] == "fleet"]
         slot = next((s for s in mine if usable(s)), mine[0] if mine else None)
     account = (slot["account"] if slot else None) if agent in budget.PAID_AGENTS else None
     # Before the row and any budget decision is logged, so a refused task leaves no trace (Fable's note b).

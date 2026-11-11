@@ -9,8 +9,9 @@ import re
 MODES = ("read-only", "supervised", "auto-edit", "full")
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 QUIET_RE = re.compile(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$")
-TOP_KEYS = {"filesystem", "tools", "network", "mode_ceiling", "limits", "auto_approve"}
+TOP_KEYS = {"filesystem", "tools", "network", "mode_ceiling", "limits", "auto_approve", "escalation"}
 AUTO_APPROVE_AGENTS = {"claude", "codex"}
+ESCALATION_AGENTS = {"claude", "codex"}
 NESTED_KEYS = {
     "filesystem": {"allowed_roots", "denied"},
     "tools": {"claude_allow", "claude_deny"},
@@ -77,6 +78,13 @@ def validate(body: dict) -> dict:
         for flag in ("full_mode", "denied_tools"):
             if flag in value and not isinstance(value[flag], bool):
                 raise ValueError(f"auto_approve.{flag} must be true or false")
+    if "escalation" in body:
+        value = body["escalation"]
+        if not isinstance(value, dict):
+            raise ValueError("escalation must be an object")
+        _unknown(value, {"agents"}, "escalation")
+        if "agents" in value:
+            _string_list(value["agents"], "escalation.agents", lambda a: a in ESCALATION_AGENTS)
     if "mode_ceiling" in body and body["mode_ceiling"] not in MODES:
         raise ValueError(f"mode_ceiling must be one of {list(MODES)}")
     limits = body.get("limits", {})
@@ -183,6 +191,15 @@ def merge(layers: list[dict]) -> dict:
                 merged[flag] = all(values)
         result["auto_approve"] = merged
         sources["auto_approve"] = [label for label, _ in approvals]
+
+    # Escalating failed grounded ask_model calls to read-only agent tasks also only narrows: agents intersect,
+    # keeping the first setting layer's preference order.
+    escalations = [(label, body["escalation"]["agents"]) for label, body in bodies
+                   if "agents" in body.get("escalation", {})]
+    if escalations:
+        allowed = set.intersection(*(set(agents) for _, agents in escalations))
+        result["escalation"] = {"agents": _dedupe([a for a in escalations[0][1] if a in allowed])}
+        sources["escalation.agents"] = [label for label, _ in escalations]
 
     ceilings = [(label, body["mode_ceiling"]) for label, body in bodies if "mode_ceiling" in body]
     if ceilings:

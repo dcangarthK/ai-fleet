@@ -1815,6 +1815,35 @@ Imported body.
         row = next(item for item in self.c.get("/api/usage/calls?days=7").json() if item["role"] == "p8-stat")
         self.assertEqual((row["count"], row["error_rate"], row["p50_ms"], row["p95_ms"], row["fallbacks"]),
                          (4, 0.25, 20, 100, 1))
+        self.assertEqual((row["grounded"], row["abstain_rate"], row["escalation_rate"], row["logprob_mean"]),
+                         (0, None, None, None))
+
+    def test_grounded_call_outcomes_aggregate_per_role_and_model(self):
+        calls = [("answered", 0.9), ("answered", 0.7), ("abstained", None), ("escalated", None),
+                 ("check_failed", 0.2), (None, None)]
+        for outcome, mean in calls:
+            body = {"role": "g4-stat", "model": "m1", "ms": 5, "ok": True}
+            if outcome:
+                body["outcome"] = outcome
+            if mean is not None:
+                body |= {"logprob_mean": mean, "logprob_min": mean / 2}
+            response = self.c.post("/api/usage/calls", json=body, headers=W)
+            self.assertEqual(response.status_code, 200, response.text)
+        self.c.post("/api/usage/calls", json={"role": "g4-stat", "model": "m2", "ms": 5, "ok": True,
+                                              "outcome": "abstained"}, headers=W)
+        for bad in ({"outcome": "guessed"}, {"logprob_mean": 1.5}):
+            response = self.c.post("/api/usage/calls", json={"role": "g4-stat", "model": "m1", "ms": 5, "ok": True,
+                                                              **bad}, headers=W)
+            self.assertEqual(response.status_code, 422, response.text)
+        rows = {item["model"]: item for item in self.c.get("/api/usage/calls?days=7").json()
+                if item["role"] == "g4-stat"}
+        m1 = rows["m1"]
+        self.assertEqual((m1["count"], m1["grounded"]), (6, 5))
+        self.assertEqual(m1["outcomes"], {"answered": 2, "abstained": 1, "escalated": 1, "check_failed": 1})
+        self.assertEqual((m1["abstain_rate"], m1["escalation_rate"], m1["check_failed_rate"]), (0.2, 0.2, 0.2))
+        self.assertAlmostEqual(m1["logprob_mean"], 0.6)
+        self.assertEqual(rows["m2"]["outcomes"]["abstained"], 1)
+        self.assertEqual(rows["m2"]["abstain_rate"], 1.0)
 
     def test_notification_defaults_toggle_and_test_event(self):
         rules = self.c.get("/api/notify-rules").json()

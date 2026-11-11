@@ -75,6 +75,7 @@ MIGRATIONS = {
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
               "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0",
               "approved_tools": "TEXT DEFAULT '[]'"},
+    "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0"},
 }
 

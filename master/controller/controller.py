@@ -104,7 +104,7 @@ async def fetch_inventory(client: httpx.AsyncClient, ip: str) -> dict | None:
 
 async def refresh_master(client: httpx.AsyncClient) -> None:
     """The master's own runner is a node too (id 'master'), so its Claude/Codex/Ollama can take tasks."""
-    health = await tasks.runner_health(client, tasks.LOCAL_RUNNER)
+    health = await tasks.runner_health(client, tasks.LOCAL_RUNNER, tasks.MASTER_ID)
     found = await probe(client, "127.0.0.1")
     with db() as c:
         c.execute("INSERT OR IGNORE INTO nodes (id, name, ip, os, status) VALUES (?, 'master', '127.0.0.1', ?, 'approved')",
@@ -134,7 +134,7 @@ async def refresh_nodes() -> None:
     async with httpx.AsyncClient(trust_env=False) as client:  # tailnet only: never via a proxy
         results = await asyncio.gather(*(probe(client, n["ip"]) for n in online))
         inventories = await asyncio.gather(*(fetch_inventory(client, n["ip"]) for n in online))
-        runners = await asyncio.gather(*(tasks.runner_health(client, f"http://{n['ip']}:{tasks.RUNNER_PORT}")
+        runners = await asyncio.gather(*(tasks.runner_health(client, f"http://{n['ip']}:{tasks.RUNNER_PORT}", n["id"])
                                          for n in online))
     probed = dict(zip([n["id"] for n in online], results))
     inventory = dict(zip([n["id"] for n in online], inventories))
@@ -275,6 +275,7 @@ def fleet_state() -> dict:
             "SELECT a.role, a.model, a.node AS node_id, n.name AS node FROM assignments a "
             "LEFT JOIN nodes n ON n.id = a.node ORDER BY a.role, n.name")]
     for n in nodes:
+        n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
         n["runner_ok"] = bool(n["runner"]) and (n.get("runner_fails") or 0) < MAX_FAILS
         n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
@@ -375,6 +376,27 @@ def token_cli(args: list[str]) -> None:
         raise SystemExit("usage: controller.py token create <view|operate|admin> [label] | token list | token revoke <id>")
 
 
+def runner_token_cli(args: list[str]) -> None:
+    init_db()
+    if len(args) != 2 or args[0] not in ("set", "clear"):
+        raise SystemExit("usage: controller.py runner-token set <node> | runner-token clear <node>")
+    action, name = args
+    with db() as c:
+        node = resolve(c, name)
+        if action == "set":
+            if sys.stdin.isatty():
+                import getpass
+                token = getpass.getpass("runner token (input hidden): ").strip()
+            else:
+                token = sys.stdin.readline().strip()
+            if not token:
+                raise SystemExit("runner token is empty")
+            c.execute("UPDATE nodes SET runner_token=? WHERE id=?", (token, node["id"]))
+        else:
+            c.execute("UPDATE nodes SET runner_token=NULL WHERE id=?", (node["id"],))
+    print("runner token %s for %s" % ("stored" if action == "set" else "cleared", name))
+
+
 def serve() -> None:
     """One server, two sockets on 127.0.0.1: the local port (full access) and the public port for
     `tailscale serve` (tokens always required). auth.access_control tells them apart by port."""
@@ -392,6 +414,9 @@ def serve() -> None:
 if __name__ == "__main__":
     if sys.argv[1:2] == ["token"]:
         token_cli(sys.argv[2:])
+        raise SystemExit(0)
+    if sys.argv[1:2] == ["runner-token"]:
+        runner_token_cli(sys.argv[2:])
         raise SystemExit(0)
     if not MASTER_KEY:
         print("LITELLM_MASTER_KEY not set: tasks work, but model roles won't sync to LiteLLM")

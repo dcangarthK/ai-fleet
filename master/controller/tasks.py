@@ -15,6 +15,7 @@ import os
 import secrets
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -26,6 +27,7 @@ from store import db
 
 RUNNER_PORT = 11436
 RUNNER_TOKEN = os.environ.get("RUNNER_TOKEN", "")
+FLEET_DIR = os.environ.get("FLEET_DIR")
 LOCAL_RUNNER = os.environ.get("FLEET_LOCAL_RUNNER", f"http://127.0.0.1:{RUNNER_PORT}").rstrip("/")
 MASTER_ID = "master"
 POLL_SECONDS = float(os.environ.get("FLEET_TASK_POLL_SECONDS", "3"))
@@ -56,8 +58,26 @@ class RunnerError(HTTPException):
     pass
 
 
+def node_runner_token(node: dict | str) -> str:
+    node_id = node if isinstance(node, str) else node["id"]
+    with db() as c:
+        row = c.execute("SELECT runner_token FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if row and row["runner_token"]:
+        return row["runner_token"]
+    if RUNNER_TOKEN:
+        return RUNNER_TOKEN
+    if node_id == MASTER_ID:
+        token_path = Path(FLEET_DIR).expanduser() / "runner.token" if FLEET_DIR else Path.home() / ".ai-fleet/runner.token"
+        try:
+            return token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return ""
+
+
 async def runner_call(node: dict, method: str, path: str, body: dict | None = None, timeout: float = 20) -> dict:
-    headers = {"X-Runner-Token": RUNNER_TOKEN} if RUNNER_TOKEN else {}
+    token = node_runner_token(node)
+    headers = {"X-Runner-Token": token} if token else {}
     try:
         async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
             r = await client.request(method, runner_url(node) + path, json=body, headers=headers)
@@ -69,8 +89,9 @@ async def runner_call(node: dict, method: str, path: str, body: dict | None = No
     return r.json()
 
 
-async def runner_health(client: httpx.AsyncClient, base: str) -> dict | None:
-    headers = {"X-Runner-Token": RUNNER_TOKEN} if RUNNER_TOKEN else {}
+async def runner_health(client: httpx.AsyncClient, base: str, node: dict | str = MASTER_ID) -> dict | None:
+    token = node_runner_token(node)
+    headers = {"X-Runner-Token": token} if token else {}
     try:
         r = await client.get(f"{base}/health", timeout=3, headers=headers)
         r.raise_for_status()
@@ -88,6 +109,7 @@ def node_rows() -> list[dict]:
         running = dict(c.execute(
             "SELECT node_id, COUNT(*) FROM tasks WHERE state IN ('starting','working') GROUP BY node_id").fetchall())
     for n in rows:
+        n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
         n["models"] = json.loads(n["models"] or "[]")
         n["inventory"] = json.loads(n["inventory"]) if n.get("inventory") else None
@@ -102,7 +124,7 @@ def ceiling(node: dict) -> str:
     return min(mine, runner_max if runner_max in MODES else "read-only", key=rank)
 
 
-def eligible(node: dict, agent: str, model: str | None, mode: str) -> str | None:
+def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | None = None) -> str | None:
     """None if the node can take the task, else the reason it can't."""
     if node["status"] != "approved":
         return "not approved"
@@ -112,6 +134,10 @@ def eligible(node: dict, agent: str, model: str | None, mode: str) -> str | None
         return f"no {agent} on this node"
     if agent == "ollama" and model not in node["models"]:
         return f"model {model} not on this node"
+    runner = node["runner"]
+    if (gate and str(runner.get("version")) == "2"
+            and gate not in (runner.get("gate_profiles") or []) and not runner.get("allow_raw_gates")):
+        return f"gate profile {gate} not on this node"
     if rank(mode) > rank(ceiling(node)):
         return f"mode {mode} is above this node's ceiling ({ceiling(node)})"
     return None
@@ -121,7 +147,7 @@ def ram(node: dict) -> int:
     return ((node["inventory"] or {}).get("hardware") or {}).get("ram_gb") or 0
 
 
-def pick_node(agent: str, model: str | None, mode: str, wanted: str | None) -> dict:
+def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None) -> dict:
     nodes = node_rows()
     if wanted:
         match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
@@ -129,13 +155,13 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None) -> d
             raise HTTPException(404, f"unknown node {wanted}")
         if len(match) > 1:
             raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
-        why = eligible(match[0], agent, model, mode)
+        why = eligible(match[0], agent, model, mode, gate)
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
         return match[0]
-    ok = [n for n in nodes if not eligible(n, agent, model, mode)]
+    ok = [n for n in nodes if not eligible(n, agent, model, mode, gate)]
     if not ok:
-        reasons = {n["name"]: eligible(n, agent, model, mode) for n in nodes}
+        reasons = {n["name"]: eligible(n, agent, model, mode, gate) for n in nodes}
         raise HTTPException(409, f"no node can run {agent} in {mode} mode: {reasons}")
     # Least busy first, then the bigger machine.
     return sorted(ok, key=lambda n: (n["running_tasks"], -ram(n)))[0]
@@ -371,7 +397,7 @@ async def create_task(t: TaskIn) -> dict:
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.parent_id:
         get_task(t.parent_id)
-    node = pick_node(t.agent, t.model, t.mode, t.node)
+    node = pick_node(t.agent, t.model, t.mode, t.node, t.gate)
     task_id = "t-" + secrets.token_hex(4)
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]

@@ -3,6 +3,7 @@
 # Run once; safe to re-run.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$HERE/.." && pwd)"
 CODEX="$(command -v codex || echo /Applications/Codex.app/Contents/Resources/codex)"
 TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 
@@ -64,7 +65,35 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
 # 4. The master's own agent runner (localhost only): lets tasks use this Mac's Claude Code, Codex, Ollama.
 mkdir -p "$HOME/.ai-fleet" && chmod 700 "$HOME/.ai-fleet"
-[ -f "$HOME/.ai-fleet/runner.json" ] || echo '{"max_mode": "auto-edit"}' > "$HOME/.ai-fleet/runner.json"
+python3 - "$HOME/.ai-fleet/runner.json" "$REPO_DIR" <<'PY'
+import json
+import os
+import sys
+
+path, repo = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+except (OSError, ValueError):
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+if "allowed_roots" not in config:
+    config.update({
+        "allowed_roots": [os.path.realpath(repo)],
+        "gate_profiles": {
+            "pytest": ["python3", "-m", "pytest", "-q"],
+            "unittest": ["python3", "-m", "unittest", "-q"],
+        },
+    })
+config.setdefault("max_mode", "auto-edit")
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
 RPLIST="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
 write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
   "$HOME/Library/Logs/ai-fleet-runner.log" 4 \
@@ -75,6 +104,19 @@ write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
   "$(command -v python3)" "$HERE/../nodes/runner.py"
 launchctl bootout "gui/$(id -u)" "$RPLIST" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$RPLIST"
+
+# Store the generated local credential in the controller DB without putting it in argv or logs.
+registered=0
+for _ in $(seq 1 30); do
+  if [ -s "$HOME/.ai-fleet/runner.token" ] \
+      && "$UV" run --script "$HERE/controller/controller.py" runner-token set master \
+           < "$HOME/.ai-fleet/runner.token" >/dev/null 2>&1; then
+    registered=1
+    break
+  fi
+  sleep 1
+done
+[ "$registered" = 1 ] || { echo "Could not register the master runner token; re-run setup."; exit 1; }
 
 # 5. Claude Code: Codex as a sub-agent, fleet bridge for local models + fleet management + tasks.
 claude mcp remove --scope user codex >/dev/null 2>&1 || true

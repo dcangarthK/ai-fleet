@@ -3,18 +3,20 @@
 #   ./onboard.sh                  interactive: join fleet, set up Ollama, scan, publish inventory
 #   ./onboard.sh --yes            accept all defaults (installs + recommended models)
 #   ./onboard.sh --models "qwen3:8b qwen3:4b"   pull these models
+#   ./onboard.sh --allow-root ~/code --allow-root /srv/repos
 #   ./onboard.sh --scan-only      just rescan and republish (runs hourly after onboarding)
 # Run as your normal user; it asks for sudo when it needs it.
 set -euo pipefail
 
 FLEET_DIR="${FLEET_DIR:-$HOME/.ai-fleet}"
 INFO_PORT=11435
-SCAN_ONLY=0; YES=0; MODELS=""
+SCAN_ONLY=0; YES=0; MODELS=""; ALLOW_ROOTS_SET=0; ALLOW_ROOTS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --scan-only) SCAN_ONLY=1 ;;
     --yes|-y) YES=1 ;;
     --models) MODELS="$2"; shift ;;
+    --allow-root) ALLOW_ROOTS+=("$2"); ALLOW_ROOTS_SET=1; shift ;;
     -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
@@ -482,9 +484,12 @@ via ps, and Claude's variadic --allowedTools would otherwise swallow a trailing 
 
 import datetime
 import glob
+import hmac
 import json
+import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -499,10 +504,19 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-VERSION = "1"
+VERSION = "2"
 MODES = ("read-only", "supervised", "auto-edit", "full")
 MODE_RANK = {name: rank for rank, name in enumerate(MODES)}
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+GATE_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
+GATE_ARG = re.compile(r"^[A-Za-z0-9_./:=@+,-]{1,200}$")
+JOB_REQUEST_KEYS = {
+    "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
+    "allowed_tools", "resume_session",
+}
+BUILTIN_DENIED = (
+    ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
+)
 PUBLIC_JOB_KEYS = (
     "id", "agent", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
@@ -577,7 +591,7 @@ def boot_time():
 
 def started_epoch(job):
     try:
-        return datetime.datetime.fromisoformat(job["started_at"]).timestamp()
+        return datetime.datetime.fromisoformat(job.get("run_started_at") or job["started_at"]).timestamp()
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -635,11 +649,126 @@ class JobManager:
         if not config_path.exists():
             atomic_json(config_path, {"max_mode": "auto-edit"}, 0o600)
         config = read_json(config_path, {})
+        if not isinstance(config, dict):
+            config = {}
         self.max_mode = config.get("max_mode", "auto-edit")
         if self.max_mode not in MODE_RANK:
             self.max_mode = "auto-edit"
+        self.allowed_roots = self._path_list(config.get("allowed_roots"))
+        configured_denied = self._path_list(config.get("denied_paths"))
+        self.denied_paths = [str(self.root)] + [str(Path.home() / item) for item in BUILTIN_DENIED]
+        self.denied_paths.extend(configured_denied)
+        profiles = config.get("gate_profiles")
+        self.gate_profiles = {}
+        if isinstance(profiles, dict):
+            for name, argv in profiles.items():
+                if (isinstance(name, str) and GATE_PROFILE.fullmatch(name)
+                        and isinstance(argv, list) and argv
+                        and all(isinstance(item, str) and item for item in argv)):
+                    self.gate_profiles[name] = list(argv)
+        self.allow_raw_gates = config.get("allow_raw_gates", False)
+        if not isinstance(self.allow_raw_gates, bool):
+            self.allow_raw_gates = False
+        max_jobs = config.get("max_jobs", 2)
+        self.max_jobs = max_jobs if isinstance(max_jobs, int) and not isinstance(max_jobs, bool) and max_jobs > 0 else 2
+        max_minutes = config.get("max_job_minutes", 120)
+        self.max_job_minutes = (float(max_minutes)
+                                if isinstance(max_minutes, (int, float)) and not isinstance(max_minutes, bool)
+                                and math.isfinite(max_minutes) and max_minutes > 0 else 120.0)
+        self.request_context = threading.local()
         self.agents = find_agents(self.ollama_url)
         self._load_jobs()
+
+    @staticmethod
+    def _path_list(value):
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            return []
+        return [item for item in value if os.path.isabs(os.path.expanduser(item))]
+
+    @staticmethod
+    def _comparable(path):
+        value = os.path.normcase(os.path.realpath(os.path.expanduser(path)))
+        return value.casefold() if sys.platform in ("darwin", "win32") else value
+
+    @classmethod
+    def _within(cls, path, parent):
+        path, parent = cls._comparable(path), cls._comparable(parent)
+        try:
+            return os.path.commonpath([path, parent]) == parent
+        except (ValueError, OSError):
+            return False
+
+    def audit(self, event, detail):
+        record = {"ts": now(), "event": event, "detail": str(detail),
+                  "remote": getattr(self.request_context, "remote", "")}
+        path = self.root / "audit.jsonl"
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        finally:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+    def check_path(self, value):
+        expanded = os.path.expanduser(value) if isinstance(value, str) else ""
+        if not expanded or not os.path.isabs(expanded):
+            raise HttpError(400, "path must be absolute")
+        resolved = os.path.realpath(expanded)
+        if not os.path.isdir(resolved):
+            raise HttpError(400, "path does not exist or is not a directory")
+        allowed = any(self._within(resolved, root) for root in self.allowed_roots)
+        denied = any(self._within(resolved, path) or self._within(path, resolved) for path in self.denied_paths)
+        if not allowed or denied:
+            self.audit("path_denied", "requested path was outside node policy")
+            raise HttpError(403, "path not allowed by this node's runner policy")
+        return resolved
+
+    def _check_git_common_dir(self, repo):
+        found = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "--git-common-dir"], capture_output=True,
+            text=True, timeout=15,
+        )
+        if found.returncode == 0:
+            common = found.stdout.strip()
+            if not os.path.isabs(common):
+                common = os.path.join(repo, common)
+            self.check_path(common)
+
+    def _gate(self, value, args):
+        if not value:
+            if args not in (None, []):
+                self.audit("gate_denied", "gate_args supplied without a gate")
+                raise HttpError(400, "gate_args need a gate profile")
+            return None
+        if not isinstance(value, str):
+            self.audit("gate_denied", "gate was not a string")
+            raise HttpError(400, "gate must be a profile name")
+        if args is None:
+            args = []
+        if (not isinstance(args, list) or len(args) > 20
+                or any(not isinstance(item, str) or not GATE_ARG.fullmatch(item)
+                       or os.path.isabs(item) or ".." in item.split("/") for item in args)):
+            self.audit("gate_denied", "invalid gate_args")
+            raise HttpError(400, "invalid gate_args")
+        if value in self.gate_profiles:
+            argv = self.gate_profiles[value] + args
+            executable = shutil.which(argv[0], path=agent_search_path())
+            if not executable:
+                self.audit("gate_denied", "gate profile executable was unavailable")
+                raise HttpError(400, "gate profile executable is unavailable")
+            argv[0] = executable
+            return {"profile": value, "argv": argv, "raw": False, "cmd": shlex.join(argv),
+                    "state": "pending", "exit_code": None, "output_tail": ""}
+        if self.allow_raw_gates and not args:
+            return {"profile": None, "argv": None, "raw": True, "cmd": value,
+                    "state": "pending", "exit_code": None, "output_tail": ""}
+        self.audit("gate_denied", "unknown gate profile")
+        if GATE_PROFILE.fullmatch(value):
+            raise HttpError(400, "unknown gate profile %s; raw gate commands are disabled on this node" % value)
+        raise HttpError(400, "invalid gate profile; raw gate commands are disabled on this node")
 
     def _job_dir(self, job):
         return self.jobs_dir / job["id"]
@@ -671,8 +800,15 @@ class JobManager:
             elif (job["state"] == "exited" and job.get("exit_code") == 0
                   and job.get("gate") and job["gate"].get("state") in ("pending", "running")):
                 # A runner restart can interrupt its (non-agent) gate subprocess.
-                job["gate"]["state"] = "pending"
-                self._start_gate(job)
+                gate = job["gate"]
+                is_raw = gate.get("raw") is True or not gate.get("argv")
+                if is_raw and not self.allow_raw_gates:
+                    gate.update({"raw": True, "state": "failed", "exit_code": None,
+                                 "output_tail": "raw gate commands are disabled on this node"})
+                    self._save(job)
+                else:
+                    gate["state"] = "pending"
+                    self._start_gate(job)
 
     def public(self, job):
         self.refresh(job)
@@ -758,14 +894,20 @@ class JobManager:
 
     def _start_monitor(self, job, process=None):
         def monitor():
+            deadline = (started_epoch(job) or time.time()) + self.max_job_minutes * 60
+            def alive():
+                return process.poll() is None if process is not None else process_alive(job.get("pid"))
+
+            while job.get("state") == "running" and alive():
+                if time.time() >= deadline:
+                    self._timeout(job)
+                    return
+                time.sleep(0.2)
             if process is not None:
                 try:
-                    process.wait()
-                except OSError:
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
                     pass
-            else:
-                while job.get("state") == "running" and process_alive(job.get("pid")):
-                    time.sleep(0.2)
             # The wrapper writes its code immediately before exiting; allow that write to land.
             for _ in range(20):
                 self.refresh(job)
@@ -774,11 +916,36 @@ class JobManager:
                 time.sleep(0.05)
         threading.Thread(target=monitor, name="job-" + job["id"], daemon=True).start()
 
+    def _kill_group(self, pid, force=True):
+        if not pid:
+            return
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+        else:
+            os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
+
+    def _timeout(self, job):
+        with self.lock:
+            if job.get("state") != "running":
+                return
+            try:
+                self._kill_group(job.get("pid"))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            self._parse_events(job)
+            message = "Job timed out after %s minutes" % self.max_job_minutes
+            job.update({"state": "exited", "exit_code": 124, "ended_at": now(),
+                        "result": trim(((job.get("result") or "") + "\n" + message).strip())})
+            if job.get("gate"):
+                job["gate"]["state"] = "skipped"
+            self._save(job)
+
     def _gate_worker(self, job):
         gate = job["gate"]
         try:
             completed = subprocess.run(
-                gate["cmd"], cwd=job["cwd"], shell=True, capture_output=True,
+                gate["cmd"] if gate.get("raw") else gate["argv"], cwd=job["cwd"],
+                shell=bool(gate.get("raw")), capture_output=True,
                 text=True, errors="replace", timeout=900,
             )
             output = (completed.stdout or "") + (completed.stderr or "")
@@ -800,6 +967,11 @@ class JobManager:
 
     def _start_gate(self, job):
         gate = job["gate"]
+        if (gate.get("raw") is True or not gate.get("argv")) and not self.allow_raw_gates:
+            gate.update({"raw": True, "state": "failed", "exit_code": None,
+                         "output_tail": "raw gate commands are disabled on this node"})
+            self._save(job)
+            return
         if gate.get("state") == "running" or job["id"] in self.gate_threads:
             return
         gate.update({"state": "running", "exit_code": None, "output_tail": ""})
@@ -808,7 +980,8 @@ class JobManager:
         threading.Thread(target=self._gate_worker, args=(job,), name="gate-" + job["id"], daemon=True).start()
 
     def _make_worktree(self, job_id, repo):
-        repo = str(Path(repo).expanduser().resolve())
+        repo = self.check_path(repo)
+        self._check_git_common_dir(repo)
         base = subprocess.run(
             ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True,
             text=True, timeout=15,
@@ -826,6 +999,10 @@ class JobManager:
         return repo, str(target), branch, base.stdout.strip()
 
     def create(self, body):
+        unknown = sorted(set(body) - JOB_REQUEST_KEYS)
+        if unknown:
+            self.audit("bad_field", "unknown job field: " + unknown[0])
+            raise HttpError(400, "unknown job field: " + unknown[0])
         job_id = body.get("id")
         agent = body.get("agent")
         mode = body.get("mode")
@@ -836,23 +1013,35 @@ class JobManager:
         if mode not in MODE_RANK:
             raise HttpError(400, "invalid mode")
         if MODE_RANK[mode] > MODE_RANK[self.max_mode]:
+            self.audit("mode_denied", "requested mode exceeded max_mode")
             raise HttpError(403, "requested mode exceeds runner max_mode")
         if not isinstance(body.get("prompt"), str):
             raise HttpError(400, "prompt is required")
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
-            # The gate is a shell command outside the agent's sandbox; read-only modes must not run one.
+            self.audit("gate_denied", "gate requested below auto-edit mode")
             raise HttpError(400, "a gate needs auto-edit or full mode")
         if not self.agents.get(agent):
             raise HttpError(400, "%s agent is unavailable" % agent)
+        gate = self._gate(body.get("gate"), body.get("gate_args"))
+        repo = self.check_path(body["repo"]) if body.get("repo") else None
+        if repo:
+            self._check_git_common_dir(repo)
+        requested_cwd = self.check_path(body["cwd"]) if body.get("cwd") else None
+        if requested_cwd:
+            self._check_git_common_dir(requested_cwd)
         with self.lock:
+            for current in self.jobs.values():
+                self.refresh(current)
+            if sum(current.get("state") == "running" for current in self.jobs.values()) >= self.max_jobs:
+                self.audit("busy", "runner is at max_jobs")
+                raise HttpError(429, "runner is busy")
             if job_id in self.jobs or (self.jobs_dir / job_id).exists():
                 raise HttpError(409, "duplicate job id")
             job_dir = self.jobs_dir / job_id
             job_dir.mkdir(mode=0o700, parents=False)
             os.chmod(job_dir, 0o700)
-            repo = body.get("repo")
             use_worktree = bool(repo and body.get("worktree"))
             branch = None
             base = None
@@ -863,12 +1052,9 @@ class JobManager:
                     shutil.rmtree(job_dir, ignore_errors=True)
                     raise
             else:
-                cwd = body.get("cwd") or repo
+                cwd = requested_cwd or repo
                 if cwd:
-                    cwd = str(Path(cwd).expanduser().resolve())
-                    if not Path(cwd).is_dir():
-                        shutil.rmtree(job_dir, ignore_errors=True)
-                        raise HttpError(400, "cwd does not exist")
+                    cwd = os.path.realpath(cwd)
                 else:
                     work = job_dir / "work"
                     work.mkdir(mode=0o700)
@@ -879,9 +1065,6 @@ class JobManager:
                 )
                 if rev.returncode == 0:
                     base = rev.stdout.strip()
-            gate_cmd = body.get("gate")
-            gate = ({"cmd": gate_cmd, "state": "pending", "exit_code": None, "output_tail": ""}
-                    if isinstance(gate_cmd, str) and gate_cmd else None)
             job = {
                 "id": job_id, "agent": agent, "mode": mode, "state": "running",
                 "exit_code": None, "session_id": body.get("resume_session"), "cwd": cwd,
@@ -891,6 +1074,7 @@ class JobManager:
                 "allowed_tools": body.get("allowed_tools") or [], "pid": None,
                 "exit_file": "exit_code.1",
             }
+            job["run_started_at"] = job["started_at"]
             self.jobs[job_id] = job
             self._save(job)
             try:
@@ -1004,12 +1188,14 @@ class JobManager:
             if mode not in MODE_RANK:
                 raise HttpError(400, "invalid mode")
             if MODE_RANK[mode] > MODE_RANK[self.max_mode]:
+                self.audit("mode_denied", "requested resume mode exceeded max_mode")
                 raise HttpError(403, "requested mode exceeds runner max_mode")
             job.update({
                 "mode": mode, "state": "running", "exit_code": None,
                 "ended_at": None, "runs": job["runs"] + 1,
                 "allowed_tools": body.get("allowed_tools") or [],
                 "exit_file": "exit_code.%d" % (job["runs"] + 1),
+                "run_started_at": now(),
             })
             if job.get("gate"):
                 job["gate"].update({"state": "pending", "exit_code": None, "output_tail": ""})
@@ -1029,16 +1215,16 @@ class JobManager:
                 pid = job.get("pid")
                 try:
                     if os.name == "nt":
-                        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+                        self._kill_group(pid)
                     else:
-                        os.killpg(pid, signal.SIGTERM)
+                        self._kill_group(pid, force=False)
                         for _ in range(20):
                             if not process_alive(pid):
                                 break
                             time.sleep(0.05)
                         if process_alive(pid):
-                            os.killpg(pid, signal.SIGKILL)
-                except OSError:
+                            self._kill_group(pid)
+                except (OSError, subprocess.SubprocessError):
                     pass
                 job.update({"state": "cancelled", "ended_at": now()})
                 self._parse_events(job)
@@ -1155,7 +1341,7 @@ class HttpError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FleetRunner/1"
+    server_version = "FleetRunner/2"
 
     def log_message(self, fmt, *args):
         # Deliberately avoid standard request logging: POST bodies contain prompts.
@@ -1175,7 +1361,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self):
         token = self.server.runner_token
-        return not token or self.headers.get("X-Runner-Token") == token
+        supplied = self.headers.get("X-Runner-Token", "")
+        return bool(token and hmac.compare_digest(token, supplied))
 
     def _body(self):
         try:
@@ -1203,7 +1390,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.manager.refresh(job)
                 running += job.get("state") == "running"
             return {"ok": True, "version": VERSION, "max_mode": self.manager.max_mode,
-                    "agents": agents, "running": running}
+                    "agents": agents, "running": running,
+                    "gate_profiles": sorted(self.manager.gate_profiles),
+                    "allow_raw_gates": self.manager.allow_raw_gates,
+                    "allowed_roots": self.manager.allowed_roots,
+                    "max_jobs": self.manager.max_jobs}
         if method == "GET" and parts == ["jobs"]:
             return self.manager.list_public()
         if method == "POST" and parts == ["jobs"]:
@@ -1229,7 +1420,12 @@ class Handler(BaseHTTPRequestHandler):
         raise HttpError(404, "not found")
 
     def _handle(self, method):
+        try:
+            self.manager.request_context.remote = self.client_address[0]
+        except (AttributeError, IndexError, TypeError):
+            self.manager.request_context.remote = ""
         if not self._authorized():
+            self.manager.audit("auth_failed", "invalid runner token")
             self._send(401, {"detail": "invalid runner token"})
             return
         try:
@@ -1280,6 +1476,40 @@ def parse_bind(value):
     return host, int(port)
 
 
+def runner_token(fleet_dir):
+    configured = os.environ.get("RUNNER_TOKEN")
+    if configured:
+        return configured
+    path = Path(fleet_dir).expanduser() / "runner.token"
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    if not token:
+        token = secrets.token_urlsafe(32)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            # O_EXCL: if another runner created it first, use that token instead of overwriting it.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            for _ in range(50):
+                token = path.read_text(encoding="utf-8").strip()
+                if token:
+                    break
+                time.sleep(0.02)
+            if not token:
+                raise SystemExit("runner.token exists but is empty; delete it and restart the runner")
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token + "\n")
+            print("Runner token generated; register this node's runner token on the master.", file=sys.stderr)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return token
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--ollama-worker":
         return ollama_worker(sys.argv[2])
@@ -1288,7 +1518,7 @@ def main():
     address = parse_bind(os.environ.get("RUNNER_BIND", "127.0.0.1:11436"))
     server = RunnerServer(address, Handler)
     server.manager = JobManager(fleet_dir, ollama_url)
-    server.runner_token = os.environ.get("RUNNER_TOKEN", "")
+    server.runner_token = runner_token(fleet_dir)
 
     def stop(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -1309,12 +1539,69 @@ if __name__ == "__main__":
 # <<< runner.py
 RUNNER_PY
   chmod 700 "$FLEET_DIR/runner.py"
-  [ -f "$FLEET_DIR/runner.json" ] || echo '{"max_mode": "auto-edit"}' > "$FLEET_DIR/runner.json"
+}
+
+configure_runner_policy() {
+  local cfg="$FLEET_DIR/runner.json" root has_roots=0 policy_roots_set="$ALLOW_ROOTS_SET"
+  if [ -f "$cfg" ]; then
+    has_roots="$(python3 - "$cfg" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(1 if isinstance(value, dict) and "allowed_roots" in value else 0)
+except (OSError, ValueError):
+    print(0)
+PY
+)"
+  fi
+  if [ "$ALLOW_ROOTS_SET" = 0 ] && [ "$has_roots" = 0 ] && [ "$YES" = 0 ]; then
+    echo "Folders agents may work in (enter one absolute path at a time; blank finishes; no default):"
+    while true; do
+      read -rp "Allow root: " root || root=""
+      [ -n "$root" ] || break
+      ALLOW_ROOTS+=("$root")
+    done
+    policy_roots_set=1
+  fi
+  [ "$has_roots" = 0 ] && policy_roots_set=1
+  python3 - "$cfg" "$policy_roots_set" "${ALLOW_ROOTS[@]}" <<'PY'
+import json
+import os
+import sys
+
+path, roots_set, *roots = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+except (OSError, ValueError):
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+if roots_set == "1":
+    config["allowed_roots"] = [os.path.realpath(os.path.expanduser(item)) for item in roots]
+config.setdefault("max_mode", "auto-edit")
+config.setdefault("denied_paths", [])
+profiles = config.setdefault("gate_profiles", {})
+if not isinstance(profiles, dict):
+    profiles = config["gate_profiles"] = {}
+profiles.setdefault("pytest", ["python3", "-m", "pytest", "-q"])
+profiles.setdefault("unittest", ["python3", "-m", "unittest", "-q"])
+config.setdefault("allow_raw_gates", False)
+config.setdefault("max_jobs", 2)
+config.setdefault("max_job_minutes", 120)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
 }
 
 install_runner() {
   local ip="$1" py; py="$(command -v python3)"
   write_runner
+  configure_runner_policy
   say "Installing the agent runner on $ip:11436 (max mode: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["max_mode"])' "$FLEET_DIR/runner.json"))"
   local path_dirs="$HOME/.local/bin:$HOME/.claude/local:$HOME/.npm-global/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
   if [ "$OS" = Darwin ]; then
@@ -1358,7 +1645,18 @@ EOF
     $SUDO systemctl restart ai-fleet-runner.service
   fi
   echo "Agents run as $(id -un) with this user's logins. To change what they may do, edit $FLEET_DIR/runner.json"
-  echo "(max_mode: read-only | supervised | auto-edit | full) and restart the runner."
+  echo "(allowed_roots, gate_profiles, max_mode and limits) and restart the runner."
+  local token_file="$FLEET_DIR/runner.token" token="" node_name
+  node_name="$(hostname -s 2>/dev/null || hostname)"
+  for _ in $(seq 1 30); do
+    [ -s "$token_file" ] && { token="$(tr -d '\r\n' < "$token_file")"; break; }
+    sleep 1
+  done
+  if [ -n "$token" ]; then
+    echo "Runner token (shown once). On the master run: printf '%s\\n' '$token' | uv run --script master/controller/controller.py runner-token set '$node_name'"
+  else
+    echo "Runner token was not created yet; check $FLEET_DIR/runner.log and restart the runner."
+  fi
 }
 
 # ---------- main ----------

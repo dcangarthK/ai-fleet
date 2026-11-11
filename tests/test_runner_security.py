@@ -258,6 +258,12 @@ class RunnerBoundary(unittest.TestCase):
         self.start()
         self.assertDenied(*self.create("split", repo=str(repo), worktree=True))
 
+    def test_cwd_with_git_dir_outside_is_refused(self):
+        hidden = self.outside / "gitdir2"
+        repo = self.make_repo(self.root / "split2", "--separate-git-dir", str(hidden))
+        self.start()
+        self.assertDenied(*self.create("split-cwd", cwd=str(repo)))
+
     # ---------- gates ----------
 
     def test_gate_profile_runs_without_a_shell(self):

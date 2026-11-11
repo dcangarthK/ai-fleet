@@ -121,13 +121,13 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(master["effective_ceiling"], "auto-edit")
 
     def test_task_lifecycle_to_review_and_wait(self):
-        t = self.task(gate="pytest -q")
+        t = self.task(gate="pytest")
         self.assertEqual(t["state"], "working")
         self.assertEqual(t["node_id"], "master")
         sent = [b for p, b in FakeRunner.calls if p == "/jobs" and b["id"] == t["id"]][0]
-        self.assertEqual(sent["gate"], "pytest -q")
+        self.assertEqual(sent["gate"], "pytest")
         FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, result="done!",
-                                        gate={"cmd": "pytest -q", "state": "passed", "exit_code": 0})
+                                        gate={"cmd": "pytest", "state": "passed", "exit_code": 0})
         r = self.c.get(f"/api/tasks/wait?ids={t['id']}&timeout=5").json()
         self.assertEqual(r["tasks"][0]["state"], "review")
         self.assertEqual(r["tasks"][0]["result"], "done!")

@@ -209,7 +209,8 @@ def agent_search_path():
     return os.pathsep.join([os.environ.get("PATH", "")] + [str(item) for item in dirs])
 
 
-def find_agents(ollama_url):
+def find_agents(ollama_url, ollama_up=None):
+    """`ollama_up` from the metrics thread's cache skips the inline probe (docs/SPEC-live-monitor.md 4.1)."""
     search = agent_search_path()
     codex_bundled = "/Applications/Codex.app/Contents/Resources/codex"
     codex = shutil.which("codex", path=search)
@@ -226,6 +227,9 @@ def find_agents(ollama_url):
         "codex": codex,
         "ollama": None,
     }
+    if ollama_up is not None:
+        agents["ollama"] = ollama_url.rstrip("/") if ollama_up else None
+        return agents
     try:
         with urllib.request.urlopen(ollama_url.rstrip("/") + "/api/tags", timeout=1) as response:
             if 200 <= response.status < 300:
@@ -233,6 +237,223 @@ def find_agents(ollama_url):
     except (OSError, urllib.error.URLError):
         pass
     return agents
+
+
+# ---------- machine metrics and heartbeats (docs/SPEC-live-monitor.md 4.1, 12.1) ----------
+
+METRICS_SECONDS = 15
+METRICS_COMMAND_TIMEOUT = 3
+NODE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def run_capped(argv, timeout=METRICS_COMMAND_TIMEOUT):
+    """A command's stdout, or None when it fails, isn't there or runs over (the child is killed)."""
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                text=True, errors="replace")
+    except OSError:
+        return None
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        return None
+    return out if proc.returncode == 0 else None
+
+
+def parse_vm_stat(text):
+    """macOS memory used in GB: active + wired + compressed pages, with the page size from vm_stat's header."""
+    if not text:
+        return None
+    size = re.search(r"page size of (\d+) bytes", text)
+    if not size:
+        return None
+    pages = {}
+    for name, key in (("Pages active", "active"), ("Pages wired down", "wired"),
+                      ("Pages occupied by compressor", "compressed")):
+        found = re.search(re.escape(name) + r":\s+(\d+)", text)
+        if not found:
+            return None
+        pages[key] = int(found.group(1))
+    return sum(pages.values()) * int(size.group(1)) / 1e9
+
+
+def parse_swapusage(text):
+    """`sysctl vm.swapusage`: the used swap in GB."""
+    found = re.search(r"used\s*=\s*([\d.]+)([KMGT])", text or "")
+    if not found:
+        return None
+    scale = {"K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12}[found.group(2)]
+    return float(found.group(1)) * scale * (1.024 ** {"K": 1, "M": 2, "G": 3, "T": 4}[found.group(2)]) / 1e9
+
+
+def parse_meminfo(text):
+    """Linux /proc/meminfo: (total GB, used GB, swap used GB)."""
+    values = {}
+    for line in (text or "").splitlines():
+        name, _, rest = line.partition(":")
+        number = rest.strip().split(" ")[0]
+        if number.isdigit():
+            values[name] = int(number) * 1024 / 1e9
+    total, available = values.get("MemTotal"), values.get("MemAvailable")
+    swap = (values["SwapTotal"] - values["SwapFree"]) if "SwapTotal" in values and "SwapFree" in values else None
+    return total, (total - available) if total is not None and available is not None else None, swap
+
+
+def ollama_status(ollama_url, timeout=METRICS_COMMAND_TIMEOUT):
+    """{"up", "loaded"}: Ollama answering, and the models it has in memory (/api/ps)."""
+    base = ollama_url.rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/api/ps", timeout=timeout) as response:
+            body = json.loads(response.read() or b"{}")
+        loaded = [m.get("name") or m.get("model") for m in body.get("models") or [] if isinstance(m, dict)]
+        return {"up": True, "loaded": sorted(m for m in loaded if isinstance(m, str))}
+    except (OSError, ValueError, urllib.error.URLError, AttributeError):
+        return {"up": False, "loaded": []}
+
+
+def collect_metrics(root, ollama_url, run=run_capped, read=None, ollama=ollama_status, platform=None):
+    """One collection: numbers or None (never a guess). Windows gets disk, cores and Ollama only."""
+    platform = platform or sys.platform
+    out = {"mem_total_gb": None, "mem_used_gb": None, "swap_used_gb": None, "disk_free_gb": None, "load5": None,
+           "cores": os.cpu_count()}
+    try:
+        out["disk_free_gb"] = round(free_disk_gb(root), 1)
+    except OSError:
+        pass
+    if platform == "darwin":
+        total = run(["sysctl", "-n", "hw.memsize"])
+        try:
+            out["mem_total_gb"] = round(int(total.strip()) / 1e9, 1) if total else None
+        except ValueError:
+            pass
+        used = parse_vm_stat(run(["vm_stat"]))
+        out["mem_used_gb"] = round(used, 1) if used is not None else None
+        swap = parse_swapusage(run(["sysctl", "vm.swapusage"]))
+        out["swap_used_gb"] = round(swap, 2) if swap is not None else None
+    elif platform.startswith("linux"):
+        try:
+            text = read("/proc/meminfo") if read else Path("/proc/meminfo").read_text()
+        except OSError:
+            text = ""
+        total, used, swap = parse_meminfo(text)
+        out.update({k: round(v, 2) if v is not None else None
+                    for k, v in (("mem_total_gb", total), ("mem_used_gb", used), ("swap_used_gb", swap))})
+    if hasattr(os, "getloadavg"):
+        try:
+            out["load5"] = round(os.getloadavg()[1], 2)
+        except OSError:
+            pass
+    out["ollama"] = ollama(ollama_url)
+    return out
+
+
+class MetricsCollector:
+    """Collects in a daemon thread every METRICS_SECONDS; /health serves the cache with its age, so a slow or
+    swapping machine never slows /health down."""
+    def __init__(self, root, ollama_url, collect=None, interval=METRICS_SECONDS):
+        self.root, self.ollama_url, self.interval = root, ollama_url, interval
+        self.collect = collect or (lambda: collect_metrics(self.root, self.ollama_url))
+        self.lock = threading.Lock()
+        self.values, self.at = None, None
+
+    def once(self):
+        values = self.collect()
+        with self.lock:
+            self.values, self.at = values, time.monotonic()
+
+    def run_forever(self):
+        while True:
+            try:
+                self.once()
+            except Exception:  # keep collecting whatever happens
+                pass
+            time.sleep(self.interval)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, name="metrics", daemon=True).start()
+        return self
+
+    def snapshot(self):
+        with self.lock:
+            if self.values is None:
+                return None
+            return dict(self.values, age_s=round(time.monotonic() - self.at, 1))
+
+
+def allowed_controller(url):
+    """https anywhere; plain http only to a loopback or tailnet address (12.1)."""
+    import ipaddress
+    try:
+        parsed = urlparse(url)
+    except (TypeError, ValueError):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host or parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if host == "localhost" or host.endswith(".ts.net"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")
+
+
+def sign_heartbeat(token, node_id, ts, body):
+    message = "%s\n%d\n%s" % (node_id, int(ts), hashlib.sha256(body).hexdigest())
+    return hmac.new(token.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+class Heartbeat:
+    """Pushes the cached /health to the controller about every 10 s, signed with the runner token (the token itself
+    never goes on the wire). Needs `controller` in runner.json and the node id the controller told us."""
+    def __init__(self, manager, token, report, interval=10.0, jitter=2.0, post=None):
+        self.manager, self.token, self.report = manager, token, report
+        self.interval, self.jitter = interval, jitter
+        self.post = post or self._post
+
+    def ready(self):
+        url = getattr(self.manager, "controller_url", None)
+        return bool(url and self.token and getattr(self.manager, "node_id", None))
+
+    @staticmethod
+    def _post(url, body, headers):
+        request = urllib.request.Request(url, data=body, method="POST", headers=headers)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status
+
+    def beat(self, now=None):
+        """One push; False when it isn't configured yet or the controller didn't take it."""
+        if not self.ready():
+            return False
+        body = json.dumps(self.report()).encode()
+        ts = int(time.time() if now is None else now)
+        node_id = self.manager.node_id
+        headers = {"Content-Type": "application/json", "X-Fleet-Node": node_id, "X-Fleet-Ts": str(ts),
+                   "X-Fleet-Sig": sign_heartbeat(self.token, node_id, ts, body)}
+        try:
+            return 200 <= self.post(self.manager.controller_url.rstrip("/") + "/api/nodes/heartbeat", body, headers) < 300
+        except Exception:  # an unreachable or refusing controller: the poll is the fallback
+            return False
+
+    def next_delay(self):
+        return max(1.0, self.interval + (secrets.randbelow(2001) / 1000.0 - 1.0) * self.jitter)
+
+    def run_forever(self):
+        while True:
+            time.sleep(self.next_delay())
+            self.beat()
+
+    def start(self):
+        threading.Thread(target=self.run_forever, name="heartbeat", daemon=True).start()
+        return self
 
 
 class JobManager:
@@ -298,6 +519,13 @@ class JobManager:
         }
         self.profile_config = self._profiles_from(config.get("profiles"))
         self.request_context = threading.local()
+        controller = config.get("controller")
+        self.controller_url = controller if isinstance(controller, str) and allowed_controller(controller) else None
+        if isinstance(controller, str) and not self.controller_url:
+            print("runner.json controller %r ignored: use https, or http to a loopback or tailnet address"
+                  % controller, file=sys.stderr)
+        self.node_id = None  # learned from the controller's token-checked polls (X-Fleet-Node-Id)
+        self.metrics = None  # a MetricsCollector, started by main()
         self.agents = find_agents(self.ollama_url)
         self.model_manager = ModelManager(self.root, self.ollama_url, self.models_config)
         self._load_jobs()
@@ -1908,28 +2136,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         parts = [item for item in parsed.path.split("/") if item]
         if method == "GET" and parts == ["health"]:
-            agents = find_agents(self.manager.ollama_url)
-            self.manager.agents = agents
-            running = 0
-            for job in self.manager.jobs.values():
-                self.manager.refresh(job)
-                running += job.get("state") == "running"
-            power = system_power()
-            power["min_battery_pct"] = self.manager.min_battery_pct
-            power["ok"] = not (power["on_battery"] is True and power["battery_pct"] is not None
-                                and power["battery_pct"] < self.manager.min_battery_pct)
-            return {"ok": True, "version": VERSION, "digest": RUNNER_DIGEST,
-                    "power": power, "max_mode": self.manager.max_mode,
-                    "agents": agents, "running": running,
-                    "gate_profiles": sorted(self.manager.gate_profiles),
-                    "allow_raw_gates": self.manager.allow_raw_gates,
-                    "allowed_roots": self.manager.allowed_roots,
-                    "max_jobs": self.manager.max_jobs,
-                    "models": self.manager.models_config,
-                    "policy": True, "network": self.manager.network,
-                    "budget": self.manager.budget_support(), **self.manager.profiles(),
-                    "profiles": self.manager.profile_report(), "checkpoint": True,
-                    "default_models": self.manager.default_models()}
+            return health_report(self.manager)
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:
@@ -1980,6 +2187,10 @@ class Handler(BaseHTTPRequestHandler):
             self.manager.audit("auth_failed", "invalid runner token")
             self._send(401, {"detail": "invalid runner token"})
             return
+        # The controller tells us our node id, for signed heartbeats. Only from a token-checked request (12.1).
+        node_id = self.headers.get("X-Fleet-Node-Id")
+        if node_id and NODE_ID.fullmatch(node_id):
+            self.manager.node_id = node_id
         try:
             self._send(200, self._route(method))
         except HttpError as exc:
@@ -1992,6 +2203,41 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._handle("POST")
+
+
+def health_report(manager):
+    """/health, also the body of a heartbeat. Metrics and Ollama come from the metrics thread's cache when it runs,
+    so no slow command or probe sits on this path (docs/SPEC-live-monitor.md 4.1)."""
+    metrics = manager.metrics.snapshot() if getattr(manager, "metrics", None) else None
+    ollama_up = (metrics.get("ollama") or {}).get("up") if metrics else None
+    agents = find_agents(manager.ollama_url, ollama_up=ollama_up)
+    manager.agents = agents
+    running = 0
+    for job in manager.jobs.values():
+        manager.refresh(job)
+        running += job.get("state") == "running"
+    power = system_power()
+    power["min_battery_pct"] = manager.min_battery_pct
+    power["ok"] = not (power["on_battery"] is True and power["battery_pct"] is not None
+                       and power["battery_pct"] < manager.min_battery_pct)
+    report = {"ok": True, "version": VERSION, "digest": RUNNER_DIGEST,
+              "power": power, "max_mode": manager.max_mode,
+              "agents": agents, "running": running,
+              "gate_profiles": sorted(manager.gate_profiles),
+              "allow_raw_gates": manager.allow_raw_gates,
+              "allowed_roots": manager.allowed_roots,
+              "max_jobs": manager.max_jobs,
+              "models": manager.models_config,
+              "policy": True, "network": manager.network,
+              "budget": manager.budget_support(), **manager.profiles(),
+              "profiles": manager.profile_report(), "checkpoint": True,
+              "default_models": manager.default_models(),
+              # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
+              "heartbeat": bool(getattr(manager, "controller_url", None))}
+    if metrics is not None:
+        report["metrics"] = metrics
+        report["age_s"] = metrics.get("age_s")
+    return report
 
 
 class RunnerServer(ThreadingHTTPServer):
@@ -2075,6 +2321,8 @@ def main():
     server = RunnerServer(address, Handler)
     server.manager = JobManager(fleet_dir, ollama_url)
     server.runner_token = runner_token(fleet_dir)
+    server.manager.metrics = MetricsCollector(server.manager.root, ollama_url).start()
+    Heartbeat(server.manager, server.runner_token, lambda: health_report(server.manager)).start()
 
     def stop(_signum, _frame):
         threading.Thread(target=server.shutdown, daemon=True).start()

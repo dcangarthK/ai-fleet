@@ -318,6 +318,138 @@ class ControllerTests(unittest.TestCase):
         self.task()
         self.assertNotIn("tok-master-123", FakeRunner.tokens)
 
+    # ---------- phase 6: instructions and policy ----------
+
+    def test_policy_crud_versions_history_and_events(self):
+        role = "p6-crud"
+        first = self.c.put(f"/api/instructions/role/{role}", json={"text": "First."}, headers=W)
+        second = self.c.put(f"/api/instructions/role/{role}", json={"text": "Second."}, headers=W)
+        self.assertEqual((first.status_code, second.status_code), (200, 200))
+        self.assertEqual((first.json()["version"], second.json()["version"]), (1, 2))
+        current = [row for row in self.c.get("/api/instructions").json()
+                   if row["scope"] == "role" and row["scope_id"] == role]
+        self.assertEqual([(row["version"], row["text"]) for row in current], [(2, "Second.")])
+        history = self.c.get(f"/api/instructions/role/{role}/history").json()
+        self.assertEqual([(row["version"], row["text"]) for row in history], [(2, "Second."), (1, "First.")])
+
+        bodies = [{"limits": {"task_minutes": 30}}, {"network": {"agents": "deny"}}]
+        for body in bodies:
+            response = self.c.put(f"/api/policies/role/{role}", json={"body": body}, headers=W)
+            self.assertEqual(response.status_code, 200, response.text)
+        current = [row for row in self.c.get("/api/policies").json()
+                   if row["scope"] == "role" and row["scope_id"] == role]
+        self.assertEqual([(row["version"], row["body"]) for row in current], [(2, bodies[1])])
+        history = self.c.get(f"/api/policies/role/{role}/history").json()
+        self.assertEqual([(row["version"], row["body"]) for row in history], [(2, bodies[1]), (1, bodies[0])])
+        changed = [event for event in self.c.get("/api/events/list?limit=1000").json()
+                   if event["type"] in ("instructions.changed", "policy.changed")
+                   and event["data"].get("scope_id") == role]
+        self.assertEqual([event["type"] for event in changed],
+                         ["instructions.changed", "instructions.changed", "policy.changed", "policy.changed"])
+        self.assertTrue(all(event["data"]["author"] == "local" for event in changed))
+
+    def test_policy_preview(self):
+        role = "p6-preview"
+        self.c.put(f"/api/instructions/role/{role}", json={"text": "Review carefully."}, headers=W)
+        self.c.put(f"/api/policies/role/{role}",
+                   json={"body": {"limits": {"task_minutes": 30}, "network": {"agents": "deny"}}}, headers=W)
+        response = self.c.post("/api/policies/preview", json={
+            "node": "master", "role": role, "agent": "claude",
+            "policy": {"limits": {"task_minutes": 10}},
+        }, headers=W)
+        self.assertEqual(response.status_code, 200, response.text)
+        preview = response.json()
+        self.assertEqual(preview["instructions"], "## role:p6-preview\nReview carefully.")
+        self.assertEqual(preview["policy"]["limits"]["task_minutes"], 10)
+        self.assertEqual(preview["policy"]["network"]["agents"], "deny")
+        self.assertEqual(preview["sources"]["limits.task_minutes"], "task")
+        self.assertEqual(len(preview["hash"]), 64)
+
+    def test_policy_snapshot_sent_and_kept_on_message(self):
+        role = "p6-snapshot"
+        self.c.put(f"/api/instructions/role/{role}", json={"text": "Original instructions."}, headers=W)
+        self.c.put(f"/api/policies/role/{role}",
+                   json={"body": {"limits": {"task_minutes": 30}, "tools": {"claude_allow": ["Read"]}}},
+                   headers=W)
+        task = self.task(role=role, policy={"limits": {"task_minutes": 20}})
+        saved = self.c.get(f"/api/tasks/{task['id']}").json()
+        self.assertEqual(saved["role"], role)
+        self.assertIn("Original instructions.", saved["instructions"])
+        self.assertEqual(saved["policy"]["limits"]["task_minutes"], 20)
+        self.assertEqual(len(saved["policy_hash"]), 64)
+        sent = [body for path, body in FakeRunner.calls if path == "/jobs" and body["id"] == task["id"]][0]
+        self.assertEqual(sent["instructions"], saved["instructions"])
+        self.assertEqual(sent["policy"]["limits"]["task_minutes"], 20)
+        self.assertEqual(sent["policy_hash"], saved["policy_hash"])
+
+        self.c.put(f"/api/instructions/role/{role}", json={"text": "Changed later."}, headers=W)
+        self.c.put(f"/api/policies/role/{role}", json={"body": {"limits": {"task_minutes": 1}}}, headers=W)
+        FakeRunner.jobs[task["id"]].update(state="exited", exit_code=1)
+        wait_for(lambda: self.state(task["id"]) == "failed")
+        self.c.post(f"/api/tasks/{task['id']}/message", json={"text": "continue"}, headers=W)
+        resumed = self.c.get(f"/api/tasks/{task['id']}").json()
+        self.assertEqual((resumed["instructions"], resumed["policy"], resumed["policy_hash"]),
+                         (saved["instructions"], saved["policy"], saved["policy_hash"]))
+        self.c.post(f"/api/tasks/{task['id']}/cancel", headers=W)
+
+    def test_policy_max_concurrent_queueing(self):
+        role = "p6-concurrent"
+        running = next(node["running_tasks"] for node in controller.tasks.node_rows() if node["id"] == "master")
+        self.c.put(f"/api/policies/role/{role}",
+                   json={"body": {"limits": {"max_concurrent": running + 1}}}, headers=W)
+        first = self.task(role=role)
+        self.assertEqual(first["state"], "working")
+        second = self.task(role=role)
+        self.assertEqual(second["state"], "queued")
+        self.assertEqual(second["error"], "max concurrent tasks reached")
+        self.assertNotIn(second["id"], FakeRunner.jobs)
+        FakeRunner.jobs[first["id"]].update(state="exited", exit_code=0)
+        wait_for(lambda: self.state(first["id"]) == "review")
+        wait_for(lambda: self.state(second["id"]) == "working")
+        self.c.post(f"/api/tasks/{second['id']}/cancel", headers=W)
+
+    def test_policy_daily_budget_queueing(self):
+        role = "p6-budget"
+        self.c.put(f"/api/policies/role/{role}",
+                   json={"body": {"limits": {"agent_minutes_per_day": 0.01}}}, headers=W)
+        first = self.task(role=role)
+        controller.tasks.update(first["id"], agent_seconds=1)
+        second = self.task(role=role)
+        self.assertEqual((second["state"], second["error"]), ("queued", "daily agent budget used"))
+        self.assertNotIn(second["id"], FakeRunner.jobs)
+        self.c.post(f"/api/tasks/{first['id']}/cancel", headers=W)
+        self.c.post(f"/api/tasks/{second['id']}/cancel", headers=W)
+
+    def test_policy_quiet_hours_uses_injected_clock(self):
+        role = "p6-quiet"
+        self.c.put(f"/api/policies/role/{role}",
+                   json={"body": {"limits": {"quiet_hours": ["10:00-11:00"]}}}, headers=W)
+        original = controller.tasks.local_minute
+        try:
+            controller.tasks.local_minute = lambda: 10 * 60 + 30
+            task = self.task(role=role)
+            self.assertEqual((task["state"], task["error"]), ("queued", "quiet hours"))
+            self.assertNotIn(task["id"], FakeRunner.jobs)
+            controller.tasks.local_minute = lambda: 12 * 60
+            wait_for(lambda: self.state(task["id"]) == "working")
+            self.c.post(f"/api/tasks/{task['id']}/cancel", headers=W)
+        finally:
+            controller.tasks.local_minute = original
+
+    def test_policy_put_requires_admin_scope(self):
+        remote = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        view, operate, admin = (auth.create_token(scope, "phase6-" + scope)
+                                for scope in ("view", "operate", "admin"))
+        headers = lambda token: {"Authorization": f"Bearer {token}", **W}  # noqa: E731
+        path = "/api/policies/role/p6-scope"
+        self.assertEqual(remote.get("/api/policies", headers=headers(view)).status_code, 200)
+        self.assertEqual(remote.post("/api/policies/preview", json={"node": "master", "agent": "claude"},
+                                     headers=headers(view)).status_code, 200)
+        self.assertEqual(remote.put(path, json={"body": {}}, headers=headers(operate)).status_code, 403)
+        response = remote.put(path, json={"body": {}}, headers=headers(admin))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["author"], "phase6-admin")
+
     # ---------- phase 5b: catalog, installs, roles that wait ----------
 
     def models(self):

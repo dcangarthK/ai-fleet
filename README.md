@@ -76,6 +76,15 @@ it in argv: `uv run --script master/controller/controller.py runner-token set <n
 Use `runner-token clear <node>` to remove a stored node credential. The onboarding scripts print the full
 registration command once.
 
+### Policies
+
+The Policies page stores versioned instructions and restrictions at fleet, node, role, and agent scope. New
+tasks merge those layers with an optional task policy, snapshot the effective instructions/policy/hash, and keep
+that snapshot for follow-up messages and resumes. Allowed folders and Claude tools intersect; denials and quiet
+hours accumulate; mode, time, concurrency, and daily budgets take the strictest value. The node runner applies
+the snapshot only as a further restriction—its local `runner.json` remains the hard ceiling for paths, mode,
+network, job time, and gates. Policy/instruction edits require an `admin` token.
+
 **Dashboard:** http://127.0.0.1:8700 shows what needs you, tasks by state with live activity, diffs, nodes and usage.
 Updates are pushed live. macOS notifications fire when a task needs you or finishes (`master/plugins/`).
 

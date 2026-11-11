@@ -23,7 +23,8 @@ SCOPES = ["view", "operate", "admin"]
 COOKIE = "fleet_token"
 
 # Writes that change who/what is trusted. Everything else that writes is "operate".
-ADMIN_PATHS = ("/api/roles", "/api/models", "/api/tasks/approve", "/api/tasks/reject")
+ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies",
+               "/api/tasks/approve", "/api/tasks/reject")
 
 
 def _hash(token: str) -> str:
@@ -40,20 +41,27 @@ def create_token(scope: str, label: str) -> str:
     return token
 
 
-def token_scope(token: str | None) -> str | None:
+def token_identity(token: str | None) -> tuple[str, str] | None:
     if not token:
         return None
     with db() as c:
-        row = c.execute("SELECT id, scope FROM tokens WHERE hash=?", (_hash(token),)).fetchone()
+        row = c.execute("SELECT id, scope, label FROM tokens WHERE hash=?", (_hash(token),)).fetchone()
         if row:
             c.execute("UPDATE tokens SET last_used=? WHERE id=?", (time.time(), row["id"]))
-    return row["scope"] if row else None
+    return (row["scope"], row["label"]) if row else None
+
+
+def token_scope(token: str | None) -> str | None:
+    identity = token_identity(token)
+    return identity[0] if identity else None
 
 
 def required_scope(request: Request) -> str:
     if request.method in ("GET", "HEAD"):
         return "view"
     path = request.url.path
+    if path == "/api/policies/preview":
+        return "view"
     # Installing/removing a catalog model is an ordinary requested operation; other node mutations are admin.
     if path.startswith("/api/nodes/") and "/models/" in path:
         return "operate"
@@ -77,15 +85,18 @@ async def access_control(request: Request, call_next):
         if host not in LOCAL_HOSTS:
             return _deny("forbidden host")
         request.state.scope = "admin"
+        request.state.actor = "local"
         return await call_next(request)
     if request.url.path == "/login":
         return await call_next(request)
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else request.cookies.get(COOKIE)
-    scope = token_scope(token)
-    if scope is None:
+    identity = token_identity(token)
+    if identity is None:
         return _deny("sign in: open /login?token=<token>")
+    scope, label = identity
     if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
         return _deny(f"needs {required_scope(request)} access; this token is {scope}")
     request.state.scope = scope
+    request.state.actor = label
     return await call_next(request)

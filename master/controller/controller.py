@@ -25,13 +25,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth  # noqa: E402
 import events  # noqa: E402
+import policy as fleet_policy  # noqa: E402
 import tasks  # noqa: E402
 from store import db, init_db  # noqa: E402
 
@@ -433,6 +434,131 @@ class NodeModelRequest(BaseModel):
     params: dict | None = None
     override_fit: bool = False
     confirm_preexisting: bool = False
+
+
+class InstructionBody(BaseModel):
+    text: str
+
+
+class PolicyBody(BaseModel):
+    body: dict = Field(default_factory=dict)
+
+
+class PolicyPreview(BaseModel):
+    node: str
+    agent: str
+    role: str | None = None
+    policy: dict | None = None
+
+
+def validate_policy_scope(scope: str, scope_id: str) -> None:
+    if scope not in ("fleet", "node", "role", "agent"):
+        raise HTTPException(400, "scope must be fleet, node, role or agent")
+    if scope == "fleet" and scope_id != "*":
+        raise HTTPException(400, "fleet scope_id must be *")
+    if scope != "fleet" and (not scope_id or scope_id == "*"):
+        raise HTTPException(400, f"{scope} scope_id is invalid")
+    if scope == "node":
+        with db() as c:
+            if not c.execute("SELECT 1 FROM nodes WHERE id=?", (scope_id,)).fetchone():
+                raise HTTPException(404, f"unknown node {scope_id}")
+    if scope == "role" and not ROLE_RE.fullmatch(scope_id):
+        raise HTTPException(400, "role scope_id must be a role name")
+    if scope == "agent" and scope_id not in tasks.AGENTS:
+        raise HTTPException(400, f"agent scope_id must be one of {sorted(tasks.AGENTS)}")
+
+
+def _version_rows(table: str, scope: str | None = None, scope_id: str | None = None) -> list[dict]:
+    value = "text" if table == "instructions" else "body"
+    where, args = "", []
+    if scope is not None:
+        where = "WHERE scope=? AND scope_id=?"
+        args = [scope, scope_id]
+    else:
+        where = (f"WHERE version=(SELECT MAX(v.version) FROM {table} v "
+                 f"WHERE v.scope={table}.scope AND v.scope_id={table}.scope_id)")
+    with db() as c:
+        rows = [dict(row) for row in c.execute(
+            f"SELECT scope,scope_id,version,{value},author,created_at FROM {table} "
+            f"{where} ORDER BY " + ("version DESC" if scope is not None else "scope,scope_id"), args)]
+    if table == "policies":
+        for row in rows:
+            row["body"] = json.loads(row["body"])
+    return rows
+
+
+@app.get("/api/instructions")
+def list_instructions() -> list[dict]:
+    return _version_rows("instructions")
+
+
+@app.get("/api/instructions/{scope}/{scope_id}/history")
+def instruction_history(scope: str, scope_id: str) -> list[dict]:
+    validate_policy_scope(scope, scope_id)
+    return _version_rows("instructions", scope, scope_id)
+
+
+@app.put("/api/instructions/{scope}/{scope_id}")
+def put_instructions(scope: str, scope_id: str, body: InstructionBody, request: Request) -> dict:
+    validate_policy_scope(scope, scope_id)
+    if len(body.text.encode("utf-8")) > 16 * 1024:
+        raise HTTPException(400, "instructions exceed 16 KB")
+    now = time.time()
+    author = getattr(request.state, "actor", "local")
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM instructions WHERE scope=? AND scope_id=?",
+                            (scope, scope_id)).fetchone()[0]
+        c.execute("INSERT INTO instructions VALUES (?,?,?,?,?,?)",
+                  (scope, scope_id, version, body.text, author, now))
+    data = {"scope": scope, "scope_id": scope_id, "version": version, "text": body.text,
+            "author": author, "created_at": now}
+    events.emit(None, "instructions.changed", {k: data[k] for k in ("scope", "scope_id", "version", "author")})
+    return data
+
+
+@app.get("/api/policies")
+def list_policies() -> list[dict]:
+    return _version_rows("policies")
+
+
+@app.get("/api/policies/{scope}/{scope_id}/history")
+def policy_history(scope: str, scope_id: str) -> list[dict]:
+    validate_policy_scope(scope, scope_id)
+    return _version_rows("policies", scope, scope_id)
+
+
+@app.put("/api/policies/{scope}/{scope_id}")
+def put_policy(scope: str, scope_id: str, body: PolicyBody, request: Request) -> dict:
+    validate_policy_scope(scope, scope_id)
+    try:
+        fleet_policy.validate(body.body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    now = time.time()
+    author = getattr(request.state, "actor", "local")
+    with db() as c:
+        c.execute("BEGIN IMMEDIATE")
+        version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM policies WHERE scope=? AND scope_id=?",
+                            (scope, scope_id)).fetchone()[0]
+        c.execute("INSERT INTO policies VALUES (?,?,?,?,?,?)",
+                  (scope, scope_id, version, json.dumps(body.body), author, now))
+    data = {"scope": scope, "scope_id": scope_id, "version": version, "body": body.body,
+            "author": author, "created_at": now}
+    events.emit(None, "policy.changed", {k: data[k] for k in ("scope", "scope_id", "version", "author")})
+    return data
+
+
+@app.post("/api/policies/preview")
+def preview_policy(spec: PolicyPreview) -> dict:
+    if spec.agent not in tasks.AGENTS:
+        raise HTTPException(400, f"agent must be one of {sorted(tasks.AGENTS)}")
+    with db() as c:
+        node = resolve(c, spec.node)
+    try:
+        return tasks.effective_policy(node["id"], spec.role, spec.agent, spec.policy)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 def model_id(reference: str) -> str:

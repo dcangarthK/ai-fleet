@@ -174,16 +174,19 @@ def _q(value: str) -> str:
 
 @mcp.tool()
 def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: str = "auto-edit",
-               gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True) -> str:
+               gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
+               role: str = "") -> str:
     """Delegate work to an agent on the fleet and return immediately with the task.
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
     mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
           | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
-    node: optional; otherwise the least-busy eligible node is picked. parent_id links sub-tasks.
+    node: optional; otherwise the least-busy eligible node is picked. role selects its instruction/policy layer.
+    parent_id links sub-tasks.
     Then use wait_tasks; don't poll."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
-    for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node, "parent_id": parent_id}.items():
+    for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node,
+                 "parent_id": parent_id, "role": role}.items():
         if v:
             body[k] = v
     return _controller("POST", "/api/tasks", body)

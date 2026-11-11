@@ -398,14 +398,14 @@ Leader election is out of scope: there is one controller.
   console's `runner_ok` (`controller.py` ~2248) and Live all use it. A node is **OFFLINE** when any of these holds:
   1. no runner report, or `runner_fails >= 3` (today's poll rule, kept for every runner);
   2. **heartbeat expiry:** the node has an accepted heartbeat (`heartbeat_at` not null) **and**
-     `now - heartbeat_at > 25 s` (`FLEET_HEARTBEAT_TTL`) **and** `now - polled_at > POLL_SECONDS + 5` (35 s).
+     `now - heartbeat_at > 25 s` (`FLEET_HEARTBEAT_TTL`) **and** `now - polled_at > 2 × POLL_SECONDS + 5` (65 s; a tick runs past its sleep, so a healthy poll can be older than one interval).
      A NULL `polled_at` (after migration, or no successful poll since) counts as stale; the startup grace covers
      the window just after the migration.
 - **Why the poll term:** the 30 s poll can't refute a 25 s expiry on its own, so expiry needs the poll to be stale
   too.
   - A node that can be polled but whose pushes fail stays online, and doesn't flap. Live shows "heartbeat lost,
     polling".
-  - A dead node is OFFLINE within 25 to 35 s of its last contact. Rule 1 still catches it at 3 failed polls.
+  - A dead node is OFFLINE within about 65 s of its last contact. Rule 1 still catches it at 3 failed polls.
   - A runner that never got a heartbeat accepted (wrong URL, no `controller`) is judged by rule 1 only. Its own
     `heartbeat` flag is never trusted.
 - **The sweep.** A 5 s loop in the controller owns the transitions:
@@ -484,7 +484,7 @@ availability check to a paid model (CLAUDE.md budget rule 7).
 16. **Liveness.**
     - `runner_offline` is the single rule (12.2). A heartbeat never resets `runner_fails`.
     - A node with heartbeats goes OFFLINE (`node.runner_offline` emitted once) when both its heartbeat (25 s) and
-      its poll (35 s) are stale (a NULL `polled_at` counts as stale). It comes back online (`node.runner_online`
+      its poll (65 s) are stale (a NULL `polled_at` counts as stale). It comes back online (`node.runner_online`
       once) when `runner_offline` returns None: on an accepted heartbeat if `runner_fails < 3`, otherwise only on
       a successful poll. With `runner_fails >= 3`, resumed heartbeats and failing polls leave it OFFLINE.
     - A node whose pushes fail but whose polls succeed never goes OFFLINE.

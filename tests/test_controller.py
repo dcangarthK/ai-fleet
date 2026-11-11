@@ -599,7 +599,8 @@ Imported body.
         FakeRunner.agents["codex"] = "/x/codex"
         self.c.post("/api/refresh", headers=W)
         issue = {"severity": "high", "file": "app.py", "problem": "Greeting regression",
-                 "evidence": "+hello", "fix": "restore the expected greeting"}
+                 "evidence": "hello", "expected": "the expected greeting",
+                 "actual": "the greeting is hello", "fix": "restore the expected greeting"}
         answers = [json.dumps({"verdict": "request_changes", "issues": [issue]}),
                    json.dumps({"verdict": "approve", "issues": []})]
         controller.pipeline_model_call = lambda role, spec, diff: answers.pop(0)
@@ -681,6 +682,8 @@ Imported body.
             self.assertEqual(sent["repo"], "/r/project")
             self.assertEqual(sent["mode"], "read-only")
             self.assertIn("the builder's changes are exactly the diff below", sent["prompt"])
+            self.assertIn('"verdict":"approve|request_changes|abstain"', sent["prompt"])
+            self.assertIn('"expected":"","actual":""', sent["prompt"])
             self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
         finally:
             FakeRunner.agents["codex"] = None

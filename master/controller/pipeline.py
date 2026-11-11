@@ -1,12 +1,11 @@
 """Pure build-pipeline state machine and evidence-checked review parsing."""
 import copy
-import json
 import re
 import time
 
+import grounding
 
-VERDICTS = {"approve", "request_changes"}
-SEVERITIES = {"high", "medium", "low"}
+
 TERMINAL = {"ready", "failed", "escalated", "cancelled"}
 
 
@@ -64,38 +63,11 @@ def _normalised(text: str) -> str:
 
 
 def parse_review(raw: str, diff: str) -> dict:
-    """Parse review JSON and discard issues whose quoted evidence is absent from the diff."""
-    if not isinstance(raw, str):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    text = raw.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-    if fenced:
-        text = fenced.group(1)
-    try:
-        value = json.loads(text)
-    except (ValueError, TypeError):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    if (not isinstance(value, dict) or value.get("verdict") not in VERDICTS
-            or not isinstance(value.get("issues"), list)):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    issues = []
-    unsupported = 0
-    normal_diff = _normalised(diff if isinstance(diff, str) else "")
-    for issue in value["issues"]:
-        if (not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES
-                or not isinstance(issue.get("problem"), str) or not issue["problem"].strip()
-                or not isinstance(issue.get("evidence"), str) or not issue["evidence"].strip()):
-            return {"status": "abstained", "unsupported": 0, "issues": []}
-        for optional in ("file", "fix"):
-            if optional in issue and not isinstance(issue[optional], str):
-                return {"status": "abstained", "unsupported": 0, "issues": []}
-        if _normalised(issue["evidence"]) not in normal_diff:
-            unsupported += 1
-            continue
-        issues.append({key: issue[key] for key in ("severity", "file", "problem", "evidence", "fix")
-                       if key in issue})
-    return {"status": "valid", "verdict": value["verdict"], "issues": issues,
-            "unsupported": unsupported}
+    """Apply the shared review contract, retaining the legacy invalid status name."""
+    parsed = grounding.check_review(raw, diff)
+    if parsed["status"] == "invalid":
+        parsed["status"] = "abstained"
+    return parsed
 
 
 def _resolution_text(issues: list[dict]) -> str:
@@ -143,11 +115,14 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     p["reviews"][key] = parsed
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
-    valid = [review for review in p["reviews"].values() if review.get("status") == "valid"]
+    valid = [review for review in p["reviews"].values()
+             if review.get("status") == "valid" or review.get("verdict") == "abstain"]
     unsupported = sum(review.get("unsupported", 0) for review in p["reviews"].values())
+    identical_fix = sum(review.get("identical_fix", 0) for review in p["reviews"].values())
     if not valid:
         p["state"] = "escalated"
-        _history(p, "escalated", unsupported=unsupported, note="all reviewers abstained")
+        _history(p, "escalated", unsupported=unsupported, identical_fix=identical_fix,
+                 note="all reviewers returned invalid reviews")
         return p, []
     actionable = []
     seen = set()
@@ -161,18 +136,18 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
                 actionable.append(issue)
     if not actionable:
         p["state"] = "ready"
-        _history(p, "ready", issues=0, unsupported=unsupported)
+        _history(p, "ready", issues=0, unsupported=unsupported, identical_fix=identical_fix)
         return p, []
-    _history(p, "resolving", issues=len(actionable), unsupported=unsupported)
+    _history(p, "resolving", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix)
     p["round"] += 1
     if p["round"] > p["max_rounds"]:
         p["round"] = p["max_rounds"]
         p["state"] = "escalated"
-        _history(p, "escalated", issues=len(actionable), unsupported=unsupported,
+        _history(p, "escalated", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
                  note="review rounds exhausted")
         return p, []
     p["state"] = "building"
     p["reviews"] = {}
-    _history(p, "building", issues=len(actionable), unsupported=unsupported,
+    _history(p, "building", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
              note="review issues sent to builder")
     return p, [{"do": "message_build", "text": _resolution_text(actionable)}]

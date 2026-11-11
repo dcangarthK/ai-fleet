@@ -5,6 +5,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evals"))
 import run_evals as E  # noqa: E402
@@ -146,6 +147,24 @@ class CoderCasesAreSolvable(unittest.TestCase):
         self.assertEqual((r["passed"], r["error"]), (0, "timeout"))
 
 
+REVIEW_DIFF = """--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-safe_call(user_input)
++dangerous_call(user_input)
+"""
+
+
+def review_issue(problem="injection", severity="high", evidence="dangerous_call(user_input)",
+                 fix="replace it with validated handling"):
+    return {"severity": severity, "file": "app.py", "problem": problem, "evidence": evidence,
+            "expected": "Input is handled safely.", "actual": "Input reaches a dangerous call.", "fix": fix}
+
+
+def checked_review(verdict, *issues, diff=REVIEW_DIFF):
+    return E.parse_review(json.dumps({"verdict": verdict, "issues": list(issues)}), diff)
+
+
 class Extraction(unittest.TestCase):
     def test_extract_fenced(self):
         self.assertEqual(E.extract_code("Here:\n```python\ndef f():\n    return 1\n```\nDone"), "def f():\n    return 1")
@@ -161,13 +180,16 @@ class Extraction(unittest.TestCase):
         self.assertTrue(E.extract_code(text, "add").startswith("def add"))
 
     def test_parse_review_is_strict(self):
-        self.assertIsNone(E.parse_review("looks good"))
-        self.assertIsNone(E.parse_review('{"verdict": "maybe", "issues": []}'))
-        self.assertIsNone(E.parse_review('Sure! {"verdict":"approve","issues":[]} thanks'))
-        self.assertIsNone(E.parse_review('{"verdict":"approve"}'))
-        self.assertIsNone(E.parse_review('{"verdict":"approve","issues":["serious defect"]}'))
-        self.assertIsNone(E.parse_review('{"verdict":"approve","issues":[{"severity":"critical","problem":"x"}]}'))
-        self.assertEqual(E.parse_review(' {"verdict":"approve","issues":[]} ')["verdict"], "approve")
+        invalid = ["looks good", '{"verdict": "maybe", "issues": []}',
+                   'Sure! {"verdict":"approve","issues":[]} thanks', '{"verdict":"approve"}',
+                   '{"verdict":"approve","issues":["serious defect"]}',
+                   '{"verdict":"approve","issues":[{"severity":"critical","problem":"x"}]}']
+        for raw in invalid:
+            self.assertEqual(E.parse_review(raw, REVIEW_DIFF)["status"], "invalid", raw)
+        self.assertEqual(E.parse_review(' {"verdict":"approve","issues":[]} ', REVIEW_DIFF)["verdict"],
+                         "approve")
+        self.assertEqual(E.parse_review('{"verdict":"abstain","issues":[]}', REVIEW_DIFF)["status"],
+                         "abstained")
 
 
 class ReviewScoring(unittest.TestCase):
@@ -175,38 +197,47 @@ class ReviewScoring(unittest.TestCase):
     clean = {"expect": "approve", "keywords": []}
 
     def test_found_bug(self):
-        r = {"verdict": "request_changes", "issues": [{"severity": "high", "problem": "SQL injection via f-string"}]}
+        r = checked_review("request_changes", review_issue("SQL injection via f-string"))
         self.assertEqual(E.score_review(self.bug, r)["score"], 1.0)
 
     def test_keyword_in_low_issue_or_late_issue_does_not_count(self):
-        low = {"verdict": "request_changes", "issues": [{"severity": "low", "problem": "injection"}]}
+        low = checked_review("request_changes", review_issue(severity="low"))
         self.assertEqual(E.score_review(self.bug, low)["score"], 0.5)
-        pile = [{"severity": "high", "problem": f"thing {i}"} for i in range(3)]
-        late = {"verdict": "request_changes", "issues": pile + [{"severity": "high", "problem": "injection"}]}
+        pile = [review_issue(f"thing {i}", fix=f"distinct proposal {i}") for i in range(3)]
+        late = checked_review("request_changes", *pile, review_issue("injection", fix="late proposal"))
         self.assertEqual(E.score_review(self.bug, late)["score"], 0.5)
 
     def test_blanket_rejection_scores_poorly(self):
         cases = E.load("reviewer")
-        always = {"verdict": "request_changes", "issues": []}
+        always = checked_review("request_changes")
         total = sum(E.score_review(c, always)["score"] for c in cases) / len(cases)
         self.assertLess(total, 0.35)
 
     def test_right_verdict_wrong_reason(self):
-        r = {"verdict": "request_changes", "issues": [{"severity": "low", "problem": "rename variable"}]}
+        r = checked_review("request_changes", review_issue("rename variable", severity="low"))
         self.assertEqual(E.score_review(self.bug, r)["score"], 0.5)
 
     def test_missed_bug_and_invalid(self):
-        self.assertEqual(E.score_review(self.bug, {"verdict": "approve", "issues": []})["score"], 0.0)
+        self.assertEqual(E.score_review(self.bug, checked_review("approve"))["score"], 0.0)
         self.assertEqual(E.score_review(self.bug, None), {"score": 0.0, "valid_json": False,
                                                           "verdict_ok": False, "found_bug": False})
 
     def test_clean_diff_false_alarm(self):
-        self.assertEqual(E.score_review(self.clean, {"verdict": "approve", "issues": []})["score"], 1.0)
-        nit = {"verdict": "approve", "issues": [{"severity": "low", "problem": "docstring"}]}
+        self.assertEqual(E.score_review(self.clean, checked_review("approve"))["score"], 1.0)
+        self.assertEqual(E.score_review(self.clean, checked_review("abstain"))["score"], 1.0)
+        nit = checked_review("approve", review_issue("docstring", severity="low"))
         self.assertEqual(E.score_review(self.clean, nit)["score"], 1.0)
-        alarm = {"verdict": "approve", "issues": [{"severity": "high", "problem": "imaginary bug"}]}
+        alarm = checked_review("approve", review_issue("imaginary bug"))
         self.assertEqual(E.score_review(self.clean, alarm)["score"], 0.0)
-        self.assertEqual(E.score_review(self.clean, {"verdict": "request_changes", "issues": []})["score"], 0.0)
+        self.assertEqual(E.score_review(self.clean, checked_review("request_changes"))["score"], 0.0)
+
+    def test_unsupported_and_identical_fix_issues_do_not_count(self):
+        unsupported = checked_review("request_changes", review_issue(evidence="not present in the diff"))
+        identical = checked_review("request_changes", review_issue(fix="dangerous_call(user_input)"))
+        self.assertEqual((unsupported["unsupported"], unsupported["issues"]), (1, []))
+        self.assertEqual((identical["identical_fix"], identical["issues"]), (1, []))
+        self.assertEqual(E.score_review(self.bug, unsupported)["score"], 0.5)
+        self.assertEqual(E.score_review(self.bug, identical)["score"], 0.5)
 
 
 class FastScoring(unittest.TestCase):
@@ -228,14 +259,29 @@ class FastScoring(unittest.TestCase):
 
 class CaseFiles(unittest.TestCase):
     def test_shapes(self):
-        coder, reviewer, fast = E.load("coder"), E.load("reviewer"), E.load("fast")
+        coder, reviewer, reviewer_real, fast = (E.load("coder"), E.load("reviewer"),
+                                                E.load("reviewer_real"), E.load("fast"))
         self.assertGreaterEqual(len(coder), 8)
         self.assertGreaterEqual(sum(c["expect"] == "request_changes" for c in reviewer), 8)
         self.assertGreaterEqual(sum(c["expect"] == "approve" for c in reviewer), 2)
         self.assertGreaterEqual(len(fast), 5)
         for c in reviewer:
             self.assertTrue(c["diff"].startswith("---"), c["id"])
+        for c in reviewer_real:
+            self.assertTrue(c["diff"].startswith("---"), c["id"])
         json.dumps(fast)
+
+    def test_reviewer_real_runs_through_reviewer_scoring(self):
+        case = E.load("reviewer_real")[0]
+        raw = json.dumps({"verdict": "abstain", "issues": []})
+        with (mock.patch.object(E, "load", return_value=[case]),
+              mock.patch.object(E, "chat", return_value={"text": raw, "seconds": 0.1, "tokens_per_s": 1}),
+              mock.patch.object(E, "loaded_size_gb", return_value=1.0),
+              mock.patch.object(E, "unload")):
+            result = E.eval_model("http://unused", "model", ["reviewer_real"], 1)
+        scored = result["roles"]["reviewer_real"]["cases"][0]
+        self.assertTrue(scored["valid_json"])
+        self.assertEqual(scored["score"], E.score_review(case, E.parse_review(raw, case["diff"]))["score"])
 
 
 if __name__ == "__main__":

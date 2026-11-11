@@ -126,7 +126,7 @@ class RunnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
-        cls.base = Path(cls.temp.name)
+        cls.base = Path(os.path.realpath(cls.temp.name))
         cls.fleet = cls.base / "fleet"
         cls.bin = cls.base / "bin"
         cls.bin.mkdir()
@@ -165,6 +165,14 @@ class RunnerTests(unittest.TestCase):
         (cls.repo / "tracked.txt").write_text("original\n", encoding="utf-8")
         cls.git("add", "tracked.txt")
         cls.git("commit", "-m", "initial")
+
+        # Node-local policy (phase 4): the temp dir is the allowed root; gates are named profiles.
+        cls.fleet.mkdir()
+        (cls.fleet / "runner.json").write_text(json.dumps({
+            "max_mode": "auto-edit", "allowed_roots": [str(cls.base)],
+            "gate_profiles": {
+                "pass": [sys.executable, "-c", "print('gate passed')"],
+                "fail": [sys.executable, "-c", "import sys; print('gate failed'); sys.exit(7)"]}}))
 
         cls.port = free_port() if cls.http_enabled else 0
         cls.token = "test-secret"
@@ -310,7 +318,7 @@ class RunnerTests(unittest.TestCase):
         status, health = self.request("GET", "/health")
         self.assertEqual(200, status)
         self.assertTrue(health["ok"])
-        self.assertEqual("1", health["version"])
+        self.assertEqual("2", health["version"])
         self.assertEqual("auto-edit", health["max_mode"])
         self.assertEqual(str(self.bin / "claude"), health["agents"]["claude"])
         self.assertEqual(str(self.bin / "codex"), health["agents"]["codex"])
@@ -323,7 +331,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(400, status)
 
     def test_02_spawn_log_result_denials_gate_diff_and_resume(self):
-        gate = '%s -c "print(\'gate passed\')"' % sys.executable
+        gate = "pass"
         status, job = self.create(
             "claude-main", prompt="edit deny", repo=str(self.repo),
             worktree=True, gate=gate,
@@ -374,7 +382,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("duplicate", duplicate["detail"])
 
     def test_03_codex_session_resume_and_failed_gate(self):
-        gate = '%s -c "import sys; print(\'gate failed\'); sys.exit(7)"' % sys.executable
+        gate = "fail"
         status, _ = self.create("codex-main", agent="codex", prompt="codex work", gate=gate)
         self.assertEqual(200, status)
         job = self.wait_job(
@@ -434,7 +442,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("fleet: work from task keep-main", files)
         self.assertIn("untracked.txt", files)
 
-        status, body = self.create("gate-readonly", mode="read-only", gate="true")
+        status, body = self.create("gate-readonly", mode="read-only", gate="pass")
         self.assertEqual(400, status)
         self.assertIn("gate", body["detail"])
 

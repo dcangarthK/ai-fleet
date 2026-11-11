@@ -24,6 +24,7 @@ class FakeRunner(BaseHTTPRequestHandler):
     jobs: dict = {}
     calls: list = []
     max_mode = "auto-edit"
+    tokens: list = []  # X-Runner-Token header of every request
 
     def log_message(self, *a):
         pass
@@ -36,8 +37,10 @@ class FakeRunner(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        FakeRunner.tokens.append(self.headers.get("X-Runner-Token"))
         if self.path == "/health":
-            return self._send(200, {"ok": True, "version": "1", "max_mode": FakeRunner.max_mode, "running": 0,
+            return self._send(200, {"ok": True, "version": "2", "max_mode": FakeRunner.max_mode, "running": 0,
+                                    "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "agents": {"claude": "/x/claude", "codex": None, "ollama": "http://o"}})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
@@ -50,6 +53,7 @@ class FakeRunner(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        FakeRunner.tokens.append(self.headers.get("X-Runner-Token"))
         FakeRunner.calls.append((self.path, body))
         if self.path == "/jobs":
             if body["id"] in self.jobs:
@@ -235,6 +239,30 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("no codex", r.text)
         r = bad({"agent": "ollama", "model": "nope:1b", "prompt": "x"})
         self.assertEqual(r.status_code, 409)
+
+    def test_gate_profile_must_exist_on_node(self):
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "x", "gate": "nope"}, headers=W)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("gate profile nope", r.text)
+
+    def test_per_node_runner_token(self):
+        import subprocess
+        ctl = Path(controller.__file__)
+        out = subprocess.run([sys.executable, str(ctl), "runner-token", "set", "master"], input="tok-master-123\n",
+                             capture_output=True, text=True, env=os.environ.copy(), timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("tok-master-123", out.stdout + out.stderr)
+        FakeRunner.tokens.clear()
+        t = self.task()
+        self.assertIn("tok-master-123", FakeRunner.tokens)
+        for path in ("/api/fleet", f"/api/tasks/{t['id']}", "/api/events/list", "/api/usage"):
+            self.assertNotIn("tok-master-123", self.c.get(path).text, path)
+        out = subprocess.run([sys.executable, str(ctl), "runner-token", "clear", "master"],
+                             capture_output=True, text=True, env=os.environ.copy(), timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        FakeRunner.tokens.clear()
+        self.task()
+        self.assertNotIn("tok-master-123", FakeRunner.tokens)
 
     def test_requested_gate_must_pass(self):
         t = self.task(gate="pytest")

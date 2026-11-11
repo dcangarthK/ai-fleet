@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { get, post, type Pipeline, type PipelineState } from "../lib/api";
 import { useCan, useFleet, useRun } from "../lib/data";
-import { ago } from "../lib/format";
+import { ago, trustReason, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
 const STATE: Record<PipelineState, { tone: string; label: string }> = {
@@ -86,9 +86,10 @@ function PipelineDetail({ p }: { p: Pipeline }) {
                   <td style={{ width: 160 }}>{reviewerLabel(r)}{rv?.task_id && <div className="sub"><Link to={`/tasks?tab=all&task=${rv.task_id}`}>task</Link></div>}</td>
                   <td>
                     {!rv || rv.status === "pending" ? <span className="quiet">waiting</span>
-                      : rv.status !== "valid" && rv.verdict !== "abstain" ? <span className="tone-warn">No usable review{rv.reason ? `: ${rv.reason}` : " (the reply wasn't valid review JSON)"}</span>
-                      : rv.verdict === "abstain" ? <span className="quiet">Found nothing it could defend{rv.reason && <> · {rv.reason}</>}</span>
                       : <>
+                        {rv.status !== "valid" && rv.verdict !== "abstain" ? <span className="tone-warn">No usable review{rv.reason ? `: ${rv.reason}` : " (the reply wasn't valid review JSON)"}</span>
+                          : rv.verdict === "abstain" ? <span className="quiet">Found nothing it could defend{rv.reason && <> · {rv.reason}</>}</span>
+                          : <>
                           <span className={rv.verdict === "approve" ? "tone-ok" : "tone-warn"}>{rv.verdict === "approve" ? "Approved" : "Requested changes"}</span>
                           {!!rv.unsupported && <span className="small quiet"> · {rv.unsupported} claim{rv.unsupported > 1 ? "s" : ""} dropped: the quoted evidence isn't in the diff</span>}
                           {!!rv.identical_fix && <span className="small quiet"> · {rv.identical_fix} dropped: the "fix" is what the code already says</span>}
@@ -101,7 +102,11 @@ function PipelineDetail({ p }: { p: Pipeline }) {
                               {x.fix && <div className="quiet">Fix: {x.fix}</div>}
                             </div>
                           ))}
-                        </>}
+                          </>}
+                        <div className={`small ${rv.trusted ? "tone-ok" : "quiet"}`} title={TRUSTED_RULE}>
+                          {rv.trusted ? "Counted as trusted" : "Not counted as trusted"}: {trustReason(r, rv)}
+                        </div>
+                      </>}
                   </td>
                 </tr>
               );
@@ -111,7 +116,7 @@ function PipelineDetail({ p }: { p: Pipeline }) {
         <details style={{ marginTop: 12 }}>
           <summary className="small">History</summary>
           <ul className="small">
-            {p.history.map((h, i) => <li key={i}>Round {h.round}: {STATE[h.state]?.label ?? h.state} · {ago(h.at)}{h.issues != null && ` · ${h.issues} issues`}{h.unsupported ? ` · ${h.unsupported} unsupported` : ""}{h.note ? ` · ${h.note}` : ""}</li>)}
+            {p.history.map((h, i) => <li key={i}>Round {h.round}: {STATE[h.state]?.label ?? h.state} · {ago(h.at)}{h.issues != null && ` · ${h.issues} issues`}{h.unsupported ? ` · ${h.unsupported} unsupported` : ""}{h.identical_fix ? ` · ${h.identical_fix} identical-fix` : ""}{h.note ? ` · ${h.note}` : ""}</li>)}
           </ul>
         </details>
         <details>

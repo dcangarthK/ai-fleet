@@ -128,3 +128,43 @@ export function progressFraction(p: { completed?: number; total?: number } | nul
   if (!p || !p.total) return null;
   return Math.max(0, Math.min(1, (p.completed ?? 0) / p.total));
 }
+
+/** 0..1 rate → "42%" (one decimal under 10%), or "—" when absent. */
+export function pctText(rate: number | null | undefined): string {
+  if (rate == null || !Number.isFinite(rate)) return "—";
+  const p = rate * 100;
+  return p > 0 && p < 10 ? `${p.toFixed(1)}%` : `${Math.round(p)}%`;
+}
+
+/** "name:tag" form; an untagged "qwen3" is "qwen3:latest" (mirrors the controller's canonical_reference). */
+export function canonicalRef(model: string): string {
+  return model.slice(model.lastIndexOf("/") + 1).includes(":") ? model : `${model}:latest`;
+}
+
+/** Whether the model (as named in the leaderboard) is a catalog entry flagged trusted_reviewer. */
+export function isTrustedModel(
+  catalog: { reference: string; trusted_reviewer?: boolean; derived_model?: string; derived_trusted_reviewer?: boolean }[],
+  model: string,
+): boolean {
+  const ref = canonicalRef(model);
+  return catalog.some((m) =>
+    (m.trusted_reviewer === true && canonicalRef(m.reference) === ref) ||
+    (m.derived_trusted_reviewer === true && !!m.derived_model && canonicalRef(m.derived_model) === ref));
+}
+
+/** Why a pipeline review does or doesn't count as trusted, from fields the review record carries. */
+export function trustReason(
+  reviewer: { kind: string; role?: string; agent?: string },
+  rv: { status: string; verdict?: string; trusted?: boolean; trusted_by?: string; fallback?: boolean },
+): string {
+  if (rv.fallback) return "fallback answer, never trusted";
+  if (rv.trusted) {
+    if (reviewer.kind === "agent") return "agent reviewer";
+    return rv.trusted_by === "benchmark" ? "role's models are benchmark-trusted" : "role named trusted by this pipeline";
+  }
+  if (rv.status !== "valid" && rv.verdict !== "abstain") return "no usable review";
+  return reviewer.kind === "role" ? "role not named trusted and its models aren't all benchmark-trusted" : "agent isn't a trusted kind";
+}
+
+export const TRUSTED_RULE =
+  "Trusted reviewer: held-out precision ≥ 0.9 by default (the controller's FLEET_TRUSTED_PRECISION can change it) and recall ≥ 0.5 on the real-diff benchmark (reviewer_real).";

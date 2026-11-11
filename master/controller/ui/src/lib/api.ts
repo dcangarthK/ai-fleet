@@ -107,6 +107,9 @@ export interface CatalogModel {
   suggested_roles: string[] | null;
   evals: Record<string, number> | null;
   source: string;
+  trusted_reviewer?: boolean;
+  derived_model?: string;
+  derived_trusted_reviewer?: boolean;
   nodes: Record<string, NodeModelState>;
 }
 
@@ -264,9 +267,25 @@ export interface EvalRun {
   log_tail?: string | null;
 }
 
+export interface ReviewMetrics {
+  precision: number | null; recall: number | null; fp_rate: number | null;
+  bug_cases?: number; found?: number; clean_cases?: number; alarmed?: number; serious?: number; matched?: number;
+  unsupported?: number; identical_fix?: number;
+}
+export interface SignalDecision {
+  decision: "kept" | "dropped"; threshold: number | null; coverage: number | null;
+  error_rate: number | null; baseline_error_rate: number | null; train_rows: number; held_out_rows: number; reason: string | null;
+}
+export interface RoleResult {
+  score: number;
+  hallucination_rate?: number; correct_abstain_rate?: number; quote_validity?: number;
+  signal_decisions?: Record<string, SignalDecision>;
+  metrics?: Record<string, ReviewMetrics>;
+}
+
 export interface LeaderRow {
   model: string;
-  roles: Record<string, { score: number }>;
+  roles: Record<string, RoleResult>;
   size_gb: number | null;
   fits_16gb: boolean | null;
   median_s: number | null;
@@ -293,8 +312,8 @@ export interface Pipeline {
   builder: { agent: string; node?: string | null };
   reviewers: ({ kind: "role"; role: string } | { kind: "agent"; agent: string })[];
   build_task: string | null;
-  reviews: Record<string, { status: "valid" | "abstained" | "invalid" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; identical_fix?: number; task_id?: string; reason?: string }>;
-  history: { round: number; state: PipelineState; at: number; issues?: number; unsupported?: number; note?: string }[];
+  reviews: Record<string, { status: "valid" | "abstained" | "invalid" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; identical_fix?: number; trusted?: boolean; trusted_by?: string; fallback?: boolean; task_id?: string; reason?: string }>;
+  history: { round: number; state: PipelineState; at: number; issues?: number; unsupported?: number; identical_fix?: number; note?: string }[];
   created_at: number;
   updated_at: number;
 }

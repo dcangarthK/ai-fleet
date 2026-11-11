@@ -1,7 +1,42 @@
 import { describe, expect, it } from "vitest";
 import type { FleetNode, Task } from "./api";
 import { errorText } from "./api";
-import { ago, duration, inTab, nodeSignal, taskActions } from "./format";
+import { ago, canonicalRef, duration, inTab, isTrustedModel, nodeSignal, trustReason, pctText, taskActions } from "./format";
+
+describe("grounding formatting", () => {
+  it("formats rates", () => {
+    expect(pctText(null)).toBe("—");
+    expect(pctText(0)).toBe("0%");
+    expect(pctText(0.034)).toBe("3.4%");
+    expect(pctText(0.5)).toBe("50%");
+  });
+  it("canonicalises references", () => {
+    expect(canonicalRef("qwen3")).toBe("qwen3:latest");
+    expect(canonicalRef("qwen3:8b")).toBe("qwen3:8b");
+    expect(canonicalRef("host:5000/lib/m")).toBe("host:5000/lib/m:latest");
+  });
+  it("finds trusted models", () => {
+    const cat = [{ reference: "glm:latest", trusted_reviewer: true }, { reference: "x:1b", trusted_reviewer: false }];
+    expect(isTrustedModel(cat, "glm")).toBe(true);
+    expect(isTrustedModel(cat, "x:1b")).toBe(false);
+    expect(isTrustedModel(cat, "none")).toBe(false);
+  });
+  it("finds trusted derived models, not their base", () => {
+    const cat = [{ reference: "qwen3:8b", trusted_reviewer: false, derived_model: "fleet-abc", derived_trusted_reviewer: true },
+                 { reference: "y:1b", trusted_reviewer: false, derived_model: "fleet-y", derived_trusted_reviewer: false }];
+    expect(isTrustedModel(cat, "fleet-abc")).toBe(true);
+    expect(isTrustedModel(cat, "fleet-abc:latest")).toBe(true);
+    expect(isTrustedModel(cat, "qwen3:8b")).toBe(false);
+    expect(isTrustedModel(cat, "fleet-y")).toBe(false);
+  });
+  it("explains pipeline trust", () => {
+    expect(trustReason({ kind: "agent", agent: "claude" }, { status: "valid", trusted: true })).toMatch(/agent/);
+    expect(trustReason({ kind: "role", role: "reviewer" }, { status: "abstained", verdict: "abstain", trusted: true, trusted_by: "benchmark" })).toMatch(/benchmark/);
+    expect(trustReason({ kind: "role", role: "reviewer" }, { status: "valid", trusted: true })).toMatch(/named/);
+    expect(trustReason({ kind: "role", role: "reviewer" }, { status: "valid", fallback: true })).toMatch(/fallback/);
+    expect(trustReason({ kind: "role", role: "reviewer" }, { status: "invalid" })).toMatch(/no usable/);
+  });
+});
 
 const node = (over: Partial<FleetNode>): FleetNode => ({
   id: "n", name: "n", ip: "100.1.1.1", os: "macOS", engine: "ollama", port: 11434, status: "approved",

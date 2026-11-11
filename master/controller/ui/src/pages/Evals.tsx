@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get, post, type EvalRun, type LeaderRow, type Recommendation } from "../lib/api";
-import { useCan, useFleet, useRun } from "../lib/data";
-import { ago, duration } from "../lib/format";
+import { useCan, useFleet, useModels, useRun } from "../lib/data";
+import { ago, duration, isTrustedModel, pctText, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
 const ROLES = ["coder", "reviewer", "fast"];
@@ -24,6 +24,9 @@ export function EvalsPage() {
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved" && n.models.length);
   const nodeModels = nodes.find((n) => n.id === node)?.models ?? [];
   const board = [...(evals.data?.leaderboard ?? [])].sort((a, b) => (b.roles[sortRole]?.score ?? -1) - (a.roles[sortRole]?.score ?? -1));
+  const catalog = useModels().data ?? [];
+  const grounded = board.filter((x) => x.roles.grounded);
+  const realReview = board.filter((x) => x.roles.reviewer_real);
   const best = Object.fromEntries(ROLES.map((r) => [r, Math.max(...board.filter((x) => !x.errors?.length).map((x) => x.roles[r]?.score ?? 0), 0)]));
 
   async function start(e: FormEvent) {
@@ -70,6 +73,80 @@ export function EvalsPage() {
         </table>
         {!evals.isLoading && board.length === 0 && <div className="empty">No results yet. Run an eval below.</div>}
       </div>
+
+      <Section title="Grounding" aside="Answer from the context or abstain; scored on held-out calibration">
+        <div className="panel">
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th><th className="num">Score</th><th className="num">Hallucination</th>
+                <th className="num">Correct abstain</th><th className="num hide-sm">Quote validity</th><th className="hide-sm">Signals (held-out)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grounded.map((x) => {
+                const g = x.roles.grounded;
+                const signals = (
+                  <>
+                      {Object.entries(g.signal_decisions ?? {}).map(([name, d]) => (
+                        <span key={name} className={`tag ${d.decision === "kept" ? "tone-ok" : "tone-quiet"}`}
+                          title={d.decision === "kept"
+                            ? `Threshold ${d.threshold} keeps ${pctText(d.coverage)} of held-out answers with ${pctText(d.error_rate)} errors (baseline ${pctText(d.baseline_error_rate)})`
+                            : d.reason ?? "dropped"}>
+                          {name}: {d.decision}
+                        </span>
+                      ))}
+                      {!Object.keys(g.signal_decisions ?? {}).length && <span className="quiet">—</span>}
+                  </>
+                );
+                return (
+                  <tr key={x.model}>
+                    <td>
+                      <span className="mono">{x.model}</span>
+                      <div className="sub show-sm">{signals}</div>
+                    </td>
+                    <td className="num">{Math.round(g.score)}</td>
+                    <td className={`num ${(g.hallucination_rate ?? 0) > 0.2 ? "tone-bad" : ""}`}>{pctText(g.hallucination_rate)}</td>
+                    <td className="num">{pctText(g.correct_abstain_rate)}</td>
+                    <td className="num hide-sm">{pctText(g.quote_validity)}</td>
+                    <td className="hide-sm small">
+                      {signals}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {grounded.length === 0 && <div className="empty">No grounding results yet. Run <span className="mono">python3 evals/run_evals.py --models &lt;model&gt; --roles grounded</span> on the master. A signal is kept only if a threshold chosen on the training split cuts held-out errors in half at ≥ 70% coverage.</div>}
+        </div>
+      </Section>
+
+      <Section title="Real-diff reviewer" aside="Held-out precision, recall and false-positive rate on this repo's own history">
+        <div className="panel">
+          <table>
+            <thead>
+              <tr><th>Model</th><th className="num">Precision</th><th className="num">Recall</th><th className="num">False positives</th></tr>
+            </thead>
+            <tbody>
+              {realReview.map((x) => {
+                const m = x.roles.reviewer_real.metrics?.holdout;
+                return (
+                  <tr key={x.model}>
+                    <td>
+                      <span className="mono">{x.model}</span>
+                      <div className="sub">{isTrustedModel(catalog, x.model) ? <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span> : <span className="quiet small" title={TRUSTED_RULE}>not trusted</span>}</div>
+                    </td>
+                    <td className="num">{pctText(m?.precision)}</td>
+                    <td className="num">{pctText(m?.recall)}</td>
+                    <td className="num">{pctText(m?.fp_rate)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {realReview.length === 0 && <div className="empty">No real-diff results yet. Run <span className="mono">python3 evals/run_evals.py --models &lt;model&gt; --roles reviewer_real</span>. {TRUSTED_RULE}</div>}
+        </div>
+      </Section>
 
       <Section title="Suggested assignments" aside="Best scoring model per role for each node">
         <div className="panel">

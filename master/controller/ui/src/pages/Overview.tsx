@@ -1,11 +1,12 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { get, type CallStat } from "../lib/api";
+import { get, type CallOutcome, type CallStat } from "../lib/api";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel } from "../components/bits";
 import { taskAction, useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
-import { ago, denialTools, duration, needsYou, nodeName, nodeSignal } from "../lib/format";
+import { ago, denialTools, duration, needsYou, nodeName, nodeSignal, pctText } from "../lib/format";
 
-const pct = (rate: number | null) => (rate == null ? "—" : `${Math.round(rate * 100)}%`);
+// Outcome counts only exist for grounded calls (G4); older controllers omit them.
+const cnt = (c: CallStat, k: CallOutcome) => (c.grounded ? (c.outcomes?.[k] ?? 0) : "—");
 
 export function OverviewPage() {
   const fleet = useFleet();
@@ -93,7 +94,7 @@ export function OverviewPage() {
         <Section title="Model calls" aside="last 7 days">
           <div className="panel">
             <table>
-              <thead><tr><th>Role</th><th>Model</th><th className="num">Calls</th><th className="num">Errors</th><th className="num hide-sm">Typical</th><th className="num hide-sm">Slowest 5%</th><th className="num hide-sm">Fallbacks</th><th className="num hide-sm">Grounded</th><th className="num hide-sm">Abstained</th><th className="num hide-sm">Escalated</th><th className="num hide-sm">Failed check</th></tr></thead>
+              <thead><tr><th>Role</th><th>Model</th><th className="num">Calls</th><th className="num">Errors</th><th className="num hide-sm">Typical</th><th className="num hide-sm">Slowest 5%</th><th className="num hide-sm">Fallbacks</th><th className="num hide-sm">Answered</th><th className="num hide-sm">Abstained</th><th className="num hide-sm">Escalated</th><th className="num hide-sm">Failed check</th></tr></thead>
               <tbody>
                 {(calls.data ?? []).map((c) => (
                   <tr key={c.role + c.model}>
@@ -101,9 +102,10 @@ export function OverviewPage() {
                     <td className={`num ${c.error_rate > 0.1 ? "tone-bad" : ""}`}>{Math.round(c.error_rate * 100)}%</td>
                     <td className="num hide-sm">{(c.p50_ms / 1000).toFixed(1)}s</td><td className="num hide-sm">{(c.p95_ms / 1000).toFixed(1)}s</td>
                     <td className="num hide-sm">{c.fallbacks}</td>
-                    <td className="num hide-sm">{c.grounded || "—"}</td>
-                    <td className="num hide-sm">{pct(c.abstain_rate)}</td><td className="num hide-sm">{pct(c.escalation_rate)}</td>
-                    <td className={`num hide-sm ${(c.check_failed_rate ?? 0) > 0.1 ? "tone-bad" : ""}`}>{pct(c.check_failed_rate)}</td>
+                    <td className="num hide-sm">{cnt(c, "answered")}</td>
+                    <td className="num hide-sm">{cnt(c, "abstained")}{c.abstain_rate != null && <div className="sub">{pctText(c.abstain_rate)}</div>}</td>
+                    <td className="num hide-sm">{cnt(c, "escalated")}{c.escalation_rate != null && <div className="sub">{pctText(c.escalation_rate)}</div>}</td>
+                    <td className={`num hide-sm ${(c.check_failed_rate ?? 0) > 0.1 ? "tone-bad" : ""}`}>{cnt(c, "check_failed")}{c.check_failed_rate != null && <div className="sub">{pctText(c.check_failed_rate)}</div>}</td>
                   </tr>
                 ))}
               </tbody>

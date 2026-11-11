@@ -510,6 +510,10 @@ MODE_RANK = {name: rank for rank, name in enumerate(MODES)}
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 GATE_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 GATE_ARG = re.compile(r"^[A-Za-z0-9_./:=@+,-]{1,200}$")
+MODEL_REF = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
+DERIVED_MODEL = re.compile(r"^fleet-[a-z0-9][a-z0-9.-]{0,60}$")
+KEEP_ALIVE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
+FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
     "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
     "allowed_tools", "resume_session",
@@ -675,8 +679,22 @@ class JobManager:
         self.max_job_minutes = (float(max_minutes)
                                 if isinstance(max_minutes, (int, float)) and not isinstance(max_minutes, bool)
                                 and math.isfinite(max_minutes) and max_minutes > 0 else 120.0)
+        models = config.get("models") if isinstance(config.get("models"), dict) else {}
+        remote = models.get("remote_management", False)
+        disk = models.get("disk_reserve_gb", 8)
+        ram = models.get("ram_reserve_gb", 4)
+        loaded = models.get("max_loaded", 1)
+        self.models_config = {
+            "remote_management": remote if isinstance(remote, bool) else False,
+            "disk_reserve_gb": (float(disk) if isinstance(disk, (int, float)) and not isinstance(disk, bool)
+                                and math.isfinite(disk) and disk >= 0 else 8),
+            "ram_reserve_gb": (float(ram) if isinstance(ram, (int, float)) and not isinstance(ram, bool)
+                               and math.isfinite(ram) and ram >= 0 else 4),
+            "max_loaded": loaded if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0 else 1,
+        }
         self.request_context = threading.local()
         self.agents = find_agents(self.ollama_url)
+        self.model_manager = ModelManager(self.root, self.ollama_url, self.models_config)
         self._load_jobs()
 
     @staticmethod
@@ -1333,6 +1351,366 @@ class JobManager:
         return {"stat": stat[-200000:], "diff": patch[-200000:]}
 
 
+def free_disk_gb(path):
+    """Free disk in GB; FLEET_FREE_DISK_GB overrides it (tests, like FLEET_RAM_GB)."""
+    configured = os.environ.get("FLEET_FREE_DISK_GB")
+    if configured:
+        try:
+            value = float(configured)
+            if math.isfinite(value) and value >= 0:
+                return value
+        except ValueError:
+            pass
+    return shutil.disk_usage(path).free / 1e9
+
+
+def system_ram_gb():
+    configured = os.environ.get("FLEET_RAM_GB")
+    if configured:
+        try:
+            value = float(configured)
+            if math.isfinite(value) and value > 0:
+                return value
+        except ValueError:
+            pass
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("memory_load", ctypes.c_ulong),
+                            ("total_phys", ctypes.c_ulonglong), ("avail_phys", ctypes.c_ulonglong),
+                            ("total_page", ctypes.c_ulonglong), ("avail_page", ctypes.c_ulonglong),
+                            ("total_virtual", ctypes.c_ulonglong), ("avail_virtual", ctypes.c_ulonglong),
+                            ("avail_extended", ctypes.c_ulonglong)]
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.total_phys / 1e9
+        if sys.platform == "darwin":
+            result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                return int(result.stdout.strip()) / 1e9
+        pages = os.sysconf("SC_PHYS_PAGES")
+        size = os.sysconf("SC_PAGE_SIZE")
+        return pages * size / 1e9
+    except (AttributeError, OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+class ModelManager:
+    """Durable, node-local Ollama model operations. No controller policy can widen this config."""
+
+    def __init__(self, root, ollama_url, config):
+        self.root = Path(root)
+        self.ollama_url = ollama_url.rstrip("/")
+        self.registry = os.environ.get("OLLAMA_REGISTRY", "https://registry.ollama.ai/v2").rstrip("/")
+        self.config = dict(config)
+        self.operations_dir = self.root / "operations"
+        self.operations_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.managed_path = self.root / "models.json"
+        self.lock = threading.RLock()
+        self.operations = {}
+        self.cancelled = set()
+        for path in self.operations_dir.glob("*.json"):
+            operation = read_json(path)
+            if isinstance(operation, dict) and isinstance(operation.get("id"), str):
+                self.operations[operation["id"]] = operation
+        for operation in list(self.operations.values()):
+            if operation.get("state") not in FINAL_OPERATION_STATES:
+                self._start(operation)
+
+    def _managed(self):
+        value = read_json(self.managed_path, [])
+        if isinstance(value, dict):
+            value = value.get("models", [])
+        return {item for item in value if isinstance(item, str)} if isinstance(value, list) else set()
+
+    def _save_managed(self, names):
+        atomic_json(self.managed_path, sorted(names), 0o600)
+
+    def _save(self, operation):
+        atomic_json(self.operations_dir / (operation["id"] + ".json"), operation, 0o600)
+
+    def _update(self, operation, **fields):
+        with self.lock:
+            if operation.get("state") == "cancelled" and fields.get("state") != "cancelled":
+                return False
+            operation.update(fields)
+            if operation.get("state") in FINAL_OPERATION_STATES and not operation.get("ended_at"):
+                operation["ended_at"] = now()
+            self._save(operation)
+            return True
+
+    def _request(self, method, path, body=None, timeout=30):
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        request = urllib.request.Request(self.ollama_url + path, data=data, method=method,
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+            return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read()).get("error")
+            except (ValueError, AttributeError):
+                detail = None
+            raise RuntimeError(detail or "Ollama returned HTTP %s" % exc.code)
+
+    def _tags(self):
+        body = self._request("GET", "/api/tags")
+        return body.get("models", []) if isinstance(body.get("models"), list) else []
+
+    def listing(self):
+        version = self._request("GET", "/api/version").get("version")
+        tags = self._tags()
+        loaded = self._request("GET", "/api/ps").get("models", [])
+        managed = self._managed()
+        return {
+            "engine": "ollama", "version": version, "free_disk_gb": free_disk_gb(self.root),
+            "ram_gb": system_ram_gb(),
+            "models": [{"name": item.get("name"), "size_gb": (item.get("size") or 0) / 1e9,
+                        "digest": item.get("digest"), "managed": item.get("name") in managed}
+                       for item in tags if isinstance(item, dict) and item.get("name")],
+            "loaded": [{"name": item.get("name"), "size_gb": (item.get("size") or 0) / 1e9}
+                       for item in (loaded if isinstance(loaded, list) else [])
+                       if isinstance(item, dict) and item.get("name")],
+        }
+
+    @staticmethod
+    def _params(value):
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise HttpError(400, "params must be an object")
+        allowed = {"num_ctx", "temperature", "top_p", "seed", "think", "keep_alive"}
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise HttpError(400, "unknown model parameter: " + unknown[0])
+        def number(name, low, high):
+            v = value.get(name)
+            if name in value and (not isinstance(v, (int, float)) or isinstance(v, bool)
+                                  or not math.isfinite(v) or v < low or v > high):
+                raise HttpError(400, "invalid " + name)
+        if "num_ctx" in value and (not isinstance(value["num_ctx"], int) or isinstance(value["num_ctx"], bool)
+                                   or not 512 <= value["num_ctx"] <= 131072):
+            raise HttpError(400, "invalid num_ctx")
+        number("temperature", 0, 2)
+        number("top_p", 0, 1)
+        if "seed" in value and (not isinstance(value["seed"], int) or isinstance(value["seed"], bool)):
+            raise HttpError(400, "invalid seed")
+        if "think" in value and not isinstance(value["think"], bool):
+            raise HttpError(400, "invalid think")
+        if "keep_alive" in value and (not isinstance(value["keep_alive"], str)
+                                      or not KEEP_ALIVE.fullmatch(value["keep_alive"])):
+            raise HttpError(400, "invalid keep_alive")
+        return dict(value)
+
+    @staticmethod
+    def _validate_ref(reference):
+        if not isinstance(reference, str) or not MODEL_REF.fullmatch(reference):
+            raise HttpError(400, "invalid model reference")
+
+    def _validate(self, kind, body):
+        allowed = ({"ref", "params", "derived", "override_fit"} if kind == "ensure"
+                   else {"ref", "derived", "confirm_preexisting"})
+        unknown = sorted(set(body) - allowed)
+        if unknown:
+            raise HttpError(400, "unknown model field: " + unknown[0])
+        self._validate_ref(body.get("ref"))
+        derived = body.get("derived")
+        if derived is not None and (not isinstance(derived, str) or not DERIVED_MODEL.fullmatch(derived)):
+            raise HttpError(400, "invalid derived model name")
+        if kind == "ensure":
+            params = self._params(body.get("params"))
+            override = body.get("override_fit", False)
+            if not isinstance(override, bool):
+                raise HttpError(400, "override_fit must be boolean")
+            return params, override
+        confirm = body.get("confirm_preexisting", False)
+        if not isinstance(confirm, bool):
+            raise HttpError(400, "confirm_preexisting must be boolean")
+        return {}, confirm
+
+    def create(self, kind, body):
+        if not self.config["remote_management"]:
+            raise HttpError(403, "remote model management is disabled on this node")
+        params, flag = self._validate(kind, body)
+        with self.lock:
+            running = next((op for op in self.operations.values()
+                            if op.get("state") not in FINAL_OPERATION_STATES), None)
+            if running:
+                raise HttpError(409, "operation %s is already running" % running["id"])
+            if kind == "remove" and not flag:
+                managed = self._managed()
+                present = {item.get("name") for item in self._tags()}
+                protected = [name for name in (body.get("derived"), body["ref"])
+                             if name in present and name not in managed]
+                if protected:
+                    raise HttpError(409, "model is pre-existing; set confirm_preexisting to remove it")
+            operation = {
+                "id": "op-" + secrets.token_hex(8), "kind": kind, "ref": body["ref"],
+                "derived": body.get("derived"), "state": "checking", "reason": None,
+                "progress": {"completed": 0, "total": 0, "status": "checking"},
+                "download_gb": None, "loaded_gb": None, "started_at": now(), "ended_at": None,
+                "params": params, "override_fit": flag if kind == "ensure" else False,
+                "confirm_preexisting": flag if kind == "remove" else False,
+            }
+            self.operations[operation["id"]] = operation
+            self._save(operation)
+            self._start(operation)
+            return dict(operation)
+
+    def _start(self, operation):
+        target = self._ensure if operation.get("kind") == "ensure" else self._remove
+        threading.Thread(target=target, args=(operation,), name=operation["id"], daemon=True).start()
+
+    def get(self, operation_id):
+        with self.lock:
+            operation = self.operations.get(operation_id)
+            if not operation:
+                raise HttpError(404, "operation not found")
+            return dict(operation)
+
+    def all(self):
+        with self.lock:
+            return [dict(item) for item in sorted(self.operations.values(), key=lambda op: op.get("started_at", ""),
+                                                  reverse=True)]
+
+    def cancel(self, operation_id):
+        with self.lock:
+            operation = self.operations.get(operation_id)
+            if not operation:
+                raise HttpError(404, "operation not found")
+            if operation.get("state") in FINAL_OPERATION_STATES:
+                return dict(operation)
+            self.cancelled.add(operation_id)
+            operation.update(state="cancelled", reason="cancelled", ended_at=now())
+            self._save(operation)
+            return dict(operation)
+
+    def _manifest_size(self, reference):
+        repo, separator, tag = reference.rpartition(":")
+        if not separator:
+            repo, tag = reference, "latest"
+        if "/" not in repo:
+            repo = "library/" + repo
+        request = urllib.request.Request("%s/%s/manifests/%s" % (self.registry, repo, tag),
+                                         headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json"})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                manifest = json.load(response)
+            size = (manifest.get("config") or {}).get("size", 0)
+            size += sum(layer.get("size", 0) for layer in manifest.get("layers", []) if isinstance(layer, dict))
+            return size / 1e9 if size > 0 else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _pull(self, operation):
+        request = urllib.request.Request(self.ollama_url + "/api/pull",
+                                         data=json.dumps({"model": operation["ref"], "stream": True}).encode(),
+                                         method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            for raw in response:
+                if operation["id"] in self.cancelled or operation.get("state") == "cancelled":
+                    return False
+                try:
+                    update = json.loads(raw)
+                except ValueError:
+                    continue
+                if update.get("error"):
+                    error = str(update["error"])
+                    if "newer version" in error.lower():
+                        try:
+                            version = self._request("GET", "/api/version").get("version")
+                        except Exception:
+                            version = "unknown"
+                        self._update(operation, state="blocked", reason="engine_upgrade: %s (current %s)" % (error, version))
+                    else:
+                        self._update(operation, state="failed", reason=error)
+                    return False
+                progress = {"completed": update.get("completed", 0), "total": update.get("total", 0),
+                            "status": update.get("status", "pulling")}
+                self._update(operation, progress=progress)
+        return True
+
+    def _ensure(self, operation):
+        try:
+            names = {item.get("name") for item in self._tags()}
+            target = operation.get("derived") or operation["ref"]
+            if operation["ref"] in names and target in names:
+                self._update(operation, state="ready", progress={"completed": 0, "total": 0, "status": "already present"})
+                return
+            pulled = operation["ref"] not in names
+            if pulled:
+                size = self._manifest_size(operation["ref"])
+                if size is None:
+                    self._update(operation, state="blocked", reason="size unknown")
+                    return
+                self._update(operation, download_gb=size)
+                free = free_disk_gb(self.root)
+                if free < size + self.config["disk_reserve_gb"]:
+                    self._update(operation, state="blocked", reason="no_space: needs %.1f GB plus %.1f GB reserve" %
+                                 (size, self.config["disk_reserve_gb"]))
+                    return
+                need = size * 1.2 + operation.get("params", {}).get("num_ctx", 0) / 8192.0
+                available = system_ram_gb() - self.config["ram_reserve_gb"]
+                if need > available and not operation.get("override_fit"):
+                    self._update(operation, state="blocked", reason="wont_fit: needs %.1f GB, %.1f GB available" %
+                                 (need, available))
+                    return
+                self._update(operation, state="pulling", progress={"completed": 0, "total": 0,
+                                                                    "status": "pulling manifest"})
+                if not self._pull(operation):
+                    return
+                managed = self._managed()
+                managed.add(operation["ref"])
+                self._save_managed(managed)
+            if operation.get("derived") and operation["derived"] not in names:
+                self._update(operation, state="configuring")
+                engine_params = {key: value for key, value in operation.get("params", {}).items()
+                                 if key in ("num_ctx", "temperature", "top_p", "seed")}
+                self._request("POST", "/api/create", {"model": operation["derived"], "from": operation["ref"],
+                                                        "parameters": engine_params}, timeout=3600)
+                managed = self._managed()
+                managed.add(operation["derived"])
+                self._save_managed(managed)
+            self._update(operation, state="verifying")
+            params = operation.get("params", {})
+            chat = {"model": target, "messages": [{"role": "user", "content": "Reply with the word ready."}],
+                    "stream": False, "options": {"num_predict": 16}}
+            if "think" in params:
+                chat["think"] = params["think"]
+            reply = self._request("POST", "/api/chat", chat, timeout=900)
+            if not str((reply.get("message") or {}).get("content") or "").strip():
+                raise RuntimeError("smoke test returned an empty reply")
+            loaded = self._request("GET", "/api/ps").get("models", [])
+            loaded_size = next(((item.get("size") or 0) / 1e9 for item in loaded
+                                if isinstance(item, dict) and item.get("name") == target), None)
+            self._request("POST", "/api/generate", {"model": target, "keep_alive": 0})
+            self._update(operation, state="ready", loaded_gb=loaded_size,
+                         progress={"completed": 1, "total": 1, "status": "ready"})
+        except Exception as exc:
+            self._update(operation, state="failed", reason=str(exc)[:1000])
+
+    def _remove(self, operation):
+        try:
+            self._update(operation, state="checking")
+            present = {item.get("name") for item in self._tags()}
+            targets = [name for name in (operation.get("derived"), operation["ref"]) if name and name in present]
+            for name in targets:
+                self._request("DELETE", "/api/delete", {"model": name})
+            remaining = {item.get("name") for item in self._tags()}
+            if any(name in remaining for name in targets):
+                raise RuntimeError("model still present after delete")
+            managed = self._managed()
+            managed.difference_update(targets)
+            self._save_managed(managed)
+            self._update(operation, state="removed", progress={"completed": 1, "total": 1, "status": "removed"})
+        except Exception as exc:
+            self._update(operation, state="failed", reason=str(exc)[:1000])
+
+
 class HttpError(Exception):
     def __init__(self, status, detail):
         super().__init__(detail)
@@ -1394,7 +1772,21 @@ class Handler(BaseHTTPRequestHandler):
                     "gate_profiles": sorted(self.manager.gate_profiles),
                     "allow_raw_gates": self.manager.allow_raw_gates,
                     "allowed_roots": self.manager.allowed_roots,
-                    "max_jobs": self.manager.max_jobs}
+                    "max_jobs": self.manager.max_jobs,
+                    "models": self.manager.models_config}
+        if method == "GET" and parts == ["models"]:
+            return self.manager.model_manager.listing()
+        if method == "GET" and parts == ["operations"]:
+            return self.manager.model_manager.all()
+        if method == "GET" and len(parts) == 2 and parts[0] == "operations":
+            return self.manager.model_manager.get(parts[1])
+        if method == "POST" and parts == ["models", "ensure"]:
+            return self.manager.model_manager.create("ensure", self._body())
+        if method == "POST" and parts == ["models", "remove"]:
+            return self.manager.model_manager.create("remove", self._body())
+        if method == "POST" and len(parts) == 3 and parts[0] == "operations" and parts[2] == "cancel":
+            self._body()
+            return self.manager.model_manager.cancel(parts[1])
         if method == "GET" and parts == ["jobs"]:
             return self.manager.list_public()
         if method == "POST" and parts == ["jobs"]:

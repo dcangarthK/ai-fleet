@@ -91,6 +91,14 @@ Revoke with `token list` / `token revoke <id>`.
 
 **Editing the runner:** change `nodes/runner.py`, then `python3 nodes/build.py` to re-embed it into the onboard scripts.
 
+## Models
+
+The controller keeps an Ollama model catalog and can request background installs or removals on nodes whose
+local `runner.json` sets `models.remote_management` to `true` (it is off by default). The runner checks disk and
+RAM reserves, reports durable progress, configures optional per-model parameters, smoke-tests the model, and only
+then activates waiting role assignments. Models that existed before fleet management are marked `pre-existing`
+and are never removed without explicit confirmation.
+
 ## Model picks by memory
 | Node memory | coder | reviewer | fast |
 |---|---|---|---|

@@ -23,7 +23,7 @@ SCOPES = ["view", "operate", "admin"]
 COOKIE = "fleet_token"
 
 # Writes that change who/what is trusted. Everything else that writes is "operate".
-ADMIN_PATHS = ("/api/nodes/", "/api/roles", "/api/tasks/approve", "/api/tasks/reject")
+ADMIN_PATHS = ("/api/roles", "/api/models", "/api/tasks/approve", "/api/tasks/reject")
 
 
 def _hash(token: str) -> str:
@@ -54,6 +54,11 @@ def required_scope(request: Request) -> str:
     if request.method in ("GET", "HEAD"):
         return "view"
     path = request.url.path
+    # Installing/removing a catalog model is an ordinary requested operation; other node mutations are admin.
+    if path.startswith("/api/nodes/") and "/models/" in path:
+        return "operate"
+    if path.startswith("/api/nodes/"):
+        return "admin"
     if path.startswith(ADMIN_PATHS) or (path.startswith("/api/tasks/") and path.endswith(("/approve", "/reject"))):
         return "admin"
     return "operate"

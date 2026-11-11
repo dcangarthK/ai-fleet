@@ -127,10 +127,27 @@ def fleet_status() -> str:
 
 
 @mcp.tool()
-def assign_role(role: str, node: str, model: str) -> str:
+def assign_role(role: str, node: str, model: str, ensure_model: bool = False) -> str:
     """Route a role to a model on a node. Several assignments per role = load-balanced.
+    Set ensure_model to install a missing catalog model and return its pending assignment state.
     Only do this when the user asked for it."""
-    return _controller("POST", "/api/roles", {"role": role, "node": node, "model": model})
+    return _controller("POST", "/api/roles", {"role": role, "node": node, "model": model,
+                                               "ensure_model": ensure_model})
+
+
+@mcp.tool()
+def list_models() -> str:
+    """List the model catalog, per-node install state/progress, ownership and fit. Read-only."""
+    return _controller("GET", "/api/models")
+
+
+@mcp.tool()
+def install_model(node: str, model_id: str, params: dict | None = None,
+                  override_fit: bool = False) -> str:
+    """Request installation of a catalog model on a node. Only do this when the user asked for it.
+    override_fit bypasses the runner's RAM fit refusal and must reflect the user's explicit choice."""
+    return _controller("PUT", f"/api/nodes/{_q(node)}/models/{_q(model_id)}",
+                       {"desired": "present", "params": params or {}, "override_fit": override_fit})
 
 
 @mcp.tool()

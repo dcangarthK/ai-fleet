@@ -403,6 +403,37 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(found, ref)
         self.assertTrue(found[0]["evals"])
 
+    def test_second_request_during_an_install_is_refused(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        FakeRunner.models.pop("tiny:1b", None)
+        FakeRunner.op_script = ["pulling"] * 50
+        try:
+            self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "present"}, headers=W)
+            self.wait_install("tiny-1b", "pulling")
+            r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "present"}, headers=W)
+            self.assertEqual(r.status_code, 409)
+            self.assertIn("in progress", r.text)
+        finally:
+            FakeRunner.op_script = []
+            for op in FakeRunner.ops.values():
+                op["script"] = ["ready"]
+            self.wait_install("tiny-1b", "ready")
+            self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent"}, headers=W)
+            self.wait_install("tiny-1b", "removed")
+
+    def test_preexisting_stays_preexisting_after_params_install(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        FakeRunner.models["tiny:1b"] = False
+        try:
+            self.c.post("/api/refresh", headers=W)
+            wait_for(lambda: self.models()["tiny-1b"]["nodes"]["master"].get("installed"))
+            self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "present", "params": {"temperature": 0}}, headers=W)
+            row = self.wait_install("tiny-1b", "ready")
+            self.assertEqual(row["ownership"], "pre-existing")
+        finally:
+            FakeRunner.models.pop("tiny:1b", None)
+            FakeRunner.models.pop("fleet-tiny-1b", None)
+
     def test_preexisting_model_is_marked(self):
         self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
         FakeRunner.models["tiny:1b"] = False  # on the node before the fleet managed it

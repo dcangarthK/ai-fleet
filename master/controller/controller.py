@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth  # noqa: E402
@@ -41,6 +41,8 @@ NODE_TAG = "tag:llm-node"
 POLL_SECONDS = float(os.environ.get("FLEET_POLL_SECONDS", "30"))
 MAX_FAILS = 3
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
+MODEL_REF_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
+KEEP_ALIVE_RE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
 FLEET_PREFIX = "fleet--"
 MASTER_MODEL_HOST = os.environ.get("FLEET_MASTER_MODEL_HOST", "")  # e.g. host.docker.internal
 INFO_PORT = 11435  # onboard script publishes /fleet.json here (hardware, agents, model files)
@@ -106,6 +108,8 @@ async def refresh_master(client: httpx.AsyncClient) -> None:
     """The master's own runner is a node too (id 'master'), so its Claude/Codex/Ollama can take tasks."""
     health = await tasks.runner_health(client, tasks.LOCAL_RUNNER, tasks.MASTER_ID)
     found = await probe(client, "127.0.0.1")
+    report = await runner_models({"id": tasks.MASTER_ID, "ip": "127.0.0.1"}) if health and health.get("models") else None
+    found = merge_probe_models(found, report)
     with db() as c:
         c.execute("INSERT OR IGNORE INTO nodes (id, name, ip, os, status) VALUES (?, 'master', '127.0.0.1', ?, 'approved')",
                   (tasks.MASTER_ID, sys.platform))
@@ -120,6 +124,41 @@ async def refresh_master(client: httpx.AsyncClient) -> None:
                       (found[0], found[1], json.dumps(found[2]), tasks.MASTER_ID))
         else:
             c.execute("UPDATE nodes SET fails=fails+1 WHERE id=?", (tasks.MASTER_ID,))
+        merge_model_inventory(c, tasks.MASTER_ID, report)
+
+
+async def runner_models(node: dict) -> dict | None:
+    try:
+        result = await tasks.runner_call(node, "GET", "/models", timeout=5)
+        return result if isinstance(result, dict) else None
+    except tasks.RunnerError:
+        return None
+
+
+def merge_probe_models(found, report):
+    if not report:
+        return found
+    reported = [item.get("name") for item in report.get("models", [])
+                if isinstance(item, dict) and isinstance(item.get("name"), str)]
+    if found:
+        return found[0], found[1], sorted(set(found[2]) | set(reported))
+    return ("ollama", 11434, sorted(set(reported))) if reported else found
+
+
+def merge_model_inventory(c: sqlite3.Connection, node_id: str, report: dict | None) -> None:
+    if not report or not isinstance(report.get("ram_gb"), (int, float)):
+        return
+    row = c.execute("SELECT inventory FROM nodes WHERE id=?", (node_id,)).fetchone()
+    try:
+        inventory = json.loads(row["inventory"]) if row and row["inventory"] else {}
+    except (ValueError, TypeError):
+        inventory = {}
+    if not isinstance(inventory, dict):
+        inventory = {}
+    hardware = inventory.get("hardware") if isinstance(inventory.get("hardware"), dict) else {}
+    hardware["ram_gb"] = report["ram_gb"]
+    inventory["hardware"] = hardware
+    c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory), node_id))
 
 
 async def refresh_nodes() -> None:
@@ -136,9 +175,12 @@ async def refresh_nodes() -> None:
         inventories = await asyncio.gather(*(fetch_inventory(client, n["ip"]) for n in online))
         runners = await asyncio.gather(*(tasks.runner_health(client, f"http://{n['ip']}:{tasks.RUNNER_PORT}", n["id"])
                                          for n in online))
+    model_reports = await asyncio.gather(*(runner_models(n) if runners[index] and runners[index].get("models") else
+                                           asyncio.sleep(0, result=None) for index, n in enumerate(online)))
     probed = dict(zip([n["id"] for n in online], results))
     inventory = dict(zip([n["id"] for n in online], inventories))
     runner = dict(zip([n["id"] for n in online], runners))
+    model_report = dict(zip([n["id"] for n in online], model_reports))
     with db() as c:
         for n in seen:
             c.execute("INSERT OR IGNORE INTO nodes (id) VALUES (?)", (n["id"],))
@@ -149,13 +191,14 @@ async def refresh_nodes() -> None:
                 c.execute("UPDATE nodes SET runner=?, runner_fails=0 WHERE id=?", (json.dumps(runner[n["id"]]), n["id"]))
             else:
                 c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (n["id"],))
-            found = probed.get(n["id"])
+            found = merge_probe_models(probed.get(n["id"]), model_report.get(n["id"]))
             if found:
                 engine, port, models = found
                 c.execute("UPDATE nodes SET engine=?, port=?, models=?, fails=0, last_seen=? WHERE id=?",
                           (engine, port, json.dumps(models), time.time(), n["id"]))
             else:
                 c.execute("UPDATE nodes SET fails=fails+1 WHERE id=?", (n["id"],))
+            merge_model_inventory(c, n["id"], model_report.get(n["id"]))
         ids = [n["id"] for n in seen] + [tasks.MASTER_ID]
         # Nodes that left the tailnet (or lost the tag) count as failing too.
         c.execute(f"UPDATE nodes SET fails=fails+1, runner_fails=runner_fails+1 "
@@ -177,20 +220,128 @@ def desired_deployments() -> dict[str, dict]:
         n = nodes.get(a["node"])
         # The master's own Ollama listens on 127.0.0.1, which LiteLLM's container can't reach; it can only
         # serve roles when FLEET_MASTER_MODEL_HOST names the host as seen from LiteLLM (host.docker.internal).
-        if not n or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST) or not healthy(n) or a["model"] not in json.loads(n["models"]):
+        if (not n or a["state"] != "active" or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST)
+                or not healthy(n) or a["model"] not in json.loads(n["models"])):
             continue
         host = MASTER_MODEL_HOST if n["id"] == tasks.MASTER_ID else n["ip"]
+        assignment_params = json.loads(a["params"] or "{}")
+        routed_model = "fleet-" + a["catalog_id"] if a["catalog_id"] and assignment_params else a["model"]
         if n["engine"] == "ollama":
-            params = {"model": f"ollama_chat/{a['model']}", "api_base": f"http://{host}:{n['port']}"}
+            params = {"model": f"ollama_chat/{routed_model}", "api_base": f"http://{host}:{n['port']}"}
         else:
             params = {"model": f"openai/{a['model']}", "api_base": f"http://{host}:{n['port']}/v1",
                       "api_key": "none"}
         params["timeout"] = 600
+        params.update(assignment_params)
         desired[deployment_id(a["role"], a["node"], a["model"])] = {
             "model_name": a["role"], "litellm_params": params,
             "model_info": {"id": deployment_id(a["role"], a["node"], a["model"])},
         }
     return desired
+
+
+def _model_event(type_: str, row: dict, reference: str) -> None:
+    events.emit(None, type_, {"node": row["node"], "model": reference,
+                              "state": row.get("state"), "reason": row.get("reason")})
+
+
+def _set_node_model(node: str, catalog_id: str, **fields) -> None:
+    fields["updated_at"] = time.time()
+    with db() as c:
+        before = c.execute("SELECT state,reason FROM node_models WHERE node=? AND catalog_id=?",
+                           (node, catalog_id)).fetchone()
+        c.execute("UPDATE node_models SET %s WHERE node=? AND catalog_id=?" %
+                  ",".join(name + "=?" for name in fields), (*fields.values(), node, catalog_id))
+        catalog = c.execute("SELECT reference FROM model_catalog WHERE id=?", (catalog_id,)).fetchone()
+    old_state = before["state"] if before else None
+    old_reason = before["reason"] if before else None
+    new_state = fields.get("state", old_state)
+    new_reason = fields.get("reason", old_reason)
+    if catalog and (not before or old_state != new_state or old_reason != new_reason):
+        current = {"node": node, "catalog_id": catalog_id,
+                   "state": new_state, "reason": new_reason}
+        _model_event("model.state", current, catalog["reference"])
+
+
+async def reconcile_models() -> None:
+    """Advance desired model state and assignments once; runner operations remain durable."""
+    with db() as c:
+        rows = [dict(row) for row in c.execute(
+            "SELECT nm.*, mc.reference FROM node_models nm JOIN model_catalog mc ON mc.id=nm.catalog_id")]
+        nodes = {row["id"]: dict(row) for row in c.execute("SELECT * FROM nodes")}
+    refresh_after = False
+    for row in rows:
+        node = nodes.get(row["node"])
+        if not node:
+            continue
+        try:
+            present = set(json.loads(node["models"] or "[]"))
+            params = json.loads(row["params"] or "{}")
+        except (ValueError, TypeError):
+            present, params = set(), {}
+        derived = "fleet-" + row["catalog_id"] if params else None
+        target_present = row["reference"] in present and (not derived or derived in present)
+        if row["desired"] == "present" and target_present:
+            ownership = row.get("ownership") or "pre-existing"
+            _set_node_model(row["node"], row["catalog_id"], state="ready", reason=None,
+                            ownership=ownership, progress=json.dumps({"status": "ready"}))
+            continue
+        if row["desired"] == "absent" and row["reference"] not in present and (not derived or derived not in present):
+            _set_node_model(row["node"], row["catalog_id"], state="removed", reason=None,
+                            progress=json.dumps({"status": "removed"}))
+            continue
+        if row.get("op_id"):
+            try:
+                operation = await tasks.runner_call(node, "GET", "/operations/" + row["op_id"], timeout=10)
+            except tasks.RunnerError as exc:
+                _set_node_model(row["node"], row["catalog_id"], reason=str(exc.detail))
+                continue
+            state = operation.get("state", "failed")
+            # A model that was on the node before stays pre-existing even after the fleet adds params to it.
+            ownership = row.get("ownership") or ("fleet-managed" if state == "ready" else None)
+            _set_node_model(row["node"], row["catalog_id"], state=state, reason=operation.get("reason"),
+                            progress=json.dumps(operation.get("progress") or {}), ownership=ownership)
+            if state in ("ready", "removed"):
+                refresh_after = True
+            continue
+        body = {"ref": row["reference"]}
+        path = "/models/ensure" if row["desired"] == "present" else "/models/remove"
+        if derived:
+            body["derived"] = derived
+        if row["desired"] == "present":
+            if params:
+                body["params"] = params
+            body["override_fit"] = bool(row["override_fit"])
+            event_type = "model.install"
+        else:
+            body["confirm_preexisting"] = bool(row.get("confirm_preexisting"))
+            event_type = "model.remove"
+        try:
+            operation = await tasks.runner_call(node, "POST", path, body, timeout=30)
+        except tasks.RunnerError as exc:
+            state = "blocked" if exc.status_code in (403, 409) else "failed"
+            _set_node_model(row["node"], row["catalog_id"], state=state, reason=str(exc.detail))
+            continue
+        _set_node_model(row["node"], row["catalog_id"], op_id=operation["id"],
+                        state=operation.get("state", "checking"), reason=operation.get("reason"),
+                        progress=json.dumps(operation.get("progress") or {}))
+        _model_event(event_type, dict(row) | {"state": operation.get("state"), "reason": operation.get("reason")},
+                     row["reference"])
+    if refresh_after:
+        await refresh_nodes()
+    with db() as c:
+        waiting = c.execute(
+            "SELECT a.role,a.node,a.model,a.catalog_id,nm.state AS install_state,n.models "
+            "FROM assignments a LEFT JOIN node_models nm ON nm.node=a.node AND nm.catalog_id=a.catalog_id "
+            "LEFT JOIN nodes n ON n.id=a.node WHERE a.state!='active'").fetchall()
+        for assignment in waiting:
+            state = assignment["install_state"]
+            if state == "ready" and assignment["model"] in json.loads(assignment["models"] or "[]"):
+                state = "active"
+            elif state not in ("blocked", "failed"):
+                state = "pending_install"
+            c.execute("UPDATE assignments SET state=? WHERE role=? AND node=? AND model=?",
+                      (state, assignment["role"], assignment["node"], assignment["model"]))
 
 
 async def reconcile() -> dict:
@@ -225,6 +376,7 @@ _tick_lock = asyncio.Lock()
 async def tick() -> dict:
     async with _tick_lock:  # periodic and API-triggered ticks must not interleave LiteLLM edits
         await refresh_nodes()
+        await reconcile_models()
         if not MASTER_KEY:
             return {"skipped": "no LITELLM_MASTER_KEY: model roles are not synced"}
         try:
@@ -264,6 +416,201 @@ class Assignment(BaseModel):
     role: str
     node: str
     model: str
+    ensure_model: bool = False
+    catalog_id: str | None = None
+    params: dict = Field(default_factory=dict)
+
+
+class CatalogModel(BaseModel):
+    reference: str
+    display_name: str | None = None
+    defaults: dict = Field(default_factory=dict)
+    suggested_roles: list[str] = Field(default_factory=list)
+
+
+class NodeModelRequest(BaseModel):
+    desired: str
+    params: dict | None = None
+    override_fit: bool = False
+    confirm_preexisting: bool = False
+
+
+def model_id(reference: str) -> str:
+    return reference.replace("/", "-").replace(":", "-")
+
+
+def validate_model_params(params: dict) -> dict:
+    allowed = {"num_ctx", "temperature", "top_p", "seed", "think", "keep_alive"}
+    unknown = sorted(set(params) - allowed)
+    if unknown:
+        raise HTTPException(400, "unknown model parameter: " + unknown[0])
+    if "num_ctx" in params and (not isinstance(params["num_ctx"], int) or isinstance(params["num_ctx"], bool)
+                                or not 512 <= params["num_ctx"] <= 131072):
+        raise HTTPException(400, "invalid num_ctx")
+    for key, low, high in (("temperature", 0, 2), ("top_p", 0, 1)):
+        value = params.get(key)
+        if key in params and (not isinstance(value, (int, float)) or isinstance(value, bool)
+                              or value < low or value > high):
+            raise HTTPException(400, "invalid " + key)
+    if "seed" in params and (not isinstance(params["seed"], int) or isinstance(params["seed"], bool)):
+        raise HTTPException(400, "invalid seed")
+    if "think" in params and not isinstance(params["think"], bool):
+        raise HTTPException(400, "invalid think")
+    if "keep_alive" in params and (not isinstance(params["keep_alive"], str)
+                                   or not KEEP_ALIVE_RE.fullmatch(params["keep_alive"])):
+        raise HTTPException(400, "invalid keep_alive")
+    return dict(params)
+
+
+def registry_manifest(reference: str) -> tuple[float, str | None]:
+    repo, separator, tag = reference.rpartition(":")
+    if not separator:
+        repo, tag = reference, "latest"
+    if "/" not in repo:
+        repo = "library/" + repo
+    base = os.environ.get("FLEET_OLLAMA_REGISTRY", "https://registry.ollama.ai/v2").rstrip("/")
+    try:
+        with httpx.Client(trust_env=False, timeout=20) as client:
+            response = client.get(f"{base}/{repo}/manifests/{tag}",
+                                  headers={"Accept": "application/vnd.docker.distribution.manifest.v2+json"})
+        if response.status_code == 404:
+            raise HTTPException(400, f"{reference} isn't in the registry")
+        response.raise_for_status()
+        manifest = response.json()
+        size = (manifest.get("config") or {}).get("size", 0)
+        size += sum(layer.get("size", 0) for layer in manifest.get("layers", []) if isinstance(layer, dict))
+        digest = response.headers.get("docker-content-digest") or (manifest.get("config") or {}).get("digest")
+        if not size:
+            raise HTTPException(400, f"{reference} has no known size in the registry")
+        return size / 1e9, digest
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(502, f"registry lookup failed: {exc.__class__.__name__}")
+
+
+def _json(value, fallback):
+    try:
+        result = json.loads(value) if isinstance(value, str) else value
+        return result if isinstance(result, type(fallback)) else fallback
+    except (ValueError, TypeError):
+        return fallback
+
+
+def model_fit(catalog: dict, node: dict) -> str:
+    inventory = _json(node.get("inventory"), {})
+    ram_gb = (inventory.get("hardware") or {}).get("ram_gb")
+    size = catalog.get("download_gb")
+    if not isinstance(ram_gb, (int, float)) or not isinstance(size, (int, float)):
+        return "unknown"
+    runner = _json(node.get("runner"), {})
+    reserve = (runner.get("models") or {}).get("ram_reserve_gb", 4)
+    context = _json(catalog.get("defaults"), {}).get("num_ctx", 0)
+    need = size * 1.2 + context / 8192.0
+    remaining = ram_gb - reserve - need
+    return "wont_fit" if remaining < 0 else ("tight" if remaining <= 2 else "fits")
+
+
+def catalog_view() -> list[dict]:
+    with db() as c:
+        catalog = [dict(row) for row in c.execute("SELECT * FROM model_catalog ORDER BY display_name,id")]
+        nodes = [dict(row) for row in c.execute("SELECT * FROM nodes ORDER BY name")]
+        states = {(row["node"], row["catalog_id"]): dict(row) for row in c.execute("SELECT * FROM node_models")}
+    output = []
+    for item in catalog:
+        for key, fallback in (("defaults", {}), ("suggested_roles", []), ("evals", {})):
+            item[key] = _json(item.get(key), fallback)
+        cells = {}
+        for node in nodes:
+            installed = item["reference"] in _json(node.get("models"), [])
+            row = states.get((node["id"], item["id"]), {})
+            cells[node["id"]] = {
+                "installed": installed,
+                "state": row.get("state") or ("ready" if installed else "missing"),
+                "reason": row.get("reason"),
+                "progress": _json(row.get("progress"), {}),
+                "ownership": row.get("ownership") or ("pre-existing" if installed else None),
+                "fit": model_fit(item, node),
+            }
+        item["nodes"] = cells
+        output.append(item)
+    return output
+
+
+@app.get("/api/models")
+def list_catalog() -> list[dict]:
+    return catalog_view()
+
+
+@app.post("/api/models")
+def add_catalog(spec: CatalogModel) -> dict:
+    if not MODEL_REF_RE.fullmatch(spec.reference):
+        raise HTTPException(400, "invalid model reference")
+    defaults = validate_model_params(spec.defaults)
+    size, digest = registry_manifest(spec.reference)
+    identifier = model_id(spec.reference)
+    with db() as c:
+        existing = c.execute("SELECT evals,source,created_at FROM model_catalog WHERE id=?", (identifier,)).fetchone()
+        evals = existing["evals"] if existing else "{}"
+        source = existing["source"] if existing and existing["source"] == "evals" else "custom"
+        created = existing["created_at"] if existing else time.time()
+        c.execute(
+            "INSERT OR REPLACE INTO model_catalog "
+            "(id,reference,engine,display_name,download_gb,digest,min_engine,defaults,suggested_roles,evals,source,created_at) "
+            "VALUES (?,?, 'ollama', ?,?,?,NULL,?,?,?,?,?)",
+            (identifier, spec.reference, spec.display_name or spec.reference, size, digest,
+             json.dumps(defaults), json.dumps(spec.suggested_roles), evals, source, created),
+        )
+    return next(item for item in catalog_view() if item["id"] == identifier)
+
+
+@app.delete("/api/models/{catalog_id}")
+def delete_catalog(catalog_id: str) -> dict:
+    with db() as c:
+        row = c.execute("SELECT id FROM model_catalog WHERE id=?", (catalog_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, f"unknown model {catalog_id}")
+        wanted = c.execute("SELECT 1 FROM node_models WHERE catalog_id=? AND desired='present' LIMIT 1",
+                           (catalog_id,)).fetchone()
+        if wanted:
+            raise HTTPException(409, "model is still desired on a node")
+        c.execute("DELETE FROM node_models WHERE catalog_id=?", (catalog_id,))
+        c.execute("DELETE FROM model_catalog WHERE id=?", (catalog_id,))
+    return {"deleted": catalog_id}
+
+
+@app.put("/api/nodes/{name}/models/{catalog_id}")
+def set_node_model(name: str, catalog_id: str, request: NodeModelRequest) -> dict:
+    if request.desired not in ("present", "absent"):
+        raise HTTPException(400, "desired must be present or absent")
+    with db() as c:
+        node = resolve(c, name)
+        model = c.execute("SELECT * FROM model_catalog WHERE id=?", (catalog_id,)).fetchone()
+        if not model:
+            raise HTTPException(404, f"unknown model {catalog_id}")
+        old = c.execute("SELECT * FROM node_models WHERE node=? AND catalog_id=?",
+                        (node["id"], catalog_id)).fetchone()
+        installed = model["reference"] in _json(node["models"], [])
+        if old and old["op_id"] and old["state"] in ("checking", "pulling", "configuring", "verifying", "removing"):
+            raise HTTPException(409, f"{model['reference']} has an operation in progress on {node['name']}; wait for it to finish")
+        params = (validate_model_params(request.params) if request.params is not None else
+                  _json(old["params"], {}) if old else {})
+        ownership = old["ownership"] if old and old["ownership"] else (
+            "pre-existing" if installed else "fleet-managed")
+        state = "ready" if request.desired == "present" and installed else (
+            "removed" if request.desired == "absent" and not installed else "checking")
+        c.execute(
+            "INSERT OR REPLACE INTO node_models "
+            "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
+            "VALUES (?,?,?,?,NULL,NULL,'{}',?,?,?,?,?)",
+            (node["id"], catalog_id, request.desired, state, ownership, json.dumps(params),
+             int(request.override_fit), int(request.confirm_preexisting), time.time()),
+        )
+        result = dict(c.execute("SELECT * FROM node_models WHERE node=? AND catalog_id=?",
+                                (node["id"], catalog_id)).fetchone())
+    result["params"] = _json(result["params"], {})
+    result["progress"] = _json(result["progress"], {})
+    return result
 
 
 def fleet_state() -> dict:
@@ -272,13 +619,16 @@ def fleet_state() -> dict:
                             "inventory": json.loads(r["inventory"]) if r["inventory"] else None}
                  for r in c.execute("SELECT * FROM nodes ORDER BY name")]
         roles = [dict(r) for r in c.execute(
-            "SELECT a.role, a.model, a.node AS node_id, n.name AS node FROM assignments a "
+            "SELECT a.role, a.model, a.node AS node_id, n.name AS node, a.state, a.catalog_id, a.params "
+            "FROM assignments a "
             "LEFT JOIN nodes n ON n.id = a.node ORDER BY a.role, n.name")]
     for n in nodes:
         n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
         n["runner_ok"] = bool(n["runner"]) and (n.get("runner_fails") or 0) < MAX_FAILS
         n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
+    for role in roles:
+        role["params"] = _json(role.get("params"), {})
     return {"nodes": nodes, "assignments": roles, "max_fails": MAX_FAILS, "modes": tasks.MODES}
 
 
@@ -322,9 +672,31 @@ async def assign(a: Assignment) -> dict:
         raise HTTPException(400, "role must be lowercase letters, digits, dashes")
     with db() as c:
         node = resolve(c, a.node)
-        if a.model not in json.loads(node["models"]):
-            raise HTTPException(400, f"{a.node} does not serve {a.model}")
-        c.execute("INSERT OR IGNORE INTO assignments VALUES (?,?,?)", (a.role, node["id"], a.model))
+        catalog = (c.execute("SELECT * FROM model_catalog WHERE id=?", (a.catalog_id,)).fetchone()
+                   if a.catalog_id else c.execute("SELECT * FROM model_catalog WHERE reference=?", (a.model,)).fetchone())
+        model = catalog["reference"] if catalog else a.model
+        installed = model in json.loads(node["models"])
+        if not installed and not a.ensure_model:
+            raise HTTPException(400, f"{a.node} does not serve {model}")
+        if not installed and not catalog:
+            raise HTTPException(400, f"{model} is not in the model catalog")
+        params = validate_model_params((_json(catalog["defaults"], {}) if catalog else {}) | a.params)
+        state = "active" if installed else "pending_install"
+        catalog_id = catalog["id"] if catalog else None
+        if not installed:
+            c.execute(
+                "INSERT INTO node_models "
+                "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
+                "VALUES (?,?, 'present','checking',NULL,NULL,'{}','fleet-managed',?,0,0,?) "
+                "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',state='checking',reason=NULL,op_id=NULL,"
+                "params=excluded.params,updated_at=excluded.updated_at",
+                (node["id"], catalog_id, json.dumps(params), time.time()),
+            )
+        c.execute(
+            "INSERT INTO assignments (role,node,model,state,catalog_id,params) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(role,node,model) DO UPDATE SET state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params",
+            (a.role, node["id"], model, state, catalog_id, json.dumps(params)),
+        )
     await tick()
     return fleet_state()
 

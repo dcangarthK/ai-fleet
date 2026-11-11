@@ -122,7 +122,7 @@ def _controller(method: str, path: str, body: dict | None = None) -> str:
 @mcp.tool()
 def fleet_status() -> str:
     """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
-    and current role assignments."""
+    including each runner's available gate profiles, and current role assignments."""
     return _controller("GET", "/api/fleet")
 
 
@@ -162,7 +162,7 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
     mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
-          | 'full' (user approval required). gate: shell command that must pass, e.g. 'pytest -q'.
+          | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
     node: optional; otherwise the least-busy eligible node is picked. parent_id links sub-tasks.
     Then use wait_tasks; don't poll."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}

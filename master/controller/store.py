@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 # Columns added after the first release; ALTERed in on startup for existing databases.
 MIGRATIONS = {
     "nodes": {"inventory": "TEXT", "ceiling": "TEXT DEFAULT 'auto-edit'", "runner": "TEXT",
-              "runner_fails": "INTEGER DEFAULT 0"},
+              "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT"},
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL"},
 }
 

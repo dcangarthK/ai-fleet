@@ -64,6 +64,18 @@ the controller or your connection restarts; after a reboot the task shows **inte
 **Permission modes:** `read-only` < `supervised` < `auto-edit` (default) < `full`. Each node has a ceiling
 (dashboard) and the node owner caps it again in `~/.ai-fleet/runner.json` (`max_mode`). The stricter one wins.
 
+### Runner policy and credentials
+
+Each node owns its policy in `$FLEET_DIR/runner.json` (normally `~/.ai-fleet/runner.json`). `allowed_roots`
+lists the only folders tasks may use; `denied_paths` adds local exclusions; `gate_profiles` maps safe names such
+as `pytest` to argv lists. Tasks request the profile name, not a shell command. The same file controls
+`allow_raw_gates`, `max_jobs`, `max_job_minutes`, and `max_mode`; restart the runner after editing it.
+
+The runner creates a private `runner.token` on first start. Register the token once on the master without putting
+it in argv: `uv run --script master/controller/controller.py runner-token set <node>` reads it from stdin.
+Use `runner-token clear <node>` to remove a stored node credential. The onboarding scripts print the full
+registration command once.
+
 **Dashboard:** http://127.0.0.1:8700 shows what needs you, tasks by state with live activity, diffs, nodes and usage.
 Updates are pushed live. macOS notifications fire when a task needs you or finishes (`master/plugins/`).
 

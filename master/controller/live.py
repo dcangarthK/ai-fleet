@@ -476,19 +476,59 @@ ALERT_TYPES = ("task.awaiting_approval", "task.blocked", "task.failed", "budget.
                "budget.limit_unrecognised", "node.swap_high", "node.disk_low", "node.runner_offline")
 
 
+TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.awaiting_approval": "awaiting_approval"}
+
+
+def _task_alert_open(c, task_id: str | None, kind: str) -> bool:
+    """A task.* alert stays only while the task is still in the state it reports and nobody has dealt with it."""
+    t = c.execute("SELECT state, resolution, outcome, created_at FROM tasks WHERE id=?", (task_id,)).fetchone() \
+        if task_id else None
+    if not t or t["state"] != TASK_ALERT_STATE[kind] or t["resolution"] or t["outcome"]:
+        return False
+    # A later attempt in the same work item that got through settles it too.
+    root = task_root(c, task_id)
+    later = c.execute(
+        "WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id) "
+        "SELECT 1 FROM tasks WHERE id IN (SELECT id FROM tree) AND id<>? AND created_at>? "
+        "AND state IN ('review','done') LIMIT 1", (root, task_id, t["created_at"] or 0)).fetchone()
+    return later is None
+
+
 def alerts() -> list[dict]:
+    """Only what still needs attention now: task alerts are checked against the task's current state (one per task,
+    the latest), budget.limit against the account's current limit state; node.* warnings already clear themselves."""
     marks = ",".join("?" * len(ALERT_TYPES))
+    now = time.time()
+    rules = budget.current_rules()
+    out, seen, snaps = [], set(), {}
     with db() as c:
         rows = c.execute(f"SELECT id, ts, task_id, type, data FROM events WHERE type IN ({marks}) "
-                         "ORDER BY id DESC LIMIT 10", ALERT_TYPES).fetchall()
-    out = []
-    for r in rows:
-        data = _json(r["data"]) or {}
-        # Titles and node ids only: never result, log or limit-message text.
-        out.append({"id": r["id"], "ts": r["ts"], "task_id": r["task_id"], "type": r["type"],
-                    "title": data.get("title") if isinstance(data.get("title"), str) else None,
-                    "node": data.get("node") if isinstance(data.get("node"), str) else None,
-                    "state": data.get("state") if isinstance(data.get("state"), str) else None})
+                         "ORDER BY id DESC LIMIT 500", ALERT_TYPES).fetchall()
+        for r in rows:
+            data = _json(r["data"]) or {}
+            if r["type"] in TASK_ALERT_STATE:
+                if r["task_id"] in seen:
+                    continue
+                seen.add(r["task_id"])
+                if not _task_alert_open(c, r["task_id"], r["type"]):
+                    continue
+            elif r["type"] == "budget.limit":
+                account = data.get("account")
+                if not isinstance(account, str) or ("limit", account) in seen:
+                    continue
+                seen.add(("limit", account))
+                if account not in snaps:
+                    snaps[account] = budget.limit_snapshot(rules, now, account)
+                agent = data.get("agent") if isinstance(data.get("agent"), str) else ""
+                if not budget.limited_for(snaps[account], agent, agent)[0]:
+                    continue
+            # Titles and node ids only: never result, log or limit-message text.
+            out.append({"id": r["id"], "ts": r["ts"], "task_id": r["task_id"], "type": r["type"],
+                        "title": data.get("title") if isinstance(data.get("title"), str) else None,
+                        "node": data.get("node") if isinstance(data.get("node"), str) else None,
+                        "state": data.get("state") if isinstance(data.get("state"), str) else None})
+            if len(out) == 10:
+                break
     return out
 
 

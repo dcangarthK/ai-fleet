@@ -108,6 +108,24 @@ class Merge(unittest.TestCase):
         with self.assertRaises(ValueError):
             P.validate({"auto_approve": {"full_mode": "yes"}})
 
+    def test_escalation_intersects_and_defaults_to_none(self):
+        self.assertNotIn("escalation", P.merge([L("fleet", body={"mode_ceiling": "full"})])["policy"])
+        r = P.merge([L("fleet", body={"escalation": {"agents": ["codex", "claude"]}}),
+                     L("node:n", body={"mode_ceiling": "auto-edit"}),
+                     L("role:fast", body={"escalation": {"agents": ["claude", "codex"]}}),
+                     L("agent:claude", body={"escalation": {"agents": ["claude"]}})])
+        self.assertEqual(r["policy"]["escalation"], {"agents": ["claude"]})
+        self.assertEqual(r["sources"]["escalation.agents"], ["fleet", "role:fast", "agent:claude"])
+        r = P.merge([L("fleet", body={"escalation": {"agents": ["codex", "claude"]}})])
+        self.assertEqual(r["policy"]["escalation"], {"agents": ["codex", "claude"]})
+        r = P.merge([L("fleet", body={"escalation": {"agents": ["codex"]}}),
+                     L("task", body={"escalation": {"agents": ["claude"]}})])
+        self.assertEqual(r["policy"]["escalation"], {"agents": []})
+        for bad in ({"escalation": {"agents": ["ollama"]}}, {"escalation": ["claude"]},
+                    {"escalation": {"agents": ["claude"], "mode": "full"}}):
+            with self.assertRaises(ValueError):
+                P.validate(bad)
+
     def test_empty(self):
         r = P.merge([])
         self.assertEqual(r["instructions"], "")

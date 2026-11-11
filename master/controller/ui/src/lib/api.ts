@@ -217,6 +217,7 @@ export interface PolicyBody {
   mode_ceiling?: Mode;
   limits?: { task_minutes?: number; max_concurrent?: number; agent_minutes_per_day?: number; quiet_hours?: string[] };
   auto_approve?: { agents?: ("claude" | "codex")[]; full_mode?: boolean; denied_tools?: boolean };
+  escalation?: { agents?: ("claude" | "codex")[] };
 }
 
 export interface Versioned {
@@ -306,4 +307,9 @@ export interface Enrollment { code: string; expires_at: number; command: string 
 
 export interface NotifyRule { id: string; event_glob: string; plugin: string; enabled: boolean }
 
-export interface CallStat { role: string; model: string; count: number; error_rate: number; p50_ms: number; p95_ms: number; fallbacks: number }
+export type CallOutcome = "answered" | "abstained" | "escalated" | "check_failed";
+export interface CallStat {
+  role: string; model: string; count: number; error_rate: number; p50_ms: number; p95_ms: number; fallbacks: number;
+  grounded: number; outcomes: Record<CallOutcome, number>;
+  abstain_rate: number | null; escalation_rate: number | null; check_failed_rate: number | null; logprob_mean: number | null;
+}

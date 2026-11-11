@@ -5,6 +5,8 @@ import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel } from
 import { taskAction, useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
 import { ago, denialTools, duration, needsYou, nodeName, nodeSignal } from "../lib/format";
 
+const pct = (rate: number | null) => (rate == null ? "—" : `${Math.round(rate * 100)}%`);
+
 export function OverviewPage() {
   const fleet = useFleet();
   const tasks = useTasks();
@@ -91,7 +93,7 @@ export function OverviewPage() {
         <Section title="Model calls" aside="last 7 days">
           <div className="panel">
             <table>
-              <thead><tr><th>Role</th><th>Model</th><th className="num">Calls</th><th className="num">Errors</th><th className="num hide-sm">Typical</th><th className="num hide-sm">Slowest 5%</th><th className="num hide-sm">Fallbacks</th></tr></thead>
+              <thead><tr><th>Role</th><th>Model</th><th className="num">Calls</th><th className="num">Errors</th><th className="num hide-sm">Typical</th><th className="num hide-sm">Slowest 5%</th><th className="num hide-sm">Fallbacks</th><th className="num hide-sm">Grounded</th><th className="num hide-sm">Abstained</th><th className="num hide-sm">Escalated</th><th className="num hide-sm">Failed check</th></tr></thead>
               <tbody>
                 {(calls.data ?? []).map((c) => (
                   <tr key={c.role + c.model}>
@@ -99,6 +101,9 @@ export function OverviewPage() {
                     <td className={`num ${c.error_rate > 0.1 ? "tone-bad" : ""}`}>{Math.round(c.error_rate * 100)}%</td>
                     <td className="num hide-sm">{(c.p50_ms / 1000).toFixed(1)}s</td><td className="num hide-sm">{(c.p95_ms / 1000).toFixed(1)}s</td>
                     <td className="num hide-sm">{c.fallbacks}</td>
+                    <td className="num hide-sm">{c.grounded || "—"}</td>
+                    <td className="num hide-sm">{pct(c.abstain_rate)}</td><td className="num hide-sm">{pct(c.escalation_rate)}</td>
+                    <td className={`num hide-sm ${(c.check_failed_rate ?? 0) > 0.1 ? "tone-bad" : ""}`}>{pct(c.check_failed_rate)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -35,6 +35,9 @@ export function compact(body: PolicyBody): PolicyBody {
   if (Object.keys(limits).length) out.limits = limits;
   const a = body.auto_approve;
   if (a && (a.agents?.length || a.full_mode !== undefined || a.denied_tools !== undefined)) out.auto_approve = a;
+  // No editor yet (G6); keep it so saving here doesn't drop it. An empty list is meaningful: it denies.
+  const escalation = body.escalation?.agents;
+  if (Array.isArray(escalation)) out.escalation = { agents: escalation };
   return out;
 }
 

@@ -1622,6 +1622,8 @@ class ModelManager:
         with self.lock:
             running = next((op for op in self.operations.values()
                             if op.get("state") not in FINAL_OPERATION_STATES), None)
+            if running and running.get("kind") == kind and running.get("ref") == body.get("ref"):
+                return dict(running)  # the same request again: idempotent
             if running:
                 raise HttpError(409, "operation %s is already running" % running["id"])
             if kind == "remove" and not flag:

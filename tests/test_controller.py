@@ -81,6 +81,8 @@ class FakeRunner(BaseHTTPRequestHandler):
                         FakeRunner.models[op["derived"]] = True
                 if op["state"] == "removed":
                     FakeRunner.models.pop(op["ref"], None)
+                    if op.get("derived"):
+                        FakeRunner.models.pop(op["derived"], None)
             return self._send(200, {k: v for k, v in op.items() if k != "script"})
         if self.path == "/health":
             return self._send(200, {"ok": True, "version": "2", "max_mode": FakeRunner.max_mode, "running": 0,
@@ -565,6 +567,58 @@ class ControllerTests(unittest.TestCase):
         finally:
             FakeRunner.models.pop("tiny:1b", None)
             FakeRunner.models.pop("fleet-tiny-1b", None)
+
+    def test_params_on_installed_model_are_not_ready_until_derived_exists(self):
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        FakeRunner.models["tiny:1b"] = True
+        FakeRunner.models.pop("fleet-tiny-1b", None)
+        FakeRunner.op_script = ["configuring"] * 50
+        try:
+            self.c.post("/api/refresh", headers=W)
+            r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "present", "params": {"temperature": 0}}, headers=W)
+            self.assertNotEqual(r.json()["state"], "ready")
+            self.wait_install("tiny-1b", "configuring")
+        finally:
+            FakeRunner.op_script = []
+            for op in FakeRunner.ops.values():
+                op["script"] = ["ready"]
+            self.wait_install("tiny-1b", "ready")
+            FakeRunner.models.pop("tiny:1b", None)
+            FakeRunner.models.pop("fleet-tiny-1b", None)
+
+    def test_assigning_a_role_keeps_a_running_install(self):
+        self.c.post("/api/models", json={"reference": "qwen3:8b"}, headers=W)
+        FakeRunner.models.pop("qwen3:8b", None)
+        FakeRunner.op_script = ["pulling"] * 50
+        try:
+            self.c.put("/api/nodes/master/models/qwen3-8b", json={"desired": "present"}, headers=W)
+            row = self.wait_install("qwen3-8b", "pulling")
+            ensures = len([1 for p, _ in FakeRunner.calls if p == "/models/ensure"])
+            r = self.c.post("/api/roles", json={"role": "fast", "node": "master", "model": "qwen3:8b", "ensure_model": True}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(self.models()["qwen3-8b"]["nodes"]["master"]["state"], "pulling")
+            time.sleep(0.6)
+            self.assertEqual(ensures, len([1 for p, _ in FakeRunner.calls if p == "/models/ensure"]))  # no second op
+        finally:
+            FakeRunner.op_script = []
+            for op in FakeRunner.ops.values():
+                op["script"] = ["ready"]
+            wait_for(lambda: [x for x in self.c.get("/api/fleet").json()["assignments"]
+                              if x["role"] == "fast" and x["model"] == "qwen3:8b"][0]["state"] == "active", timeout=10)
+            self.c.request("DELETE", "/api/roles", json={"role": "fast", "node": "master", "model": "qwen3:8b"}, headers=W)
+            self.c.put("/api/nodes/master/models/qwen3-8b", json={"desired": "absent"}, headers=W)
+            self.wait_install("qwen3-8b", "removed")
+
+    def test_request_while_an_operation_is_being_started_is_refused(self):
+        from store import db
+        self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
+        with db() as c:
+            c.execute("INSERT OR REPLACE INTO node_models (node,catalog_id,desired,state,progress,params,updated_at) "
+                      "VALUES ('master','tiny-1b','present','starting','{}','{}',?)", (time.time(),))
+        r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent"}, headers=W)
+        self.assertEqual(r.status_code, 409)
+        with db() as c:
+            c.execute("DELETE FROM node_models WHERE node='master' AND catalog_id='tiny-1b'")
 
     def test_preexisting_model_is_marked(self):
         self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)

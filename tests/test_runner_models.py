@@ -255,6 +255,15 @@ class RunnerModels(unittest.TestCase):
         self.assertEqual("ready", self.wait_op(again["id"])["state"])
         self.assertEqual(pulls, sum(1 for p, _ in FakeOllama.state["calls"] if p == "/api/pull"))
 
+    def test_ensure_for_the_same_ref_returns_the_running_operation(self):
+        FakeOllama.state["pull_delay"] = 0.3
+        self.start()
+        _, op = self.req("POST", "/models/ensure", {"ref": "qwen3:8b"})
+        status, again = self.req("POST", "/models/ensure", {"ref": "qwen3:8b"})
+        self.assertEqual(200, status)
+        self.assertEqual(op["id"], again["id"])
+        self.wait_op(op["id"])
+
     def test_refused_without_remote_management(self):
         self.start({"remote_management": False})
         self.assertEqual(403, self.req("POST", "/models/ensure", {"ref": "tiny:1b"})[0])

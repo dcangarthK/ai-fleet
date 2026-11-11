@@ -317,6 +317,15 @@ async def reconcile_models() -> None:
         else:
             body["confirm_preexisting"] = bool(row.get("confirm_preexisting"))
             event_type = "model.remove"
+        # Claim the row so a concurrent request can't change it while the runner starts the operation.
+        claim = time.time()
+        with db() as c:
+            claimed = c.execute(
+                "UPDATE node_models SET state='starting', updated_at=? WHERE node=? AND catalog_id=? "
+                "AND updated_at=? AND op_id IS NULL AND desired=?",
+                (claim, row["node"], row["catalog_id"], row["updated_at"], row["desired"])).rowcount
+        if not claimed:
+            continue  # changed since we read it; next pass sees the new row
         try:
             operation = await tasks.runner_call(node, "POST", path, body, timeout=30)
         except tasks.RunnerError as exc:
@@ -717,13 +726,14 @@ def set_node_model(name: str, catalog_id: str, request: NodeModelRequest) -> dic
         old = c.execute("SELECT * FROM node_models WHERE node=? AND catalog_id=?",
                         (node["id"], catalog_id)).fetchone()
         installed = model["reference"] in _json(node["models"], [])
-        if old and old["op_id"] and old["state"] in ("checking", "pulling", "configuring", "verifying", "removing"):
+        if old and (old["state"] == "starting" or (old["op_id"] and old["state"] in BUSY_INSTALL)):
             raise HTTPException(409, f"{model['reference']} has an operation in progress on {node['name']}; wait for it to finish")
         params = (validate_model_params(request.params) if request.params is not None else
                   _json(old["params"], {}) if old else {})
         ownership = old["ownership"] if old and old["ownership"] else (
             "pre-existing" if installed else "fleet-managed")
-        state = "ready" if request.desired == "present" and installed else (
+        derived_ok = not params or ("fleet-" + catalog_id) in _json(node["models"], [])
+        state = "ready" if request.desired == "present" and installed and derived_ok else (
             "removed" if request.desired == "absent" and not installed else "checking")
         c.execute(
             "INSERT OR REPLACE INTO node_models "
@@ -814,8 +824,16 @@ async def assign(a: Assignment) -> dict:
                 "INSERT INTO node_models "
                 "(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) "
                 "VALUES (?,?, 'present','checking',NULL,NULL,'{}','fleet-managed',?,0,0,?) "
-                "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',state='checking',reason=NULL,op_id=NULL,"
-                "params=excluded.params,updated_at=excluded.updated_at",
+                "ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',"
+                "state=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
+                "AND node_models.desired='present' THEN node_models.state ELSE 'checking' END,"
+                "reason=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
+                "AND node_models.desired='present' THEN node_models.reason ELSE NULL END,"
+                "op_id=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
+                "AND node_models.desired='present' THEN node_models.op_id ELSE NULL END,"
+                "params=CASE WHEN node_models.state IN ('starting','checking','pulling','configuring','verifying') "
+                "AND node_models.desired='present' THEN node_models.params ELSE excluded.params END,"
+                "updated_at=excluded.updated_at",
                 (node["id"], catalog_id, json.dumps(params), time.time()),
             )
         c.execute(
@@ -847,6 +865,7 @@ def dashboard() -> str:
 
 
 UI_DIST = Path(__file__).with_name("ui") / "dist"
+BUSY_INSTALL = ("starting", "checking", "pulling", "configuring", "verifying", "removing")
 
 
 @app.get("/app", include_in_schema=False)

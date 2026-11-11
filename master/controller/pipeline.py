@@ -39,11 +39,19 @@ def new(spec: dict) -> dict:
     maximum = spec.get("max_rounds", 3)
     if not isinstance(maximum, int) or isinstance(maximum, bool) or not 1 <= maximum <= 20:
         raise ValueError("max_rounds must be between 1 and 20")
+    require_trusted = spec.get("require_trusted", True)
+    if not isinstance(require_trusted, bool):
+        raise ValueError("require_trusted must be a boolean")
+    trusted_roles = spec.get("trusted_roles", [])
+    if (not isinstance(trusted_roles, list)
+            or any(not isinstance(role, str) or not role for role in trusted_roles)):
+        raise ValueError("trusted_roles must be a list of role names")
     mode = spec.get("mode", "auto-edit")
     return {
         "title": spec.get("title", ""), "state": "building", "round": 1,
         "max_rounds": maximum, "spec": spec.get("spec", ""),
         "repo": spec.get("repo"), "gate": spec.get("gate"), "mode": mode,
+        "require_trusted": require_trusted, "trusted_roles": list(dict.fromkeys(trusted_roles)),
         "builder": copy.deepcopy(builder), "reviewers": clean_reviewers,
         "build_task": None, "reviews": {}, "history": [],
     }
@@ -120,6 +128,14 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         parsed["task_id"] = event["task_id"]
     if event.get("reason"):
         parsed["reason"] = str(event["reason"])[:300]
+    fallback = event.get("fallback") is True
+    reviewer = p["reviewers"][index]
+    usable = parsed.get("status") == "valid" or parsed.get("verdict") == "abstain"
+    parsed["fallback"] = fallback
+    parsed["trusted"] = bool(usable and not fallback and (
+        (reviewer["kind"] == "agent" and reviewer.get("agent") in {"claude", "codex"})
+        or (reviewer["kind"] == "role" and reviewer.get("role") in p.get("trusted_roles", []))
+    ))
     p["reviews"][key] = parsed
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
@@ -127,12 +143,6 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
              if review.get("status") == "valid" or review.get("verdict") == "abstain"]
     unsupported = sum(review.get("unsupported", 0) for review in p["reviews"].values())
     identical_fix = sum(review.get("identical_fix", 0) for review in p["reviews"].values())
-    if not valid:
-        p["state"] = "escalated"
-        reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
-        _history(p, "escalated", unsupported=unsupported, identical_fix=identical_fix,
-                 note="no usable review" + (f" ({reasons})" if reasons else " (all replies were invalid)"))
-        return p, []
     actionable = []
     seen = set()
     for review in valid:
@@ -143,6 +153,18 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
             if identity not in seen:
                 seen.add(identity)
                 actionable.append(issue)
+    if p.get("require_trusted", True) and not any(review.get("trusted") for review in p["reviews"].values()):
+        p["state"] = "escalated"
+        reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
+        _history(p, "escalated", issues=len(actionable), unsupported=unsupported,
+                 identical_fix=identical_fix, note="no trusted review" + (f" ({reasons})" if reasons else ""))
+        return p, []
+    if not valid:
+        p["state"] = "escalated"
+        reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
+        _history(p, "escalated", unsupported=unsupported, identical_fix=identical_fix,
+                 note="no usable review" + (f" ({reasons})" if reasons else " (all replies were invalid)"))
+        return p, []
     if not actionable:
         p["state"] = "ready"
         _history(p, "ready", issues=0, unsupported=unsupported, identical_fix=identical_fix)

@@ -706,7 +706,8 @@ Imported body.
         self.c.post("/api/refresh", headers=W)
         try:
             body = {"title": "Fallback review", "spec": "s", "repo": "/repo", "gate": "pytest", "mode": "auto-edit",
-                    "builder": {"agent": "codex"}, "reviewers": [{"kind": "role", "role": "slowrole"}], "max_rounds": 1}
+                    "builder": {"agent": "codex"}, "reviewers": [{"kind": "role", "role": "slowrole"}],
+                    "max_rounds": 1, "require_trusted": False}
             p = self.c.post("/api/pipelines", json=body, headers=W).json()
             FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
             done = wait_for(lambda: (lambda x: x if x["state"] == "ready" else None)(
@@ -728,6 +729,71 @@ Imported body.
             controller.pipeline_model_call = original
             FakeRunner.agents["codex"] = None
             self.c.post("/api/refresh", headers=W)
+
+    def test_large_role_review_diff_is_split_on_file_boundaries(self):
+        original_call = controller.pipeline_model_call
+        original_limit = controller.FLEET_REVIEW_MAX_CHARS
+        first = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old_a = 0\n+new_a = 1\n"
+        second = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-old_b = 0\n+new_b = 1\n"
+        calls = []
+
+        def fake(role, spec, diff):
+            calls.append(diff)
+            return json.dumps({"verdict": "approve", "issues": []})
+
+        controller.pipeline_model_call = fake
+        controller.FLEET_REVIEW_MAX_CHARS = max(len(first), len(second))
+        try:
+            raw, reason, fallback = asyncio.run(controller.role_review("chunkrole", "spec", first + second))
+            self.assertEqual(json.loads(raw)["verdict"], "approve")
+            self.assertIsNone(reason)
+            self.assertFalse(fallback)
+            self.assertEqual(calls, [first, second])
+        finally:
+            controller.pipeline_model_call = original_call
+            controller.FLEET_REVIEW_MAX_CHARS = original_limit
+
+    def test_large_role_review_merges_chunk_issues_and_verdicts(self):
+        original_call = controller.pipeline_model_call
+        original_limit = controller.FLEET_REVIEW_MAX_CHARS
+        first = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old_a = 0\n+new_a = 1\n"
+        second = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-safe_b = True\n+dangerous_b = True\n"
+        issue = {"severity": "high", "file": "b.py", "problem": "Dangerous mode enabled",
+                 "evidence": "dangerous_b = True", "expected": "safe mode", "actual": "dangerous mode",
+                 "fix": "set dangerous_b to False"}
+
+        def fake(role, spec, diff):
+            return (json.dumps({"verdict": "request_changes", "issues": [issue]}) if "b/b.py" in diff
+                    else json.dumps({"verdict": "approve", "issues": []}))
+
+        controller.pipeline_model_call = fake
+        controller.FLEET_REVIEW_MAX_CHARS = max(len(first), len(second))
+        try:
+            raw, reason, fallback = asyncio.run(controller.role_review("chunkrole", "spec", first + second))
+            merged = json.loads(raw)
+            self.assertEqual(merged, {"verdict": "request_changes", "issues": [issue]})
+            self.assertIsNone(reason)
+            self.assertFalse(fallback)
+        finally:
+            controller.pipeline_model_call = original_call
+            controller.FLEET_REVIEW_MAX_CHARS = original_limit
+
+    def test_invalid_large_diff_chunk_invalidates_review_and_names_file(self):
+        original_call = controller.pipeline_model_call
+        original_limit = controller.FLEET_REVIEW_MAX_CHARS
+        first = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old_a = 0\n+new_a = 1\n"
+        second = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-old_b = 0\n+new_b = 1\n"
+        controller.pipeline_model_call = lambda role, spec, diff: ("not json" if "b/b.py" in diff else
+                                                                    json.dumps({"verdict": "approve", "issues": []}))
+        controller.FLEET_REVIEW_MAX_CHARS = max(len(first), len(second))
+        try:
+            raw, reason, fallback = asyncio.run(controller.role_review("chunkrole", "spec", first + second))
+            self.assertEqual(raw, "")
+            self.assertIn("b.py", reason)
+            self.assertFalse(fallback)
+        finally:
+            controller.pipeline_model_call = original_call
+            controller.FLEET_REVIEW_MAX_CHARS = original_limit
 
     # ---------- phase 5b: catalog, installs, roles that wait ----------
 

@@ -169,6 +169,10 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
         return "runner offline"
     if not (node["runner"].get("agents") or {}).get(agent):
         return f"no {agent} on this node"
+    power = node["runner"].get("power") or {}
+    if (agent in ("claude", "codex") and power.get("on_battery") is True and power.get("ok") is False):
+        pct = power.get("battery_pct")
+        return f"on battery ({pct}%)" if isinstance(pct, int) else "on battery"
     if agent == "ollama" and model not in node["models"]:
         return f"model {model} not on this node"
     runner = node["runner"]
@@ -514,6 +518,10 @@ async def create_task(t: TaskIn) -> dict:
                    t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
                    effective["hash"], t.role, queued_reason if state == "queued" else None,
                    json.dumps(effective["skills"])))
+        if t.model:
+            c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
+                      "(SELECT id FROM model_catalog WHERE reference=?)",
+                      (now, node["id"], t.model))
         for skill_id in dict.fromkeys(t.skills):
             c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?, 'task', ?)", (skill_id, task_id))
     emit(task_id, f"task.{state}", {"title": title, "node": node["id"], "agent": t.agent, "mode": t.mode})

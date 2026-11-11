@@ -13,6 +13,8 @@ Tokens: uv run --script controller.py token create operate phone
         uv run --script controller.py token list | token revoke <id>
 """
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -52,6 +54,10 @@ KEEP_ALIVE_RE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
 FLEET_PREFIX = "fleet--"
 MASTER_MODEL_HOST = os.environ.get("FLEET_MASTER_MODEL_HOST", "")  # e.g. host.docker.internal
 INFO_PORT = 11435  # onboard script publishes /fleet.json here (hardware, agents, model files)
+RUNNER_SOURCE = Path(__file__).resolve().parents[2] / "nodes" / "runner.py"
+ENROLL_TTL = 30 * 60
+KEEP_WORKTREE_DAYS = int(os.environ.get("FLEET_KEEP_WORKTREE_DAYS", "7"))
+_enroll_failures: dict[str, list[float]] = {}
 
 # (engine, port, path): first that answers wins.
 PROBES = [("ollama", 11434, "/api/tags"), ("openai", 8000, "/v1/models"), ("openai", 1234, "/v1/models"),
@@ -60,6 +66,18 @@ PROBES = [("ollama", 11434, "/api/tags"), ("openai", 8000, "/v1/models"), ("open
 
 def healthy(row: sqlite3.Row) -> bool:
     return row["status"] == "approved" and row["fails"] < MAX_FAILS and row["engine"] is not None
+
+
+def now() -> float:
+    """Wall clock kept injectable for expiry and retention tests."""
+    return time.time()
+
+
+def _bind_enrollment(c: sqlite3.Connection, node_id: str, hostname: str) -> None:
+    row = c.execute("SELECT runner_token FROM enrollments WHERE hostname=? AND used_at IS NOT NULL "
+                    "ORDER BY used_at DESC LIMIT 1", (hostname.lower(),)).fetchone()
+    if row and row["runner_token"]:
+        c.execute("UPDATE nodes SET runner_token=? WHERE id=?", (row["runner_token"], node_id))
 
 
 # ---------- discovery ----------
@@ -168,6 +186,8 @@ def merge_model_inventory(c: sqlite3.Connection, node_id: str, report: dict | No
 
 
 async def refresh_nodes() -> None:
+    with db() as c:
+        before_health = {row["id"]: healthy(row) for row in c.execute("SELECT * FROM nodes")}
     async with httpx.AsyncClient(trust_env=False) as client:
         await refresh_master(client)
     try:
@@ -191,6 +211,7 @@ async def refresh_nodes() -> None:
         for n in seen:
             c.execute("INSERT OR IGNORE INTO nodes (id) VALUES (?)", (n["id"],))
             c.execute("UPDATE nodes SET name=?, ip=?, os=? WHERE id=?", (n["name"], n["ip"], n["os"], n["id"]))
+            _bind_enrollment(c, n["id"], n["name"])
             if inventory.get(n["id"]):
                 c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory[n["id"]]), n["id"]))
             if runner.get(n["id"]):
@@ -209,6 +230,12 @@ async def refresh_nodes() -> None:
         # Nodes that left the tailnet (or lost the tag) count as failing too.
         c.execute(f"UPDATE nodes SET fails=fails+1, runner_fails=runner_fails+1 "
                   f"WHERE id NOT IN ({','.join('?' * len(ids))})", ids)
+    with db() as c:
+        after = {row["id"]: row for row in c.execute("SELECT * FROM nodes")}
+    for node_id, was_healthy in before_health.items():
+        row = after.get(node_id)
+        if was_healthy and row is not None and not healthy(row):
+            events.emit(None, "node.offline", {"node": node_id, "name": row["name"]})
 
 
 # ---------- LiteLLM reconciliation ----------
@@ -288,6 +315,10 @@ async def reconcile_models() -> None:
         derived = "fleet-" + row["catalog_id"] if params else None
         target_present = row["reference"] in present and (not derived or derived in present)
         if row["desired"] == "present" and target_present:
+            if row.get("state") == "idle":
+                continue  # retention's suggestion remains visible until the model is used again
+            if row.get("state") == "ready" and row.get("ownership"):
+                continue
             ownership = row.get("ownership") or "pre-existing"
             _set_node_model(row["node"], row["catalog_id"], state="ready", reason=None,
                             ownership=ownership, progress=json.dumps({"status": "ready"}))
@@ -382,7 +413,33 @@ async def reconcile() -> dict:
         for mid in existing.keys() - desired.keys():
             (await client.post("/model/delete", json={"id": mid})).raise_for_status()
             removed.append(mid)
+    with db() as c:
+        nodes = {row["id"]: row for row in c.execute("SELECT * FROM nodes")}
+        for assignment in c.execute("SELECT * FROM assignments").fetchall():
+            mid = deployment_id(assignment["role"], assignment["node"], assignment["model"])
+            reason = _route_ineligible(assignment, nodes.get(assignment["node"]))
+            c.execute("UPDATE assignments SET routed=?,route_reason=? WHERE role=? AND node=? AND model=?",
+                      (int(mid in desired and reason is None), reason, assignment["role"], assignment["node"],
+                       assignment["model"]))
     return {"added": added, "removed": removed}
+
+
+def _route_ineligible(assignment, node) -> str | None:
+    if not node or assignment["state"] != "active" or not healthy(node):
+        return "node unhealthy"
+    if node["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST:
+        return "master model host not set"
+    try:
+        if assignment["model"] not in json.loads(node["models"] or "[]"):
+            return "node unhealthy"
+    except (ValueError, TypeError):
+        return "node unhealthy"
+    return None
+
+
+def _set_all_routes(reason: str) -> None:
+    with db() as c:
+        c.execute("UPDATE assignments SET routed=0,route_reason=?", (reason,))
 
 
 _tick_lock = asyncio.Lock()
@@ -393,11 +450,13 @@ async def tick() -> dict:
         await refresh_nodes()
         await reconcile_models()
         if not MASTER_KEY:
+            _set_all_routes("litellm not configured")
             return {"skipped": "no LITELLM_MASTER_KEY: model roles are not synced"}
         try:
             return await reconcile()
         except httpx.HTTPError as e:
             print(f"reconcile failed: {e}")
+            _set_all_routes("sync failed: " + str(e)[:300])
             return {"error": str(e)}
 
 
@@ -418,7 +477,8 @@ async def lifespan(_: FastAPI):
     fleet_skills.import_repo()
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
-                  asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop())]
+                  asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
+                  asyncio.create_task(retention_loop())]
     yield
     for t in background:
         t.cancel()
@@ -436,6 +496,401 @@ class Assignment(BaseModel):
     ensure_model: bool = False
     catalog_id: str | None = None
     params: dict = Field(default_factory=dict)
+
+
+class RoleBody(BaseModel):
+    fallback: str | None = None
+    description: str | None = None
+
+
+class EnrollmentBody(BaseModel):
+    name: str | None = None
+
+
+class EnrollmentComplete(BaseModel):
+    code: str
+    hostname: str
+    runner_token: str
+
+
+class CallUsage(BaseModel):
+    role: str
+    model: str
+    ms: float = Field(ge=0)
+    ok: bool
+    tokens_in: int | None = Field(default=None, ge=0)
+    tokens_out: int | None = Field(default=None, ge=0)
+    fallback_from: str | None = None
+
+
+class NotifyToggle(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/me")
+def who_am_i(request: Request) -> dict:
+    return {"scope": request.state.scope, "label": request.state.actor,
+            "local": request.state.actor == "local"}
+
+
+def _enrollment_hash(code: str) -> str:
+    return hashlib.sha256(code.upper().encode("ascii")).hexdigest()
+
+
+@app.post("/api/enroll")
+def create_enrollment(body: EnrollmentBody) -> dict:
+    code = base64.b32encode(secrets.token_bytes(7)).decode().rstrip("=")[:10]
+    expires = now() + ENROLL_TTL
+    with db() as c:
+        c.execute("INSERT INTO enrollments (hash,name,expires_at,created_at) VALUES (?,?,?,?)",
+                  (_enrollment_hash(code), body.name, expires, now()))
+    master = auth.PUBLIC_HOST or "<master>"
+    base = master if master.startswith(("http://", "https://")) else "https://" + master
+    command = (f"curl -fsS {base}/enroll/onboard.sh | bash -s -- --enroll {code} "
+               f"--master {base}")
+    return {"code": code, "expires_at": expires, "command": command}
+
+
+@app.post("/api/enroll/complete")
+def complete_enrollment(body: EnrollmentComplete, request: Request) -> dict:
+    source = request.client.host if request.client else "unknown"
+    cutoff = now() - 600
+    attempts = [stamp for stamp in _enroll_failures.get(source, []) if stamp >= cutoff]
+    _enroll_failures[source] = attempts
+    hostname = None
+    with db() as c:
+        valid_code = bool(re.fullmatch(r"[A-Z2-7]{10}", body.code.upper()))
+        row = (c.execute("SELECT * FROM enrollments WHERE hash=?", (_enrollment_hash(body.code),)).fetchone()
+               if valid_code else None)
+        valid = bool(row and row["used_at"] is None and row["expires_at"] >= now())
+        if valid:
+            hostname = body.hostname.strip().split(".")[0].lower()
+            if not hostname or not body.runner_token:
+                valid = False
+            else:
+                valid = c.execute(
+                    "UPDATE enrollments SET used_at=?,hostname=?,runner_token=? WHERE hash=? AND used_at IS NULL",
+                    (now(), hostname, body.runner_token, row["hash"])).rowcount == 1
+                if valid:
+                    nodes = c.execute("SELECT id FROM nodes WHERE lower(name)=?", (hostname,)).fetchall()
+                    for node in nodes:
+                        c.execute("UPDATE nodes SET runner_token=? WHERE id=?", (body.runner_token, node["id"]))
+        if valid:
+            _enroll_failures.pop(source, None)
+    if valid:
+        events.emit(None, "enrollment.completed", {"hostname": hostname})
+        return {"hostname": hostname, "status": "pending"}
+    attempts.append(now())
+    _enroll_failures[source] = attempts
+    events.emit(None, "enrollment.failed", {"source": source})
+    if len(attempts) >= 5:
+        raise HTTPException(429, "too many enrollment failures; try again later")
+    raise HTTPException(403, "invalid, expired, or already used enrollment code")
+
+
+@app.get("/enroll/onboard.sh", include_in_schema=False)
+def enrollment_script() -> FileResponse:
+    return FileResponse(Path(__file__).resolve().parents[2] / "nodes" / "onboard.sh",
+                        media_type="text/x-shellscript")
+
+
+@app.put("/api/roles/{name}")
+def put_role(name: str, body: RoleBody) -> dict:
+    if not ROLE_RE.fullmatch(name) or (body.fallback and not ROLE_RE.fullmatch(body.fallback)):
+        raise HTTPException(400, "role and fallback must be lowercase letters, digits, dashes")
+    if body.fallback == name:
+        raise HTTPException(400, "role fallback cycle")
+    with db() as c:
+        links = {row["name"]: row["fallback"] for row in c.execute("SELECT name,fallback FROM roles")}
+        links[name] = body.fallback
+        seen, cursor = {name}, body.fallback
+        while cursor:
+            if cursor in seen:
+                raise HTTPException(400, "role fallback cycle")
+            seen.add(cursor)
+            cursor = links.get(cursor)
+        c.execute("INSERT INTO roles (name,fallback,description) VALUES (?,?,?) "
+                  "ON CONFLICT(name) DO UPDATE SET fallback=excluded.fallback,description=excluded.description",
+                  (name, body.fallback, body.description))
+    return {"name": name, "fallback": body.fallback, "description": body.description}
+
+
+@app.post("/api/usage/calls")
+def record_call(body: CallUsage) -> dict:
+    with db() as c:
+        c.execute("INSERT INTO call_usage (ts,role,model,ms,ok,tokens_in,tokens_out,fallback_from) "
+                  "VALUES (?,?,?,?,?,?,?,?)", (now(), body.role, body.model, body.ms, int(body.ok),
+                                               body.tokens_in, body.tokens_out, body.fallback_from))
+    return {"recorded": True}
+
+
+def _percentile(values: list[float], fraction: float) -> int:
+    ordered = sorted(values)
+    if not ordered:
+        return 0
+    index = max(0, min(len(ordered) - 1, int((len(ordered) * fraction + 0.999999)) - 1))
+    return int(round(ordered[index]))
+
+
+@app.get("/api/usage/calls")
+def call_stats(days: int = 7) -> list[dict]:
+    days = max(1, min(days, 365))
+    with db() as c:
+        rows = [dict(row) for row in c.execute("SELECT * FROM call_usage WHERE ts>=? ORDER BY ts",
+                                               (now() - days * 86400,))]
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        grouped.setdefault((row["role"], row["model"]), []).append(row)
+    result = []
+    for (role, model), calls in sorted(grouped.items()):
+        latencies = [call["ms"] for call in calls]
+        result.append({"role": role, "model": model, "count": len(calls),
+                       "error_rate": sum(not bool(call["ok"]) for call in calls) / len(calls),
+                       "p50_ms": _percentile(latencies, .50), "p95_ms": _percentile(latencies, .95),
+                       "fallbacks": sum(call["fallback_from"] is not None for call in calls)})
+    return result
+
+
+@app.get("/api/notify-rules")
+def list_notify_rules() -> list[dict]:
+    with db() as c:
+        return [dict(row) | {"enabled": bool(row["enabled"])}
+                for row in c.execute("SELECT * FROM notify_rules ORDER BY id")]
+
+
+@app.put("/api/notify-rules/{rule_id}")
+def toggle_notify_rule(rule_id: str, body: NotifyToggle) -> dict:
+    with db() as c:
+        if not c.execute("UPDATE notify_rules SET enabled=? WHERE id=?", (int(body.enabled), rule_id)).rowcount:
+            raise HTTPException(404, "unknown notification rule")
+        row = c.execute("SELECT * FROM notify_rules WHERE id=?", (rule_id,)).fetchone()
+    return dict(row) | {"enabled": bool(row["enabled"])}
+
+
+@app.post("/api/notify-rules/{rule_id}/test")
+def test_notify_rule(rule_id: str) -> dict:
+    with db() as c:
+        row = c.execute("SELECT * FROM notify_rules WHERE id=?", (rule_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown notification rule")
+    sent = events.send_test(row["plugin"], rule_id)
+    events.emit(None, "notify.test", {"rule_id": rule_id, "plugin": row["plugin"], "sent": sent})
+    return {"sent": sent, "plugin": row["plugin"]}
+
+
+def export_document() -> dict:
+    with db() as c:
+        catalog = [dict(row) for row in c.execute("SELECT * FROM model_catalog ORDER BY id")]
+        installs = [dict(row) for row in c.execute(
+            "SELECT node,catalog_id,desired,params,override_fit,confirm_preexisting FROM node_models ORDER BY node,catalog_id")]
+        roles = [dict(row) for row in c.execute("SELECT * FROM roles ORDER BY name")]
+        assignments = [dict(row) for row in c.execute(
+            "SELECT role,node,model,state,catalog_id,params FROM assignments ORDER BY role,node,model")]
+        instructions = _version_rows("instructions")
+        policies = _version_rows("policies")
+        bindings = [dict(row) for row in c.execute("SELECT * FROM skill_bindings ORDER BY skill_id,scope,scope_id")]
+        rules = [dict(row) | {"enabled": bool(row["enabled"])}
+                 for row in c.execute("SELECT * FROM notify_rules ORDER BY id")]
+    for row in catalog:
+        for field in ("defaults", "suggested_roles", "evals"):
+            row[field] = _json(row.get(field), {} if field != "suggested_roles" else [])
+    for rows in (installs, assignments):
+        for row in rows:
+            row["params"] = _json(row.get("params"), {})
+    for row in policies:
+        row["body"] = _json(row.get("body"), {})
+    skills = fleet_skills.current()
+    for row in skills:
+        row.pop("bindings", None)
+    return {"schema": 1, "catalog": catalog, "desired_installs": installs, "roles": roles,
+            "assignments": assignments, "instructions": instructions, "policies": policies,
+            "skills": skills, "bindings": bindings, "notify_rules": rules}
+
+
+@app.get("/api/export")
+def export_config() -> dict:
+    return export_document()
+
+
+def _section_keys(section: str, rows: list[dict]) -> dict:
+    keys = {"catalog": ("id",), "desired_installs": ("node", "catalog_id"), "roles": ("name",),
+            "assignments": ("role", "node", "model"), "instructions": ("scope", "scope_id"),
+            "policies": ("scope", "scope_id"), "skills": ("id",),
+            "bindings": ("skill_id", "scope", "scope_id"), "notify_rules": ("id",)}[section]
+    return {"|".join(str(row.get(key, "")) for key in keys): row for row in rows if isinstance(row, dict)}
+
+
+def import_diff(document: dict) -> dict:
+    current = export_document()
+    changes = {}
+    for section in ("catalog", "desired_installs", "roles", "assignments", "instructions", "policies",
+                    "skills", "bindings", "notify_rules"):
+        before = _section_keys(section, current.get(section, []))
+        after = _section_keys(section, document.get(section, []))
+        changes[section] = {
+            "add": sorted(after.keys() - before.keys()),
+            "update": sorted(key for key in after.keys() & before.keys()
+                             if _import_comparable(after[key]) != _import_comparable(before[key])),
+            "remove": sorted(before.keys() - after.keys()) if document.get("prune") is True else [],
+        }
+    return {"changes": changes, "prune": document.get("prune") is True}
+
+
+def _import_comparable(row: dict) -> dict:
+    return {key: value for key, value in row.items() if key not in ("version", "author", "created_at", "digest")}
+
+
+def _apply_import(document: dict, actor: str) -> None:
+    links = {row.get("name"): row.get("fallback") for row in document.get("roles", []) if isinstance(row, dict)}
+    for start in links:
+        seen, cursor = set(), start
+        while cursor:
+            if cursor in seen:
+                raise HTTPException(400, f"role fallback cycle involving {cursor}")
+            seen.add(cursor)
+            cursor = links.get(cursor)
+    with db() as c:
+        for row in document.get("catalog", []):
+            if not isinstance(row, dict) or not row.get("id") or not row.get("reference"):
+                continue
+            fields = ("id", "reference", "engine", "display_name", "download_gb", "digest", "min_engine",
+                      "defaults", "suggested_roles", "evals", "source", "created_at")
+            values = [row.get(field) for field in fields]
+            for field in ("defaults", "suggested_roles", "evals"):
+                index = fields.index(field)
+                values[index] = json.dumps(values[index] if values[index] is not None else ({} if field != "suggested_roles" else []))
+            values[fields.index("created_at")] = row.get("created_at") or now()
+            c.execute("INSERT INTO model_catalog (" + ",".join(fields) + ") VALUES (" + ",".join("?" * len(fields)) + ") "
+                      "ON CONFLICT(id) DO UPDATE SET " + ",".join(f"{field}=excluded.{field}" for field in fields[1:]), values)
+        for row in document.get("roles", []):
+            if isinstance(row, dict) and row.get("name"):
+                c.execute("INSERT INTO roles VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET "
+                          "fallback=excluded.fallback,description=excluded.description",
+                          (row["name"], row.get("fallback"), row.get("description")))
+        for row in document.get("assignments", []):
+            if isinstance(row, dict) and all(row.get(key) for key in ("role", "node", "model")):
+                c.execute("INSERT INTO assignments (role,node,model,state,catalog_id,params,routed,route_reason) "
+                          "VALUES (?,?,?,?,?,?,NULL,NULL) ON CONFLICT(role,node,model) DO UPDATE SET "
+                          "state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params,routed=NULL,route_reason=NULL",
+                          (row["role"], row["node"], row["model"], row.get("state", "active"),
+                           row.get("catalog_id"), json.dumps(row.get("params") or {})))
+        for row in document.get("desired_installs", []):
+            if isinstance(row, dict) and row.get("node") and row.get("catalog_id"):
+                c.execute("INSERT INTO node_models (node,catalog_id,desired,state,params,override_fit,confirm_preexisting,updated_at) "
+                          "VALUES (?,?,?,'checking',?,?,?,?) ON CONFLICT(node,catalog_id) DO UPDATE SET "
+                          "desired=excluded.desired,state='checking',params=excluded.params,override_fit=excluded.override_fit,"
+                          "confirm_preexisting=excluded.confirm_preexisting,updated_at=excluded.updated_at",
+                          (row["node"], row["catalog_id"], row.get("desired", "present"),
+                           json.dumps(row.get("params") or {}), int(bool(row.get("override_fit"))),
+                           int(bool(row.get("confirm_preexisting"))), now()))
+        for row in document.get("instructions", []):
+            if not isinstance(row, dict) or not row.get("scope") or row.get("scope_id") is None:
+                continue
+            current = c.execute("SELECT text FROM instructions WHERE scope=? AND scope_id=? ORDER BY version DESC LIMIT 1",
+                                (row["scope"], row["scope_id"])).fetchone()
+            if not current or current["text"] != row.get("text", ""):
+                version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM instructions WHERE scope=? AND scope_id=?",
+                                    (row["scope"], row["scope_id"])).fetchone()[0]
+                c.execute("INSERT INTO instructions VALUES (?,?,?,?,?,?)",
+                          (row["scope"], row["scope_id"], version, row.get("text", ""), actor, now()))
+        for row in document.get("policies", []):
+            if not isinstance(row, dict) or not row.get("scope") or row.get("scope_id") is None:
+                continue
+            body = row.get("body") or {}
+            current = c.execute("SELECT body FROM policies WHERE scope=? AND scope_id=? ORDER BY version DESC LIMIT 1",
+                                (row["scope"], row["scope_id"])).fetchone()
+            encoded = json.dumps(body)
+            if not current or _json(current["body"], {}) != body:
+                version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM policies WHERE scope=? AND scope_id=?",
+                                    (row["scope"], row["scope_id"])).fetchone()[0]
+                c.execute("INSERT INTO policies VALUES (?,?,?,?,?,?)",
+                          (row["scope"], row["scope_id"], version, encoded, actor, now()))
+        for row in document.get("bindings", []):
+            if isinstance(row, dict) and all(row.get(key) is not None for key in ("skill_id", "scope", "scope_id")):
+                c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?,?,?)",
+                          (row["skill_id"], row["scope"], row["scope_id"]))
+        for row in document.get("notify_rules", []):
+            if isinstance(row, dict) and row.get("id") and row.get("event_glob") and row.get("plugin"):
+                c.execute("INSERT INTO notify_rules VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                          "event_glob=excluded.event_glob,plugin=excluded.plugin,enabled=excluded.enabled",
+                          (row["id"], row["event_glob"], row["plugin"], int(bool(row.get("enabled", True)))))
+        if document.get("prune") is True:
+            for section, table, keys in (("catalog", "model_catalog", ("id",)),
+                                          ("roles", "roles", ("name",)),
+                                          ("assignments", "assignments", ("role", "node", "model")),
+                                          ("desired_installs", "node_models", ("node", "catalog_id")),
+                                          ("instructions", "instructions", ("scope", "scope_id")),
+                                          ("policies", "policies", ("scope", "scope_id")),
+                                          ("bindings", "skill_bindings", ("skill_id", "scope", "scope_id")),
+                                          ("notify_rules", "notify_rules", ("id",))):
+                wanted = {tuple(row.get(key) for key in keys) for row in document.get(section, []) if isinstance(row, dict)}
+                for existing in c.execute("SELECT " + ",".join(keys) + " FROM " + table).fetchall():
+                    value = tuple(existing[key] for key in keys)
+                    if value not in wanted:
+                        c.execute("DELETE FROM " + table + " WHERE " + " AND ".join(f"{key}=?" for key in keys), value)
+    for row in document.get("skills", []):
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        current = next((item for item in fleet_skills.current() if item["id"] == row["id"]), None)
+        comparable = dict(current) if current else None
+        if comparable:
+            comparable.pop("bindings", None)
+        if not comparable or _import_comparable(comparable) != _import_comparable(row):
+            fleet_skills.put(row["id"], row.get("description", ""), row.get("agents") or [],
+                             row.get("risk", "prompt-only"), row.get("body", ""), actor)
+    if document.get("prune") is True:
+        wanted_skills = {row.get("id") for row in document.get("skills", []) if isinstance(row, dict)}
+        with db() as c:
+            for row in c.execute("SELECT DISTINCT id FROM skills").fetchall():
+                if row["id"] not in wanted_skills:
+                    c.execute("DELETE FROM skills WHERE id=?", (row["id"],))
+
+
+@app.post("/api/import")
+def import_config(document: dict, request: Request, dry_run: int = 0) -> dict:
+    if not isinstance(document, dict) or document.get("schema") != 1:
+        raise HTTPException(400, "not an ai-fleet schema 1 export")
+    diff = import_diff(document)
+    if not dry_run:
+        _apply_import(document, request.state.actor)
+    return diff | {"applied": not bool(dry_run)}
+
+
+async def retention_once() -> dict:
+    cutoff = now() - KEEP_WORKTREE_DAYS * 86400
+    with db() as c:
+        old = [dict(row) for row in c.execute(
+            "SELECT * FROM tasks WHERE state IN ('done','cancelled') AND updated_at<? AND cleaned_at IS NULL", (cutoff,))]
+    cleaned = 0
+    for task in old:
+        try:
+            await tasks.runner_call(tasks.node_of(tasks.task_view(task)), "POST", f"/jobs/{task['id']}/cleanup")
+        except (tasks.RunnerError, HTTPException):
+            continue
+        with db() as c:
+            c.execute("UPDATE tasks SET cleaned_at=? WHERE id=?", (now(), task["id"]))
+        events.emit(task["id"], "task.cleaned_up", {"title": task["title"], "retention": True})
+        cleaned += 1
+    with db() as c:
+        pruned = c.execute("DELETE FROM events WHERE ts<?", (now() - 90 * 86400,)).rowcount
+        idle_cutoff = now() - 14 * 86400
+        idle = c.execute(
+            "UPDATE node_models SET state='idle',reason='unused for 14 days',updated_at=? "
+            "WHERE ownership='fleet-managed' AND desired='present' AND updated_at<? "
+            "AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.node=node_models.node AND a.catalog_id=node_models.catalog_id) "
+            "AND NOT EXISTS (SELECT 1 FROM tasks t JOIN model_catalog mc ON mc.reference=t.model "
+            "WHERE mc.id=node_models.catalog_id AND t.node_id=node_models.node AND t.updated_at>=?)",
+            (now(), idle_cutoff, idle_cutoff)).rowcount
+    return {"cleaned": cleaned, "events_pruned": pruned, "models_idle": idle}
+
+
+async def retention_loop() -> None:
+    while True:
+        try:
+            await retention_once()
+        except Exception as exc:
+            print(f"retention failed: {exc!r}")
+        await asyncio.sleep(86400)
 
 
 class CatalogModel(BaseModel):
@@ -1126,17 +1581,29 @@ def fleet_state() -> dict:
                             "inventory": json.loads(r["inventory"]) if r["inventory"] else None}
                  for r in c.execute("SELECT * FROM nodes ORDER BY name")]
         roles = [dict(r) for r in c.execute(
-            "SELECT a.role, a.model, a.node AS node_id, n.name AS node, a.state, a.catalog_id, a.params "
+            "SELECT a.role, a.model, a.node AS node_id, n.name AS node, a.state, a.catalog_id, a.params, "
+            "a.routed, a.route_reason "
             "FROM assignments a "
             "LEFT JOIN nodes n ON n.id = a.node ORDER BY a.role, n.name")]
+        role_info = [dict(r) for r in c.execute(
+            "SELECT names.name,r.fallback,r.description FROM (SELECT name FROM roles UNION SELECT role FROM assignments) names "
+            "LEFT JOIN roles r ON r.name=names.name ORDER BY names.name")]
+    try:
+        runner_digest = hashlib.sha256(RUNNER_SOURCE.read_bytes()).hexdigest()
+    except OSError:
+        runner_digest = None
     for n in nodes:
         n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
         n["runner_ok"] = bool(n["runner"]) and (n.get("runner_fails") or 0) < MAX_FAILS
         n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
+        n["update_available"] = bool(n["runner"] and runner_digest
+                                     and n["runner"].get("digest") != runner_digest)
     for role in roles:
         role["params"] = _json(role.get("params"), {})
-    return {"nodes": nodes, "assignments": roles, "max_fails": MAX_FAILS, "modes": tasks.MODES}
+        role["routed"] = None if role["routed"] is None else bool(role["routed"])
+    return {"nodes": nodes, "assignments": roles, "roles": role_info,
+            "max_fails": MAX_FAILS, "modes": tasks.MODES}
 
 
 @app.get("/api/fleet")
@@ -1215,6 +1682,9 @@ async def assign(a: Assignment) -> dict:
             "ON CONFLICT(role,node,model) DO UPDATE SET state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params",
             (a.role, node["id"], model, state, catalog_id, json.dumps(params)),
         )
+        if installed and catalog_id:
+            c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id=?",
+                      (now(), node["id"], catalog_id))
     await tick()
     return fleet_state()
 
@@ -1233,9 +1703,14 @@ async def refresh() -> dict:
     return {"reconcile": await tick()} | fleet_state()
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/classic", response_class=HTMLResponse)
 def dashboard() -> str:
     return Path(__file__).with_name("dashboard.html").read_text()
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect() -> RedirectResponse:
+    return RedirectResponse("/app/", status_code=307)
 
 
 UI_DIST = Path(__file__).with_name("ui") / "dist"
@@ -1263,12 +1738,13 @@ def console(path: str = "") -> FileResponse:
 
 
 @app.get("/login")
-def login(token: str) -> RedirectResponse:
+def login(token: str | None = None) -> RedirectResponse:
     """Remote sign-in: open https://<master>.ts.net/login?token=... once per device."""
-    if not auth.token_scope(token):
+    if token and not auth.token_scope(token):
         raise HTTPException(403, "unknown token")
-    resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(auth.COOKIE, token, httponly=True, secure=True, samesite="strict", max_age=90 * 86400)
+    resp = RedirectResponse("/app/", status_code=303)
+    if token:
+        resp.set_cookie(auth.COOKIE, token, httponly=True, secure=True, samesite="strict", max_age=90 * 86400)
     return resp
 
 

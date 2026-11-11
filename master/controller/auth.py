@@ -24,7 +24,9 @@ COOKIE = "fleet_token"
 
 # Writes that change who/what is trusted. Everything else that writes is "operate".
 ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies",
-               "/api/skills", "/api/tasks/approve", "/api/tasks/reject")
+               "/api/skills", "/api/enroll", "/api/notify-rules", "/api/export", "/api/import",
+               "/api/tasks/approve", "/api/tasks/reject")
+PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete"}
 
 
 def _hash(token: str) -> str:
@@ -58,7 +60,7 @@ def token_scope(token: str | None) -> str | None:
 
 def required_scope(request: Request) -> str:
     if request.method in ("GET", "HEAD"):
-        return "view"
+        return "admin" if request.url.path == "/api/export" else "view"
     path = request.url.path
     if path == "/api/policies/preview":
         return "view"
@@ -78,7 +80,8 @@ def _deny(msg: str) -> JSONResponse:
 
 async def access_control(request: Request, call_next):
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
-    if request.method not in ("GET", "HEAD") and request.headers.get("x-fleet") != "1":
+    public_enrollment = request.url.path in PUBLIC_PATHS
+    if request.method not in ("GET", "HEAD") and not public_enrollment and request.headers.get("x-fleet") != "1":
         return _deny("missing X-Fleet header")
     port = (request.scope.get("server") or ("", 0))[1]
     if port != PUBLIC_PORT:
@@ -87,7 +90,9 @@ async def access_control(request: Request, call_next):
         request.state.scope = "admin"
         request.state.actor = "local"
         return await call_next(request)
-    if request.url.path == "/login":
+    if request.url.path == "/login" or public_enrollment:
+        request.state.scope = "view"
+        request.state.actor = "enrollment"
         return await call_next(request)
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else request.cookies.get(COOKIE)

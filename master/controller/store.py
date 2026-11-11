@@ -51,16 +51,28 @@ CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, type TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS tokens (
     id TEXT PRIMARY KEY, hash TEXT UNIQUE, scope TEXT, label TEXT, created_at REAL, last_used REAL);
+CREATE TABLE IF NOT EXISTS roles (
+    name TEXT PRIMARY KEY, fallback TEXT, description TEXT);
+CREATE TABLE IF NOT EXISTS enrollments (
+    hash TEXT PRIMARY KEY, name TEXT, expires_at REAL, used_at REAL, hostname TEXT, runner_token TEXT,
+    created_at REAL);
+CREATE TABLE IF NOT EXISTS call_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, role TEXT, model TEXT, ms REAL, ok INTEGER,
+    tokens_in INTEGER, tokens_out INTEGER, fallback_from TEXT);
+CREATE TABLE IF NOT EXISTS notify_rules (
+    id TEXT PRIMARY KEY, event_glob TEXT, plugin TEXT, enabled INTEGER DEFAULT 1);
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.
 MIGRATIONS = {
     "nodes": {"inventory": "TEXT", "ceiling": "TEXT DEFAULT 'auto-edit'", "runner": "TEXT",
               "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT"},
+    "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'",
+                    "routed": "INTEGER", "route_reason": "TEXT"},
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
-              "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'"},
-    "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'"},
+              "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
+              "cleaned_at": "REAL"},
 }
 
 
@@ -85,6 +97,21 @@ def init_db() -> None:
                 if name not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         _seed_models(c)
+        _seed_notify_rules(c)
+
+
+def _seed_notify_rules(c: sqlite3.Connection) -> None:
+    """Stable defaults: local operators can toggle them without startup undoing their choice."""
+    defaults = [
+        ("task-awaiting-approval", "task.awaiting_approval"),
+        ("task-blocked", "task.blocked"),
+        ("pipeline-escalated", "pipeline.escalated"),
+        ("model-state", "model.state"),
+        ("node-offline", "node.offline"),
+    ]
+    for identifier, event_glob in defaults:
+        c.execute("INSERT OR IGNORE INTO notify_rules (id,event_glob,plugin,enabled) VALUES (?,?,?,1)",
+                  (identifier, event_glob, "macos-notify"))
 
 
 def _seed_models(c: sqlite3.Connection) -> None:

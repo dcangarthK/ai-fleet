@@ -200,7 +200,9 @@ export const QUEUE_LABEL: Record<QueueRow["wait"], string> = {
 
 export function queueText(q: QueueRow): string {
   if (q.wait === "limit" && q.until) return `limit until ${clockTime(q.until)}`;
-  return q.reason && q.wait !== "approval" ? `${QUEUE_LABEL[q.wait]}: ${q.reason}` : QUEUE_LABEL[q.wait];
+  if (q.wait === "approval" || !q.reason) return QUEUE_LABEL[q.wait];
+  if (q.wait === "slot" || q.reason.toLowerCase().startsWith("waiting")) return q.reason;  // already says it
+  return `${QUEUE_LABEL[q.wait]}: ${q.reason}`;
 }
 
 /** A stage chip: its class (current highlighted, failed red) and its label, with "×2" for a repeat. */

@@ -358,6 +358,8 @@ a.live-row:hover { background: var(--surface-2); }
 .live-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-idle { color: var(--ink-2); }
+.live-row .state { white-space: normal; }
+.live-running { grid-template-columns: minmax(160px, 2fr) minmax(110px, 1.2fr) minmax(110px, 1.2fr) minmax(110px, 1.2fr) 56px minmax(0, auto); }
 .live-self { border-left: 3px dashed var(--info); }
 .live-meter { display: grid; gap: 3px; }
 .live-cards { background: transparent; border: 0; gap: 8px; }
@@ -371,4 +373,4 @@ a.live-row:hover { background: var(--surface-2); }
 .stage-failed a { color: inherit; }
 .stage-superseded { color: var(--ink-3); text-decoration: line-through; }
 .stage-next { color: var(--ink-3); border-style: dashed; }
-@media (max-width: 860px) { .live-row { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .live-row, .live-running { grid-template-columns: 1fr; } }

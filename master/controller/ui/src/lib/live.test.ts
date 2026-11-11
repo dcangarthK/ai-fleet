@@ -51,10 +51,11 @@ describe("queue", () => {
     account_label: null, kind: "build", stage: null, node: "master", wait: "slot", reason: "waiting for a Claude Opus slot",
     until: null, queued_s: 10, ...over });
   it("names each reason", () => {
-    expect(queueText(q({}))).toBe("waiting for a slot: waiting for a Claude Opus slot");
+    expect(queueText(q({}))).toBe("waiting for a Claude Opus slot");  // the server's reason, said once
     expect(queueText(q({ wait: "limit", until: at(23, 30) }))).toBe("limit until 11:30 PM");
     expect(queueText(q({ wait: "approval", reason: null }))).toBe("needs your approval");
     expect(queueText(q({ wait: "node", reason: "quiet hours" }))).toBe("node can't take it yet: quiet hours");
+    expect(queueText(q({ reason: null }))).toBe("waiting for a slot");
   });
 });
 

@@ -252,10 +252,22 @@ def get_task(task_id: str) -> dict:
 def task_view(row) -> dict:
     t = dict(row)
     t["denials"] = json.loads(t["denials"] or "[]")
+    t["approved_tools"] = json.loads(t.get("approved_tools") or "[]")
     t["gate_result"] = json.loads(t["gate_result"]) if t["gate_result"] else None
     t["policy"] = json.loads(t.get("policy") or "{}")
     t["skills"] = json.loads(t.get("skills") or "[]")
     return t
+
+
+def approvable_tools(task: dict, tools) -> list[str]:
+    """Return a stable tool list without anything the task's policy permanently denies."""
+    denied = set((((task.get("policy") or {}).get("tools") or {}).get("claude_deny") or []))
+    return sorted({tool for tool in tools if isinstance(tool, str) and tool and tool not in denied})
+
+
+def denied_tool_names(task: dict) -> list[str]:
+    return approvable_tools(task, (denial.get("tool_name") or denial.get("tool")
+                                   for denial in task["denials"]))
 
 
 def node_of(task: dict) -> dict:
@@ -429,11 +441,11 @@ async def auto_approve_denials(task: dict) -> None:
     auto = (task.get("policy") or {}).get("auto_approve") or {}
     if not (auto.get("denied_tools") and task["agent"] in (auto.get("agents") or [])):
         return
+    tools = denied_tool_names(task)
+    if not tools:
+        return
     if (task.get("auto_approvals") or 0) >= AUTO_APPROVE_ROUNDS:
         emit(task["id"], "task.auto_approve_exhausted", {"title": task["title"], "rounds": AUTO_APPROVE_ROUNDS})
-        return
-    tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None, ""})
-    if not tools:
         return
     update(task["id"], auto_approvals=(task.get("auto_approvals") or 0) + 1)
     emit(task["id"], "task.auto_approved", {"title": task["title"], "tools": tools, "agent": task["agent"]})
@@ -603,11 +615,17 @@ async def task_diff(task_id: str) -> dict:
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/diff")
 
 
-async def resume(task: dict, text: str, allowed_tools: list[str]) -> None:
+async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool = False) -> None:
     """Caller holds the task lock."""
+    tools = approvable_tools(task, [*(task.get("approved_tools") or []), *allowed_tools])
+    if tools != task.get("approved_tools"):
+        update(task["id"], approved_tools=json.dumps(tools))
     await runner_call(node_of(task), "POST", f"/jobs/{task['id']}/message",
-                      {"text": text, "allowed_tools": allowed_tools, "mode": None})
-    transition(task, RESUMABLE, "working", runs=(task["runs"] or 0) + 1, ended_at=None, denials="[]", error=None)
+                      {"text": text, "allowed_tools": tools, "mode": None})
+    fields = {"runs": (task["runs"] or 0) + 1, "ended_at": None, "denials": "[]", "error": None}
+    if reset_auto_approvals:
+        fields["auto_approvals"] = 0
+    transition(task, RESUMABLE, "working", **fields)
 
 
 @router.post("/api/tasks/{task_id}/message")
@@ -616,7 +634,7 @@ async def message(task_id: str, m: MessageIn) -> dict:
         task = get_task(task_id)
         if task["state"] not in RESUMABLE:
             raise HTTPException(409, f"can't message a task that is {task['state']}")
-        await resume(task, m.text, [])
+        await resume(task, m.text, [], reset_auto_approvals=True)
     return get_task(task_id)
 
 
@@ -626,14 +644,14 @@ async def approve(task_id: str) -> dict:
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] == "awaiting_approval":
-            if transition(task, {"awaiting_approval"}, "queued", ended_at=None):
+            if transition(task, {"awaiting_approval"}, "queued", ended_at=None, auto_approvals=0):
                 emit(task_id, "task.approved", {"title": task["title"]})
                 await try_start(get_task(task_id))
         elif task["state"] == "blocked":
-            tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None, ""})
+            tools = denied_tool_names(task)
             emit(task_id, "task.approved", {"title": task["title"], "tools": tools})
             await resume(task, "The user approved the tools you were denied: " + ", ".join(tools)
-                         + ". Continue the task.", tools)
+                         + ". Continue the task.", tools, reset_auto_approvals=True)
         else:
             raise HTTPException(409, f"nothing to approve: task is {task['state']}")
     return get_task(task_id)

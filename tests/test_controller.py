@@ -841,6 +841,258 @@ Imported body.
             FakeRunner.agents["codex"] = None
             self.c.post("/api/refresh", headers=W)
 
+    def test_trusted_reviewer_threshold(self):
+        import evaluations
+
+        def row(precision, recall, split="holdout"):
+            return {"model": "m", "roles": {"reviewer_real": {"score": 50.0, "metrics": {
+                split: {"precision": precision, "recall": recall}}}}}
+        self.assertTrue(evaluations.is_trusted_reviewer(row(0.9, 0.5)))
+        self.assertTrue(evaluations.is_trusted_reviewer(row(1.0, 1.0)))
+        self.assertFalse(evaluations.is_trusted_reviewer(row(0.89, 1.0)))
+        self.assertFalse(evaluations.is_trusted_reviewer(row(1.0, 0.49)))
+        self.assertFalse(evaluations.is_trusted_reviewer(row(None, 1.0)))  # raised nothing: no evidence
+        self.assertFalse(evaluations.is_trusted_reviewer(row(1.0, 1.0, split="dev")))  # holdout decides
+        self.assertFalse(evaluations.is_trusted_reviewer({"model": "m", "roles": {"reviewer": {"score": 100}}}))
+        self.assertFalse(evaluations.is_trusted_reviewer({"model": "m"}))
+        original = os.environ.get("FLEET_TRUSTED_PRECISION")
+        try:
+            os.environ["FLEET_TRUSTED_PRECISION"] = "0.8"
+            self.assertTrue(evaluations.is_trusted_reviewer(row(0.85, 0.5)))
+            os.environ["FLEET_TRUSTED_PRECISION"] = "0.95"
+            self.assertFalse(evaluations.is_trusted_reviewer(row(0.9, 0.5)))
+        finally:
+            if original is None:
+                os.environ.pop("FLEET_TRUSTED_PRECISION", None)
+            else:
+                os.environ["FLEET_TRUSTED_PRECISION"] = original
+        # The newest reviewer_real evaluation per model decides, by that role's own timestamp; "x" == "x:latest".
+        def stamped(model, precision, role_at, row_at, other=None):
+            roles = {"reviewer_real": {"metrics": {"holdout": {"precision": precision, "recall": 1.0}},
+                                       "evaluated_at": role_at}}
+            return {"model": model, "evaluated_at": row_at, "roles": roles | (other or {})}
+        rows = [stamped("x", 1.0, 100, 100), stamped("x:latest", 0.2, 200, 200)]
+        self.assertEqual(evaluations.trusted_reviewer_references(rows), set())
+        self.assertEqual(evaluations.trusted_reviewer_references(rows[::-1]), set())
+        rows = [stamped("x", 0.2, 100, 100), stamped("x:latest", 1.0, 200, 200)]
+        self.assertEqual(evaluations.trusted_reviewer_references(rows), {"x:latest"})
+        # A later run of another role (fresher row timestamp) doesn't make a stale reviewer_real result newest.
+        rows = [stamped("y:latest", 0.2, 300, 300),
+                stamped("y", 1.0, 100, 900, other={"fast": {"score": 90.0, "evaluated_at": 900}})]
+        self.assertEqual(evaluations.trusted_reviewer_references(rows), set())
+        legacy = {"model": "z:1b", "evaluated_at": 50, "roles": {"reviewer_real": {
+            "metrics": {"holdout": {"precision": 1.0, "recall": 1.0}}}}}  # no per-role stamp: row time
+        self.assertEqual(evaluations.trusted_reviewer_references([legacy]), {"z:1b"})
+        self.assertEqual(evaluations.trusted_reviewer_references([legacy, stamped("z:1b", 0.1, 60, 60)]), set())
+        self.assertEqual(evaluations.trusted_reviewer_references([{"model": "w", "roles": {"fast": {}}}]), set())
+
+        catalog = [{"id": "good-1b", "reference": "good:1b"}, {"id": "bad-1b", "reference": "bad:1b"}]
+        assignments = [{"role": "r1", "model": "good:1b", "catalog_id": "good-1b"},
+                       {"role": "r2", "model": "good:1b", "catalog_id": "good-1b"},
+                       {"role": "r2", "model": "bad:1b", "catalog_id": "bad-1b"},
+                       {"role": "r3", "model": "good", "catalog_id": None}]
+        self.assertEqual(evaluations.trusted_roles(assignments, catalog, {"good:1b", "good:latest"}), ["r1", "r3"])
+        self.assertEqual(evaluations.trusted_roles([], catalog, {"good:1b"}), [])
+
+    def test_trust_follows_the_routed_model_not_the_catalog(self):
+        import evaluations
+        trusted = {"good:1b"}
+        catalog = [{"id": "good-1b", "reference": "good:1b"}, {"id": "bad-1b", "reference": "bad:1b"},
+                   {"id": "relabelled", "reference": "good:1b"}]
+
+        def roles(*assignments):
+            return evaluations.trusted_roles([{"role": "r", **a} for a in assignments], catalog, trusted)
+        # Matching catalog_id/model pair with a trusted model: trusted.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": "{}"}), ["r"])
+        # Derived (params) assignment of a trusted base model routes fleet-good-1b, a different model that was never
+        # benchmarked: the base model's trust doesn't carry over.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": '{"temperature": 0.1}'}), [])
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": "not json"}), [])
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": "[1]"}), [])
+        # Empty or missing settings are the base model itself.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": None}), ["r"])
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b", "params": {}}), ["r"])
+        # Mismatched pair: the catalog row says a trusted model, but bad:1b is what's assigned and routed.
+        self.assertEqual(roles({"model": "bad:1b", "catalog_id": "relabelled", "params": "{}"}), [])
+        self.assertEqual(roles({"model": "bad:1b", "catalog_id": "relabelled", "params": '{"num_ctx": 4096}'}), [])
+        # ...and the other way round: a trusted model filed under an untrusted catalog row is still a mismatch.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "bad-1b", "params": "{}"}), [])
+        # Missing catalog row: untrusted even though the assigned model is trusted.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "gone", "params": "{}"}), [])
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "gone", "params": '{"temperature": 0}'}), [])
+        # One bad assignment poisons the role; a missing model is untrusted.
+        self.assertEqual(roles({"model": "good:1b", "catalog_id": "good-1b"},
+                               {"model": "bad:1b", "catalog_id": "relabelled"}), [])
+        self.assertEqual(roles({"model": None, "catalog_id": "good-1b"}), [])
+        # Untagged and tagged forms of the same model are a match, not a mismatch.
+        self.assertEqual(evaluations.trusted_roles(
+            [{"role": "r", "model": "plain", "catalog_id": "p"}], [{"id": "p", "reference": "plain:latest"}],
+            {"plain:latest"}), ["r"])
+
+    def test_trust_follows_the_concrete_routed_model(self):
+        import evaluations
+
+        def result(model, precision, at=100):
+            return {"model": model, "evaluated_at": at, "roles": {"reviewer_real": {"metrics": {"holdout": {
+                "precision": precision, "recall": 1.0}}}}}
+        catalog = [{"id": "good-1b", "reference": "good:1b"}]
+        base = {"role": "r", "model": "good:1b", "catalog_id": "good-1b", "params": "{}"}
+        derived = dict(base, params=json.dumps({"temperature": 0.1, "num_ctx": 4096}))
+        self.assertEqual(evaluations.routed_model(base, {"good-1b": "good:1b"}), "good:1b")
+        self.assertEqual(evaluations.routed_model(derived, {"good-1b": "good:1b"}), "fleet-good-1b")
+
+        # Only the base model was benchmarked: the base assignment is trusted, the derived one isn't.
+        refs = evaluations.trusted_reviewer_references([result("good:1b", 1.0)])
+        self.assertEqual(refs, {"good:1b"})
+        self.assertEqual(evaluations.trusted_roles([base], catalog, refs), ["r"])
+        self.assertEqual(evaluations.trusted_roles([derived], catalog, refs), [])
+        # Benchmarking the model that actually serves the role (run_evals --models fleet-good-1b): trusted. The
+        # evaluator records the untagged name it was given; it's the same model as fleet-good-1b:latest.
+        refs = evaluations.trusted_reviewer_references([result("fleet-good-1b", 1.0)])
+        self.assertEqual(refs, {"fleet-good-1b:latest"})
+        self.assertEqual(evaluations.trusted_roles([derived], catalog, refs), ["r"])
+        # ...and the derived model's results don't stand in for the base model.
+        self.assertEqual(evaluations.trusted_roles([base], catalog, refs), [])
+        # A failing or newer failing evaluation of the derived model: untrusted, whatever the base scored.
+        refs = evaluations.trusted_reviewer_references([result("good:1b", 1.0), result("fleet-good-1b", 0.5)])
+        self.assertEqual(evaluations.trusted_roles([derived], catalog, refs), [])
+        refs = evaluations.trusted_reviewer_references([result("fleet-good-1b", 1.0, at=100),
+                                                        result("fleet-good-1b:latest", 0.2, at=200)])
+        self.assertEqual(evaluations.trusted_roles([derived], catalog, refs), [])
+        # Settings without a catalog model aren't a benchmarked model: untrusted even if the base is trusted.
+        refs = {"good:1b", "fleet-good-1b:latest"}
+        self.assertEqual(evaluations.trusted_roles([dict(derived, catalog_id=None)], catalog, refs), [])
+        # The derived name comes from the catalog_id only when that row matches the assigned model.
+        self.assertEqual(evaluations.trusted_roles(
+            [dict(derived, catalog_id="good-1b", model="bad:1b")], catalog, refs), [])
+
+    def test_trust_uses_exact_precision_not_a_rounded_one(self):
+        import evaluations
+
+        def row(**holdout):
+            return {"model": "m", "roles": {"reviewer_real": {"metrics": {"holdout": holdout}}}}
+        # 8999/10000 = 0.8999 rounds to 0.900 at 3 places; a row stored that way must still not pass a 0.9 bar.
+        just_under = {"matched": 8999, "serious": 10000, "found": 5, "bug_cases": 5}
+        self.assertFalse(evaluations.is_trusted_reviewer(row(precision=0.9, recall=1.0, **just_under), 0.9))
+        self.assertTrue(evaluations.is_trusted_reviewer(row(precision=0.9, recall=1.0, matched=9, serious=10,
+                                                            found=5, bug_cases=5), 0.9))
+        # Recall comes from counts too: 4999/10000 < 0.5 even though it would round to 0.500.
+        self.assertFalse(evaluations.is_trusted_reviewer(row(precision=1.0, recall=0.5, matched=1, serious=1,
+                                                             found=4999, bug_cases=10000), 0.9))
+        # Counts that make no sense don't fall back to the stored ratio.
+        self.assertFalse(evaluations.is_trusted_reviewer(row(precision=1.0, recall=1.0, matched=0, serious=0,
+                                                             found=5, bug_cases=5), 0.9))
+        self.assertFalse(evaluations.is_trusted_reviewer(row(precision=1.0, recall=1.0, matched=3, serious=2,
+                                                             found=5, bug_cases=5), 0.9))
+        # Rows without counts (older results) still use the stored ratios.
+        self.assertTrue(evaluations.is_trusted_reviewer(row(precision=0.95, recall=0.6), 0.9))
+
+    def test_auto_trusted_roles_reject_mismatched_catalog_rows(self):
+        from store import db
+        saved = EVAL_RESULTS.read_text() if EVAL_RESULTS.exists() else None
+        rows = (json.loads(saved) if saved else []) + [{
+            "model": "g2m-good:1b", "errors": [], "evaluated_at": time.time(),
+            "roles": {"reviewer_real": {"metrics": {"holdout": {"precision": 1.0, "recall": 1.0}}}}}]
+        EVAL_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        EVAL_RESULTS.write_text(json.dumps(rows))
+        with db() as c:
+            for ident, ref in (("g2m-good-1b", "g2m-good:1b"), ("g2m-bad-1b", "g2m-bad:1b")):
+                c.execute("INSERT OR REPLACE INTO model_catalog (id,reference,display_name,source,created_at) "
+                          "VALUES (?,?,?, 'test', ?)", (ident, ref, ref, time.time()))
+            c.executemany("INSERT OR REPLACE INTO assignments (role,node,model,state,catalog_id,params) "
+                          "VALUES (?, 'master', ?, 'active', ?, ?)", [
+                              ("g2m-match", "g2m-good:1b", "g2m-good-1b", "{}"),
+                              ("g2m-derived", "g2m-good:1b", "g2m-good-1b", '{"temperature": 0.1}'),
+                              ("g2m-mismatch", "g2m-bad:1b", "g2m-good-1b", "{}"),
+                              ("g2m-missing", "g2m-good:1b", "g2m-gone", "{}")])
+        try:
+            got = {role for role in controller.auto_trusted_roles() if role.startswith("g2m-")}
+            self.assertEqual(got, {"g2m-match"})  # the derived fleet-g2m-good-1b model was never benchmarked
+            model = self.models()["g2m-good-1b"]
+            self.assertEqual((model["trusted_reviewer"], model["derived_model"], model["derived_trusted_reviewer"]),
+                             (True, "fleet-g2m-good-1b", False))
+
+            # Benchmark the model that actually serves the derived role, as run_evals records it.
+            EVAL_RESULTS.write_text(json.dumps(rows + [{
+                "model": "fleet-g2m-good-1b", "errors": [], "evaluated_at": time.time(),
+                "roles": {"reviewer_real": {"metrics": {"holdout": {"precision": 1.0, "recall": 1.0}}}}}]))
+            got = {role for role in controller.auto_trusted_roles() if role.startswith("g2m-")}
+            self.assertEqual(got, {"g2m-match", "g2m-derived"})
+            model = self.models()["g2m-good-1b"]
+            self.assertEqual((model["trusted_reviewer"], model["derived_trusted_reviewer"]), (True, True))
+            self.assertFalse(self.models()["g2m-bad-1b"]["derived_trusted_reviewer"])
+        finally:
+            with db() as c:
+                c.execute("DELETE FROM assignments WHERE role LIKE 'g2m-%'")
+                c.execute("DELETE FROM model_catalog WHERE id IN ('g2m-good-1b','g2m-bad-1b')")
+            if saved is None:
+                EVAL_RESULTS.unlink(missing_ok=True)
+            else:
+                EVAL_RESULTS.write_text(saved)
+
+    def test_pipeline_auto_trusts_role_held_only_by_trusted_reviewers(self):
+        from store import db
+        original_call = controller.pipeline_model_call
+        saved = EVAL_RESULTS.read_text() if EVAL_RESULTS.exists() else None
+
+        def result(model, precision, recall):
+            return {"model": model, "roles": {"reviewer_real": {"score": 80.0, "metrics": {
+                "holdout": {"precision": precision, "recall": recall}, "dev": {}, "all": {}}}},
+                "errors": [], "evaluated_at": time.time()}
+        rows = (json.loads(saved) if saved else []) + [result("g2-good:1b", 1.0, 0.8), result("g2-bad:1b", 0.5, 1.0),
+                                                       result("g2-plain:latest", 1.0, 1.0), result("g2-tagless", 1.0, 1.0)]
+        EVAL_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        EVAL_RESULTS.write_text(json.dumps(rows))
+        with db() as c:
+            # Untagged catalog reference vs tagged result, and the other way round: the same model either way.
+            for ident, ref in (("g2-good-1b", "g2-good:1b"), ("g2-bad-1b", "g2-bad:1b"),
+                               ("g2-plain", "g2-plain"), ("g2-tagless-latest", "g2-tagless:latest")):
+                c.execute("INSERT OR REPLACE INTO model_catalog (id,reference,display_name,source,created_at) "
+                          "VALUES (?,?,?, 'test', ?)", (ident, ref, ref, time.time()))
+            c.execute("INSERT OR REPLACE INTO assignments (role,node,model,state,catalog_id,params) "
+                      "VALUES ('g2role','master','g2-good:1b','active','g2-good-1b','{}')")
+        controller.pipeline_model_call = lambda role, spec, diff: json.dumps({"verdict": "approve", "issues": []})
+        body = {"title": "Auto-trusted review", "spec": "s", "repo": "/repo", "gate": "pytest", "mode": "auto-edit",
+                "builder": {"agent": "claude"}, "reviewers": [{"kind": "role", "role": "g2role"}], "max_rounds": 1}
+
+        def run_pipeline(title):
+            p = self.c.post("/api/pipelines", json=dict(body, title=title), headers=W).json()
+            FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            return wait_for(lambda: (lambda x: x if x["state"] in ("ready", "escalated") else None)(
+                self.c.get(f"/api/pipelines/{p['id']}").json()), timeout=20)
+        try:
+            models = self.models()
+            self.assertTrue(models["g2-good-1b"]["trusted_reviewer"])
+            self.assertFalse(models["g2-bad-1b"]["trusted_reviewer"])
+            self.assertTrue(models["g2-plain"]["trusted_reviewer"])
+            self.assertTrue(models["g2-tagless-latest"]["trusted_reviewer"])
+            self.assertTrue(all(m["trusted_reviewer"] is False for k, m in models.items() if not k.startswith("g2-")))
+            self.assertEqual(controller.auto_trusted_roles().count("g2role"), 1)
+
+            done = run_pipeline("Trusted by benchmark")
+            self.assertEqual(done["state"], "ready")
+            self.assertTrue(done["reviews"]["0"]["trusted"])
+            self.assertEqual(done["reviews"]["0"]["trusted_by"], "benchmark")
+            self.assertEqual(done["trusted_roles"], [])
+
+            # One untrusted model anywhere on the role is enough to lose the automatic trust.
+            with db() as c:
+                c.execute("INSERT OR REPLACE INTO assignments (role,node,model,state,catalog_id,params) "
+                          "VALUES ('g2role','other-node','g2-bad:1b','active','g2-bad-1b','{}')")
+            self.assertNotIn("g2role", controller.auto_trusted_roles())
+            escalated = run_pipeline("Mixed role")
+            self.assertEqual(escalated["state"], "escalated")
+            self.assertFalse(escalated["reviews"]["0"]["trusted"])
+        finally:
+            controller.pipeline_model_call = original_call
+            with db() as c:
+                c.execute("DELETE FROM assignments WHERE role='g2role'")
+                c.execute("DELETE FROM model_catalog WHERE id IN ('g2-good-1b','g2-bad-1b','g2-plain','g2-tagless-latest')")
+            if saved is None:
+                EVAL_RESULTS.unlink(missing_ok=True)
+            else:
+                EVAL_RESULTS.write_text(saved)
+
     def test_role_review_falls_back_and_unusable_reviews_say_why(self):
         from store import db
         original = controller.pipeline_model_call

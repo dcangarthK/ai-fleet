@@ -231,6 +231,62 @@ def score_review(case: dict, review: dict | None) -> dict:
             **grounding_counts}
 
 
+SPLITS = ("dev", "holdout")
+REVIEWER_ROLES = ("reviewer", "reviewer_real")
+
+
+def serious_issues(review: dict | None) -> list[dict]:
+    """High/medium issues that survived the grounding checks; an invalid or missing review raises none."""
+    if not review or review.get("status") == "invalid":
+        return []
+    return [i for i in review.get("issues") or [] if i.get("severity") in ("high", "medium")]
+
+
+def issue_matches(case: dict, issue: dict) -> bool:
+    """Whether one issue names the case's confirmed bug (same text fields as score_review)."""
+    said = f"{issue.get('problem') or ''} {issue.get('fix') or ''}".lower()
+    return any(k.lower() in said for k in case.get("keywords") or [])
+
+
+def review_metrics(pairs: list[tuple[dict, dict | None]]) -> dict:
+    """Precision/recall/false-positive rate over high/medium issues for (case, checked review) pairs.
+
+    recall    = bug cases with a serious issue naming the bug / bug cases
+    precision = serious issues naming a bug case's bug / all serious issues (every one on a clean case is wrong)
+    fp_rate   = clean cases with any serious issue / clean cases
+    A ratio with an empty denominator is None (e.g. precision of a reviewer that raised nothing). Ratios are kept at
+    full precision (trust thresholds compare them, or the raw counts); only the leaderboard rounds."""
+    bug = found = clean = alarmed = raised = matched = unsupported = identical = 0
+    for case, review in pairs:
+        serious = serious_issues(review)
+        raised += len(serious)
+        if review:
+            unsupported += review.get("unsupported", 0) or 0
+            identical += review.get("identical_fix", 0) or 0
+        if case["expect"] == "approve":
+            clean += 1
+            alarmed += bool(serious)
+        else:
+            bug += 1
+            hits = sum(issue_matches(case, issue) for issue in serious)
+            matched += hits
+            found += hits > 0
+
+    def ratio(a: int, b: int) -> float | None:
+        return a / b if b else None
+
+    return {"recall": ratio(found, bug), "precision": ratio(matched, raised), "fp_rate": ratio(alarmed, clean),
+            "bug_cases": bug, "found": found, "clean_cases": clean, "alarmed": alarmed, "serious": raised,
+            "matched": matched, "unsupported": unsupported, "identical_fix": identical}
+
+
+def split_metrics(pairs: list[tuple[dict, dict | None]]) -> dict:
+    """review_metrics per split ("dev", "holdout") and over everything ("all")."""
+    out = {split: review_metrics([(c, r) for c, r in pairs if c.get("split") == split]) for split in SPLITS}
+    out["all"] = review_metrics(pairs)
+    return out
+
+
 def score_fast(case: dict, text: str) -> float:
     reply = text.strip()
     if not reply or "\n" in reply:
@@ -365,7 +421,7 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
     res = {"model": model, "roles": {}, "latencies": [], "tps": [], "size_gb": None, "errors": [],
            "evaluated_at": time.time()}
     for role in roles:
-        scores, details, valid = [], [], []
+        scores, details, valid, pairs = [], [], [], []
         for case in load(role):
             for _ in range(repeat):
                 try:
@@ -376,11 +432,13 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
                         t = run_code_tests(extract_code(out["text"], case.get("symbol")), case["tests"])
                         s = t["passed"] / t["total"] if t["total"] else 0.0
                         details.append({"id": case["id"], "score": s, **t})
-                    elif role in ("reviewer", "reviewer_real"):
+                    elif role in REVIEWER_ROLES:
                         prompt = f"SPEC:\n{case['spec']}\n\nDIFF:\n{case['diff']}"
                         out = chat(base, model, REVIEW_SYSTEM, prompt, json_mode=True)
                         call_outputs.append(out)
-                        sr = score_review(case, parse_review(out["text"], case["diff"]))
+                        review = parse_review(out["text"], case["diff"])
+                        pairs.append((case, review))
+                        sr = score_review(case, review)
                         s = sr["score"]
                         valid.append(sr["valid_json"])
                         details.append({"id": case["id"], **sr})
@@ -410,6 +468,8 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
                 except OSError as e:
                     res["errors"].append(f"{role}/{case['id']}: {e}")
                     s, call_outputs = 0.0, []
+                    if role in REVIEWER_ROLES:  # only chat() raises, so this case has no pair yet
+                        pairs.append((case, None))  # no reply: a missed bug, not a skipped case
                     if role == "grounded":
                         row = score_grounded(case, {"text": "", "logprobs": []}, [])
                         row["answerable"] = case["answerable"]
@@ -440,12 +500,29 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
                                   GROUNDING_SIGNALS},
                 "signal_decisions": {signal: held_out_signal(details, signal) for signal in GROUNDING_SIGNALS},
             })
+        if role in REVIEWER_ROLES:
+            role_result["metrics"] = split_metrics(pairs)
+        role_result["evaluated_at"] = time.time()
         res["roles"][role] = role_result
     unload(base, model)
     res["median_s"] = round(statistics.median(res["latencies"]), 2) if res["latencies"] else None
     res["tokens_per_s"] = round(statistics.median(res["tps"]), 1) if res["tps"] else None
     res["fits_16gb"] = res["size_gb"] is not None and res["size_gb"] + HEADROOM_GB <= LAPTOP_GB
     return res
+
+
+def merge_result(old: dict | None, new: dict) -> dict:
+    """A model's new run replaces only the roles it evaluated; other roles keep their own results and timestamps.
+
+    Roles stored before per-role timestamps existed inherit the old row's evaluated_at."""
+    if not old:
+        return new
+    kept = {}
+    for role, value in (old.get("roles") or {}).items():
+        if role in new["roles"] or not isinstance(value, dict):
+            continue
+        kept[role] = value if "evaluated_at" in value else {**value, "evaluated_at": old.get("evaluated_at")}
+    return {**new, "roles": {**kept, **new["roles"]}}
 
 
 def leaderboard(results: list[dict], roles: list[str]) -> str:
@@ -479,8 +556,10 @@ def leaderboard(results: list[dict], roles: list[str]) -> str:
         if small and small is not best:
             line += f"; on a 16GB laptop: {small['model']} ({small['roles'][role]['score']:.0f}%)"
         lines.append(line)
-    lines += ["", "Treat role scores below ~70% as 'second opinion only'; tests and Claude make the final call.",
-              "", "## Grounding signal policy", "",
+    lines += ["", "Treat role scores below ~70% as 'second opinion only'; tests and Claude make the final call."]
+    if "reviewer_real" in roles:
+        lines += ["", *reviewer_metrics_table(results, "reviewer_real")]
+    lines += ["", "## Grounding signal policy", "",
               "Signals are kept only when a training-selected threshold halves held-out error at >=70% "
               "held-out coverage.", "",
               "| Model | Signal | Decision |",
@@ -532,6 +611,27 @@ def grounding_report(results: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _fmt(value) -> str:
+    return "-" if value is None else f"{value:.2f}"
+
+
+def reviewer_metrics_table(results: list[dict], role: str) -> list[str]:
+    """Markdown rows of precision/recall/fp_rate per split for one reviewer role."""
+    lines = [f"## {role}: high/medium issues", "",
+             "P = precision, R = recall, FP = clean cases with a serious issue. Holdout decides trusted reviewers.", "",
+             "| Model | Holdout P | Holdout R | Holdout FP | Dev P | Dev R | Dev FP | All P | All R | All FP "
+             "| Unsupported | Identical fix |", "|" + "---|" * 12]
+    rows = [r for r in results if isinstance((r["roles"].get(role) or {}).get("metrics"), dict)]
+    for r in sorted(rows, key=lambda r: -((r["roles"][role]["metrics"].get("holdout") or {}).get("precision") or 0)):
+        m = r["roles"][role]["metrics"]
+        cells = [_fmt((m.get(split) or {}).get(key)) for split in ("holdout", "dev", "all")
+                 for key in ("precision", "recall", "fp_rate")]
+        everything = m.get("all") or {}
+        lines.append(f"| {r['model']} | " + " | ".join(cells)
+                     + f" | {everything.get('unsupported', 0)} | {everything.get('identical_fix', 0)} |")
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", required=True)
@@ -554,7 +654,7 @@ def main() -> int:
         previous = {r["model"]: r for r in json.loads((out / "results.json").read_text())}
     for model in [m for m in args.models.split(",") if m]:
         print(f"== {model}", flush=True)
-        previous[model] = eval_model(args.ollama, model, roles, args.repeat)
+        previous[model] = merge_result(previous.get(model), eval_model(args.ollama, model, roles, args.repeat))
     results = list(previous.values())
     (out / "results.json").write_text(json.dumps(results, indent=2))
     (out / "LEADERBOARD.md").write_text(leaderboard([r for r in results if all(x in r["roles"] for x in roles)], roles))

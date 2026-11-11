@@ -21,10 +21,11 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from events import changed, emit, events_after, last_event_id, snapshot
 import policy as fleet_policy
+import skills as fleet_skills
 from store import db
 
 RUNNER_PORT = 11436
@@ -57,7 +58,8 @@ def local_minute() -> int:
     return current.hour * 60 + current.minute
 
 
-def effective_policy(node: str, role: str | None, agent: str, task_policy: dict | None = None) -> dict:
+def effective_policy(node: str, role: str | None, agent: str, task_policy: dict | None = None,
+                     skill_ids: list[str] | None = None) -> dict:
     """Load the newest applicable layers and compute the immutable task snapshot."""
     wanted = [("fleet", "*", "fleet"), ("node", node, f"node:{node}")]
     if role:
@@ -78,7 +80,8 @@ def effective_policy(node: str, role: str | None, agent: str, task_policy: dict 
     if task_policy is not None:
         fleet_policy.validate(task_policy)
         layers.append({"layer": "task", "instructions": None, "policy": task_policy})
-    return fleet_policy.merge(layers)
+    effective = fleet_policy.merge(layers)
+    return fleet_skills.add_to_effective(effective, fleet_skills.snapshot(node, role, agent, skill_ids))
 
 
 # ---------- runner client ----------
@@ -204,7 +207,8 @@ def temporary_reason(node: dict, policy: dict) -> str | None:
 
 
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
-              role: str | None = None, task_policy: dict | None = None) -> tuple[dict, dict, str | None]:
+              role: str | None = None, task_policy: dict | None = None,
+              skill_ids: list[str] | None = None) -> tuple[dict, dict, str | None]:
     nodes = node_rows()
     if wanted:
         match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
@@ -212,12 +216,12 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
             raise HTTPException(404, f"unknown node {wanted}")
         if len(match) > 1:
             raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
-        snapshot = effective_policy(match[0]["id"], role, agent, task_policy)
+        snapshot = effective_policy(match[0]["id"], role, agent, task_policy, skill_ids)
         why = eligible(match[0], agent, model, mode, gate, snapshot["policy"])
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
         return match[0], snapshot, temporary_reason(match[0], snapshot["policy"])
-    candidates = [(n, effective_policy(n["id"], role, agent, task_policy)) for n in nodes]
+    candidates = [(n, effective_policy(n["id"], role, agent, task_policy, skill_ids)) for n in nodes]
     ok = [(n, snapshot) for n, snapshot in candidates
           if not eligible(n, agent, model, mode, gate, snapshot["policy"])]
     if not ok:
@@ -246,6 +250,7 @@ def task_view(row) -> dict:
     t["denials"] = json.loads(t["denials"] or "[]")
     t["gate_result"] = json.loads(t["gate_result"]) if t["gate_result"] else None
     t["policy"] = json.loads(t.get("policy") or "{}")
+    t["skills"] = json.loads(t.get("skills") or "[]")
     return t
 
 
@@ -445,6 +450,7 @@ class TaskIn(BaseModel):
     parent_id: str | None = None
     role: str | None = None
     policy: dict | None = None
+    skills: list[str] = Field(default_factory=list)
 
     @field_validator("prompt")
     @classmethod
@@ -492,7 +498,8 @@ async def create_task(t: TaskIn) -> dict:
     try:
         if t.policy is not None:
             fleet_policy.validate(t.policy)
-        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy)
+        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy,
+                                                   t.skills)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     task_id = "t-" + secrets.token_hex(4)
@@ -501,11 +508,14 @@ async def create_task(t: TaskIn) -> dict:
     state = "awaiting_approval" if t.mode in NEEDS_APPROVAL else "queued"
     with db() as c:
         c.execute("""INSERT INTO tasks (id, parent_id, title, agent, model, prompt, mode, repo, worktree, gate,
-                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error, skills)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (task_id, t.parent_id, title, t.agent, t.model, t.prompt, t.mode, t.repo, int(t.worktree),
                    t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
-                   effective["hash"], t.role, queued_reason if state == "queued" else None))
+                   effective["hash"], t.role, queued_reason if state == "queued" else None,
+                   json.dumps(effective["skills"])))
+        for skill_id in dict.fromkeys(t.skills):
+            c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?, 'task', ?)", (skill_id, task_id))
     emit(task_id, f"task.{state}", {"title": title, "node": node["id"], "agent": t.agent, "mode": t.mode})
     if state == "queued":
         async with _locks[task_id]:

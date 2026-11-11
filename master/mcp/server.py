@@ -260,5 +260,29 @@ def fleet_usage(days: int = 1) -> str:
     return _controller("GET", f"/api/usage?days={days}")
 
 
+@mcp.tool()
+def run_pipeline(title: str, spec: str, repo: str, gate: str, builder: str = "codex",
+                 reviewers: list[str] | None = None, max_rounds: int = 3,
+                 mode: str = "auto-edit", node: str = "") -> str:
+    """Run a build/gate/cross-review pipeline. Reviewers are 'role:<name>' or 'agent:<name>' strings;
+    the builder cannot also be an agent reviewer. Returns immediately; use pipeline_status for progress."""
+    parsed = []
+    for reviewer in reviewers or ["role:reviewer", "agent:claude"]:
+        kind, separator, name = reviewer.partition(":")
+        if not separator or kind not in ("role", "agent") or not name:
+            return f"error: invalid reviewer {reviewer!r}; use role:<name> or agent:<name>"
+        parsed.append({"kind": kind, kind: name})
+    body = {"title": title, "spec": spec, "repo": repo, "gate": gate, "mode": mode,
+            "builder": {"agent": builder, **({"node": node} if node else {})},
+            "reviewers": parsed, "max_rounds": max_rounds}
+    return _controller("POST", "/api/pipelines", body)
+
+
+@mcp.tool()
+def pipeline_status(pipeline_id: str) -> str:
+    """Return a pipeline's builder task, reviews, current round, state and history."""
+    return _controller("GET", f"/api/pipelines/{_q(pipeline_id)}")
+
+
 if __name__ == "__main__":
     mcp.run()

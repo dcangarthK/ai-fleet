@@ -12,12 +12,36 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 TMP = Path(tempfile.mkdtemp(prefix="fleet-ctl-"))
+SKILLS_DIR = TMP / "skills"
+SKILLS_DIR.mkdir()
+EVAL_RESULTS = TMP / "eval-results" / "results.json"
+FAKE_EVAL = TMP / "fake_eval.py"
+FAKE_EVAL.write_text('''
+import argparse, json, time
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument("--models"); p.add_argument("--roles"); p.add_argument("--ollama"); p.add_argument("--out")
+a = p.parse_args()
+time.sleep(0.25)
+path = Path(a.out) / "results.json"
+path.parent.mkdir(parents=True, exist_ok=True)
+try: rows = json.loads(path.read_text())
+except (OSError, ValueError): rows = []
+row = {"model": a.models, "roles": {role: {"score": 91.0} for role in a.roles.split(",")},
+       "size_gb": 1.0, "fits_16gb": True, "median_s": 0.5, "tokens_per_s": 42.0,
+       "errors": [], "evaluated_at": time.time()}
+rows = [old for old in rows if old.get("model") != a.models] + [row]
+path.write_text(json.dumps(rows))
+print("fake eval complete")
+''')
 FAKE_TS = TMP / "tailscale"
 FAKE_TS.write_text("#!/bin/sh\necho '{\"Peer\":{}}'\n")
 FAKE_TS.chmod(0o755)
 os.environ.update({"FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_TS),
                    "FLEET_POLL_SECONDS": "0.3", "FLEET_TASK_POLL_SECONDS": "0.2",
-                   "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": ""})
+                   "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": "",
+                   "FLEET_SKILLS_DIR": str(SKILLS_DIR), "FLEET_EVAL_RESULTS": str(EVAL_RESULTS),
+                   "FLEET_EVAL_CMD": f"{sys.executable} {FAKE_EVAL}"})
 
 
 class FakeRegistry(BaseHTTPRequestHandler):
@@ -52,6 +76,7 @@ class FakeRunner(BaseHTTPRequestHandler):
     models: dict = {"fake-model:1b": False}  # name -> managed
     ops: dict = {}
     op_script: list = []  # states an ensure op goes through on successive polls; default ready
+    agents: dict = {"claude": "/x/claude", "codex": None, "ollama": "http://o"}
 
     def log_message(self, *a):
         pass
@@ -88,7 +113,7 @@ class FakeRunner(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "version": "2", "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "models": {"remote_management": True, "disk_reserve_gb": 8},
-                                    "agents": {"claude": "/x/claude", "codex": None, "ollama": "http://o"}})
+                                    "agents": dict(FakeRunner.agents)})
         jid = self.path.split("/")[2].split("?")[0]
         if jid not in self.jobs:
             return self._send(404, {"detail": "no job"})
@@ -187,7 +212,7 @@ class ControllerTests(unittest.TestCase):
         r = self.c.get(f"/api/tasks/wait?ids={t['id']}&timeout=5").json()
         self.assertEqual(r["tasks"][0]["state"], "review")
         self.assertEqual(r["tasks"][0]["result"], "done!")
-        types = [e["type"] for e in self.c.get("/api/events/list").json() if e["task_id"] == t["id"]]
+        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
         self.assertEqual(types, ["task.queued", "task.starting", "task.working", "task.review"])
         self.assertEqual(self.c.get(f"/api/tasks/{t['id']}/diff").json()["diff"], "+hello")
         self.assertEqual(self.c.post(f"/api/tasks/{t['id']}/complete", headers=W).json()["state"], "done")
@@ -452,6 +477,209 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["author"], "phase6-admin")
 
+    # ---------- phase 7: skills, evals and pipelines ----------
+
+    def test_skills_crud_history_bindings_import_and_risk(self):
+        skill_id = "phase7-review"
+        first = self.c.put(f"/api/skills/{skill_id}", json={
+            "description": "Review carefully", "agents": ["claude"],
+            "risk": "prompt-only", "body": "Check every changed line.",
+        }, headers=W)
+        self.assertEqual(first.status_code, 200, first.text)
+        second = self.c.put(f"/api/skills/{skill_id}", json={
+            "description": "Review carefully", "agents": ["claude", "codex"],
+            "risk": "prompt-only", "body": "Check every changed line and quote evidence.",
+        }, headers=W)
+        self.assertEqual(second.json()["version"], first.json()["version"] + 1)
+        history = self.c.get(f"/api/skills/{skill_id}/history").json()
+        self.assertEqual([row["version"] for row in history[:2]], [second.json()["version"], first.json()["version"]])
+        self.assertNotEqual(history[0]["digest"], history[1]["digest"])
+
+        binding = {"scope": "role", "scope_id": "phase7-reviewer"}
+        self.assertEqual(self.c.post(f"/api/skills/{skill_id}/bindings", json=binding, headers=W).status_code, 200)
+        current = next(row for row in self.c.get("/api/skills").json() if row["id"] == skill_id)
+        self.assertIn(binding, current["bindings"])
+        self.assertEqual(self.c.request("DELETE", f"/api/skills/{skill_id}/bindings", json=binding, headers=W).status_code, 200)
+
+        refused = self.c.put("/api/skills/dangerous-skill", json={
+            "description": "No", "agents": ["claude"], "risk": "executable", "body": "run it",
+        }, headers=W)
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("not supported yet", refused.text)
+
+        repo_dir = SKILLS_DIR / "repo-skill"
+        repo_dir.mkdir(exist_ok=True)
+        skill_file = repo_dir / "SKILL.md"
+        skill_file.write_text("""---
+id: repo-skill
+version: 3
+description: Imported instructions
+agents: [claude, codex]
+risk: prompt-only
+---
+Imported body.
+""")
+        imported = controller.fleet_skills.import_repo()
+        self.assertEqual([(row["id"], row["version"], row["author"]) for row in imported],
+                         [("repo-skill", 3, "repo")])
+        self.assertEqual(controller.fleet_skills.import_repo(), [])
+        skill_file.write_text(skill_file.read_text().replace("Imported body.", "Changed imported body."))
+        changed = controller.fleet_skills.import_repo()
+        self.assertEqual((changed[0]["version"], changed[0]["author"]), (4, "repo"))
+
+    def test_skill_snapshot_filters_agents_and_records_versions(self):
+        skill_id = "phase7-snapshot"
+        created = self.c.put(f"/api/skills/{skill_id}", json={
+            "description": "Snapshot", "agents": ["claude"], "risk": "prompt-only",
+            "body": "Use the phase seven checklist.",
+        }, headers=W).json()
+        task = self.task(skills=[skill_id])
+        saved = self.c.get(f"/api/tasks/{task['id']}").json()
+        self.assertIn(f"## skill: {skill_id} v{created['version']}", saved["instructions"])
+        self.assertEqual(saved["skills"], [{"id": skill_id, "version": created["version"],
+                                             "digest": created["digest"]}])
+        sent = [body for path, body in FakeRunner.calls if path == "/jobs" and body["id"] == task["id"]][0]
+        self.assertEqual(sent["instructions"], saved["instructions"])
+
+        binding = {"scope": "role", "scope_id": "phase7-skilled"}
+        self.c.post(f"/api/skills/{skill_id}/bindings", json=binding, headers=W)
+        bound = self.task(role="phase7-skilled")
+        self.assertIn("Use the phase seven checklist.", bound["instructions"])
+        preview = self.c.post("/api/policies/preview", json={
+            "node": "master", "agent": "claude", "role": "phase7-skilled",
+        }, headers=W).json()
+        self.assertEqual(preview["skills"][0]["id"], skill_id)
+        self.c.request("DELETE", f"/api/skills/{skill_id}/bindings", json=binding, headers=W)
+
+        other = self.c.put("/api/skills/ollama-only", json={
+            "description": "Only local models", "agents": ["ollama"], "risk": "prompt-only", "body": "Local only.",
+        }, headers=W).json()
+        filtered = self.task(skills=[other["id"]])
+        filtered_saved = self.c.get(f"/api/tasks/{filtered['id']}").json()
+        self.assertNotIn("Local only.", filtered_saved["instructions"])
+        self.assertEqual(filtered_saved["skills"], [])
+        self.c.post(f"/api/tasks/{task['id']}/cancel", headers=W)
+        self.c.post(f"/api/tasks/{bound['id']}/cancel", headers=W)
+        self.c.post(f"/api/tasks/{filtered['id']}/cancel", headers=W)
+
+    def test_evals_queue_scores_catalog_and_recommendations(self):
+        bad = self.c.post("/api/evals", json={"model": "not-installed:1b", "node": "master"}, headers=W)
+        self.assertEqual(bad.status_code, 409)
+        first = self.c.post("/api/evals", json={"model": "fake-model:1b", "node": "master",
+                                                  "roles": ["coder", "reviewer"]}, headers=W).json()
+        second = self.c.post("/api/evals", json={"model": "fake-model:1b", "node": "master",
+                                                   "roles": ["fast"]}, headers=W).json()
+
+        def states():
+            rows = {row["id"]: row for row in self.c.get("/api/evals").json()["runs"]}
+            return rows[first["id"]]["state"], rows[second["id"]]["state"]
+
+        wait_for(lambda: "running" in states())
+        self.assertEqual(states().count("running"), 1)
+        self.assertIn("queued", states())
+        wait_for(lambda: states() == ("done", "done"), timeout=10)
+        payload = self.c.get("/api/evals").json()
+        done = {row["id"]: row for row in payload["runs"]}
+        self.assertEqual(done[first["id"]]["scores"], {"coder": 91.0, "reviewer": 91.0})
+        self.assertTrue(any(row["model"] == "fake-model:1b" for row in payload["leaderboard"]))
+        catalog = next(row for row in self.c.get("/api/models").json() if row["reference"] == "fake-model:1b")
+        self.assertEqual(catalog["evals"], {"fast": 91.0})
+        recs = self.c.get("/api/evals/recommendations").json()
+        self.assertTrue(any(row == {"node": "master", "role": "fast", "model": "fake-model:1b",
+                                        "score": 91.0, "installed": True} for row in recs))
+
+    def test_pipeline_end_to_end_resolution_ready_escalation_cancel_and_events(self):
+        original_call = controller.pipeline_model_call
+        FakeRunner.agents["codex"] = "/x/codex"
+        self.c.post("/api/refresh", headers=W)
+        issue = {"severity": "high", "file": "app.py", "problem": "Greeting regression",
+                 "evidence": "+hello", "fix": "restore the expected greeting"}
+        answers = [json.dumps({"verdict": "request_changes", "issues": [issue]}),
+                   json.dumps({"verdict": "approve", "issues": []})]
+        controller.pipeline_model_call = lambda role, spec, diff: answers.pop(0)
+        try:
+            body = {"title": "Phase 7 pipeline", "spec": "Keep the greeting correct", "repo": "/repo",
+                    "gate": "pytest", "mode": "auto-edit", "builder": {"agent": "claude"},
+                    "reviewers": [{"kind": "role", "role": "reviewer"},
+                                  {"kind": "agent", "agent": "codex"}], "max_rounds": 2}
+            response = self.c.post("/api/pipelines", json=body, headers=W)
+            self.assertEqual(response.status_code, 200, response.text)
+            pipeline_id = response.json()["id"]
+            build_id = response.json()["build_task"]
+            FakeRunner.jobs[build_id].update(state="exited", exit_code=0, result="built",
+                                             gate={"state": "passed", "exit_code": 0})
+            reviewing = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
+                                           p["reviews"].get("1", {}).get("task_id") else None)(
+                                               self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+            review_id = reviewing["reviews"]["1"]["task_id"]
+            review_body = [sent for path, sent in FakeRunner.calls if path == "/jobs" and sent["id"] == review_id][0]
+            self.assertEqual((review_body["mode"], review_body["worktree"], review_body["repo"]),
+                             ("read-only", False, "/repo"))  # original repo; the builder worktree is under the runner's denied dir
+            FakeRunner.jobs[review_id].update(state="exited", exit_code=0,
+                                              result=json.dumps({"verdict": "request_changes", "issues": [issue]}))
+            building = wait_for(lambda: (lambda p: p if p["state"] == "building" and p["round"] == 2 else None)(
+                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+            messages = [sent["text"] for path, sent in FakeRunner.calls if path == f"/jobs/{build_id}/message"]
+            self.assertEqual(messages[-1].count("Greeting regression"), 1)
+
+            FakeRunner.jobs[build_id].update(state="exited", exit_code=0, result="fixed",
+                                             gate={"state": "passed", "exit_code": 0})
+            second_review = wait_for(lambda: (lambda p: p if p["state"] == "reviewing" and
+                                                p["reviews"].get("1", {}).get("task_id") else None)(
+                                                    self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+            second_review_id = second_review["reviews"]["1"]["task_id"]
+            FakeRunner.jobs[second_review_id].update(
+                state="exited", exit_code=0, result=json.dumps({"verdict": "approve", "issues": []}))
+            ready = wait_for(lambda: (lambda p: p if p["state"] == "ready" else None)(
+                self.c.get(f"/api/pipelines/{pipeline_id}").json()), timeout=10)
+            self.assertEqual(ready["build_task"], build_id)
+
+            controller.pipeline_model_call = lambda role, spec, diff: json.dumps(
+                {"verdict": "request_changes", "issues": [issue]})
+            escalated = self.c.post("/api/pipelines", json={**body, "title": "Escalate", "reviewers": [
+                {"kind": "role", "role": "reviewer"}], "max_rounds": 1}, headers=W).json()
+            FakeRunner.jobs[escalated["build_task"]].update(state="exited", exit_code=0,
+                                                            gate={"state": "passed", "exit_code": 0})
+            wait_for(lambda: self.c.get(f"/api/pipelines/{escalated['id']}").json()["state"] == "escalated",
+                     timeout=10)
+
+            cancelled = self.c.post("/api/pipelines", json={**body, "title": "Cancel me",
+                "reviewers": [{"kind": "role", "role": "reviewer"}]}, headers=W).json()
+            cancelled = self.c.post(f"/api/pipelines/{cancelled['id']}/cancel", headers=W).json()
+            self.assertEqual(cancelled["state"], "cancelled")
+            refused = self.c.post("/api/pipelines", json={**body,
+                "reviewers": [{"kind": "agent", "agent": "claude"}]}, headers=W)
+            self.assertEqual(refused.status_code, 400)
+            types = [event["type"] for event in self.c.get("/api/events/list?limit=1000").json()
+                     if event["data"].get("id") == pipeline_id]
+            self.assertIn("pipeline.reviewing", types)
+            self.assertIn("pipeline.resolving", types)
+            self.assertIn("pipeline.ready", types)
+        finally:
+            controller.pipeline_model_call = original_call
+            FakeRunner.agents["codex"] = None
+            self.c.post("/api/refresh", headers=W)
+
+    def test_agent_reviewer_runs_in_the_original_repo_not_the_builder_worktree(self):
+        FakeRunner.agents["codex"] = "/x/codex"
+        self.c.post("/api/refresh", headers=W)
+        try:
+            body = {"title": "Review placement", "spec": "do it", "repo": "/r/project", "gate": "pytest", "mode": "auto-edit",
+                    "builder": {"agent": "codex"}, "reviewers": [{"kind": "agent", "agent": "claude"}], "max_rounds": 1}
+            p = self.c.post("/api/pipelines", json=body, headers=W).json()
+            build = p["build_task"]
+            FakeRunner.jobs[build].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            wait_for(lambda: self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"].get("0", {}).get("task_id"), timeout=10)
+            rid = self.c.get(f"/api/pipelines/{p['id']}").json()["reviews"]["0"]["task_id"]
+            sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
+            self.assertEqual(sent["repo"], "/r/project")
+            self.assertEqual(sent["mode"], "read-only")
+            self.assertIn(f"fleet/{build}", sent["prompt"])
+            self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
+        finally:
+            FakeRunner.agents["codex"] = None
+            self.c.post("/api/refresh", headers=W)
+
     # ---------- phase 5b: catalog, installs, roles that wait ----------
 
     def models(self):
@@ -490,7 +718,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(sent[0]["ref"], "tiny:1b")
         self.assertEqual(sent[0]["derived"], "fleet-tiny-1b")
         self.assertEqual(sent[0]["params"], {"temperature": 0.1})
-        types = [e["type"] for e in self.c.get("/api/events/list").json()]
+        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json()]
         self.assertIn("model.state", types)
         # Can't drop it from the catalog while a node should have it.
         self.assertEqual(self.c.delete("/api/models/tiny-1b", headers=W).status_code, 409)

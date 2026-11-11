@@ -85,6 +85,29 @@ hours accumulate; mode, time, concurrency, and daily budgets take the strictest 
 the snapshot only as a further restriction—its local `runner.json` remains the hard ceiling for paths, mode,
 network, job time, and gates. Policy/instruction edits require an `admin` token.
 
+### Skills
+
+Skills are versioned, prompt-only instruction bundles managed on the Skills page. Bind them to the fleet, a
+node, role or agent, or list skill IDs when creating a task. Each task snapshots the selected versions and
+digests and receives their Markdown through the same instruction channel as policy text; skills never widen
+runner permissions. Git-managed skills in `skills/<id>/SKILL.md` are imported idempotently when the controller
+starts.
+
+### Evals
+
+The Evals page queues local model evaluations one at a time, shows role scores and speed from
+`evals/results/results.json`, and suggests the best evaluated model that is installed or fits each node. A run
+is accepted only for a model already installed on its selected node. The controller invokes `evals/run_evals.py`
+on the master and refreshes the model catalog scores when the run finishes.
+
+### Build pipelines
+
+Pipelines link a builder task, its gate, and independent role or agent reviews. Review claims must quote text
+that exists in the builder diff; unsupported claims are dropped. High and medium issues return to the same
+builder session for another round, while clean reviews become ready for a person to merge. Exhausted rounds
+are escalated. Pipelines can be started and inspected from the console or with the MCP `run_pipeline` and
+`pipeline_status` tools.
+
 **Dashboard:** http://127.0.0.1:8700 shows what needs you, tasks by state with live activity, diffs, nodes and usage.
 Updates are pushed live. macOS notifications fire when a task needs you or finishes (`master/plugins/`).
 

@@ -35,6 +35,18 @@ CREATE TABLE IF NOT EXISTS instructions (
 CREATE TABLE IF NOT EXISTS policies (
     scope TEXT, scope_id TEXT, version INTEGER, body TEXT, author TEXT, created_at REAL,
     PRIMARY KEY (scope, scope_id, version));
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT, version INTEGER, description TEXT, agents TEXT, risk TEXT, body TEXT,
+    digest TEXT, author TEXT, created_at REAL, PRIMARY KEY (id, version));
+CREATE TABLE IF NOT EXISTS skill_bindings (
+    skill_id TEXT, scope TEXT, scope_id TEXT, PRIMARY KEY (skill_id, scope, scope_id));
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id TEXT PRIMARY KEY, model TEXT, node TEXT, roles TEXT, state TEXT,
+    started_at REAL, ended_at REAL, scores TEXT, errors TEXT, log_tail TEXT);
+CREATE TABLE IF NOT EXISTS pipelines (
+    id TEXT PRIMARY KEY, title TEXT, state TEXT, round INTEGER, max_rounds INTEGER,
+    spec TEXT, repo TEXT, gate TEXT, mode TEXT, builder TEXT, reviewers TEXT,
+    build_task TEXT, reviews TEXT, history TEXT, created_at REAL, updated_at REAL);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, type TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS tokens (
@@ -47,7 +59,7 @@ MIGRATIONS = {
               "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT"},
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
-              "policy_hash": "TEXT", "role": "TEXT"},
+              "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'"},
     "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'"},
 }
 

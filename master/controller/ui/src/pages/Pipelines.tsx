@@ -16,7 +16,7 @@ const STATE: Record<PipelineState, { tone: string; label: string }> = {
   cancelled: { tone: "quiet", label: "Cancelled" },
 };
 
-const reviewerLabel = (r: Pipeline["reviewers"][number]) => (r.kind === "role" ? `${r.role} model` : r.agent);
+const reviewerLabel = (r: Pipeline["reviewers"][number]) => (r.kind === "role" ? `${r.role} model` : r.model ? `${r.agent} (${r.model})` : r.agent);
 
 export function PipelinesPage() {
   const [params, setParams] = useSearchParams();
@@ -157,6 +157,8 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
     { v: "role:reviewer", label: "Local reviewer model (reviewer role)" },
     { v: "role:coder", label: "Local coder model (coder role)" },
     { v: "agent:claude", label: "Claude" },
+    { v: "agent:claude:claude-fable-5-1", label: "Claude (Fable 5.1)" },
+    { v: "agent:claude:claude-sonnet-5-5", label: "Claude (Sonnet 5.5)" },
     { v: "agent:codex", label: "Codex" },
   ].filter((o) => o.v !== `agent:${builder}`);
   const profiles = Array.from(new Set((fleet.data?.nodes ?? []).flatMap((n) => n.runner?.gate_profiles ?? [])));
@@ -167,8 +169,8 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
       title, spec, repo: repo || null, gate: gate || null, mode: "auto-edit", max_rounds: rounds, bypass,
       builder: { agent: builder },
       reviewers: reviewers.filter((r) => r !== `agent:${builder}`).map((r) => {
-        const [kind, name] = r.split(":");
-        return kind === "role" ? { kind, role: name } : { kind, agent: name };
+        const [kind, name, model] = r.split(":");
+        return kind === "role" ? { kind, role: name } : model ? { kind, agent: name, model } : { kind, agent: name };
       }),
     };
     const p = await run(() => post<Pipeline>("/api/pipelines", body));

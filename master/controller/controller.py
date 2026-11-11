@@ -1327,7 +1327,7 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
     for action in actions:
         if action["do"] == "spawn_build":
             task = await tasks.create_task(tasks.TaskIn(
-                agent=p["builder"]["agent"], prompt=p["spec"], title=p["title"], mode=p["mode"],
+                agent=p["builder"]["agent"], model=p["builder"].get("model"), prompt=p["spec"], title=p["title"], mode=p["mode"],
                 repo=p.get("repo"), gate=p.get("gate"), node=p["builder"].get("node"), worktree=True,
                 trusted_bypass=bool(p.get("bypass")),
             ))
@@ -1351,7 +1351,7 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
                     # Review in the original repo, read-only: the builder's worktree lives under the runner's own
                     # directory, which node policy always refuses. Its branch is in the same repo.
                     review_task = await tasks.create_task(tasks.TaskIn(
-                        agent=reviewer["agent"], prompt=review_prompt(p["spec"], diff, builder.get("branch")),
+                        agent=reviewer["agent"], model=reviewer.get("model"), prompt=review_prompt(p["spec"], diff, builder.get("branch")),
                         title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"),
                         worktree=False, node=builder["node_id"], parent_id=p["build_task"],
                     ))
@@ -1428,11 +1428,16 @@ async def pipeline_loop() -> None:
         try:
             with db() as c:
                 ids = [row[0] for row in c.execute(
-                    "SELECT id FROM pipelines WHERE state IN ('building','reviewing','resolving')")]
-            for pipeline_id in ids:
-                await poll_pipeline(pipeline_id)
+                    "SELECT id FROM pipelines WHERE state IN ('building','reviewing','resolving') "
+                    "ORDER BY created_at, rowid")]
         except Exception as exc:
             print(f"pipeline poll failed: {exc!r}")
+            ids = []
+        for pipeline_id in ids:
+            try:
+                await poll_pipeline(pipeline_id)
+            except Exception as exc:
+                print(f"pipeline {pipeline_id} poll failed: {exc!r}")
         await asyncio.sleep(POLL_SECONDS)
 
 

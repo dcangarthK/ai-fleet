@@ -34,6 +34,24 @@ MAX_INPUT_CHARS = 48_000  # ~12k tokens; small nodes run a 16k context
 
 mcp = FastMCP("local-llm")
 
+# Orchestrator presence (docs/SPEC-live-monitor.md 2.4): who this bridge works for, from the orchestrator's settings.
+SESSION_ENV = {"X-Fleet-Session": "FLEET_SESSION_ID", "X-Fleet-Model": "FLEET_SESSION_MODEL",
+               "X-Fleet-Account": "FLEET_SESSION_ACCOUNT"}
+SESSION_VALUE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def _headers(scope: str | None = None, fleet: bool = True) -> dict:
+    """The one header helper for every controller call: the session headers, plus X-Fleet (writes) and an optional
+    lower scope. wait_tasks sends no scope, so it stays local (presence from waits still counts)."""
+    headers = {"X-Fleet": "1"} if fleet else {}
+    if scope:
+        headers["X-Fleet-Scope"] = scope  # the controller only ever lowers access with this, never raises it
+    for header, env in SESSION_ENV.items():
+        value = os.environ.get(env, "").strip()
+        if SESSION_VALUE_RE.fullmatch(value):
+            headers[header] = value
+    return headers
+
 
 def _api_key() -> str:
     if key := os.environ.get("LLM_GATEWAY_KEY"):
@@ -80,14 +98,14 @@ def _report_call(role: str, model: str, elapsed_ms: float, ok: bool, usage: dict
     if fallback_from:
         body["fallback_from"] = fallback_from
     try:
-        httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers={"X-Fleet": "1"}, timeout=5)
+        httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers=_headers(), timeout=5)
     except httpx.HTTPError:
         pass
 
 
 def _fallback_for(role: str) -> str | None:
     try:
-        response = httpx.get(f"{CONTROLLER}/api/fleet", timeout=5)
+        response = httpx.get(f"{CONTROLLER}/api/fleet", headers=_headers(), timeout=5)
         response.raise_for_status()
         info = next((item for item in response.json().get("roles", []) if item.get("name") == role), None)
         fallback = info.get("fallback") if info else None
@@ -123,7 +141,7 @@ def _chat(role: str, system: str, user: str, timeout: float = 600, json_mode: bo
 
 
 def _fleet_json(path: str):
-    response = httpx.get(f"{CONTROLLER}{path}", headers={"X-Fleet": "1"}, timeout=5)
+    response = httpx.get(f"{CONTROLLER}{path}", headers=_headers(), timeout=5)
     response.raise_for_status()
     return response.json()
 
@@ -152,7 +170,7 @@ def _grounded_chat(prompt: str, context: str):
 
 def _spawn_escalation(role: str):
     def spawn(agent: str, title: str, prompt: str) -> str:
-        response = httpx.post(f"{CONTROLLER}/api/tasks", headers={"X-Fleet": "1"}, timeout=30, json={
+        response = httpx.post(f"{CONTROLLER}/api/tasks", headers=_headers(), timeout=30, json={
             "agent": agent, "prompt": _redact(prompt), "title": title, "mode": "read-only", "worktree": False,
             "role": role,
             "escalation": True})  # the controller also checks the chosen node's escalation policy
@@ -167,7 +185,7 @@ def _spawn_escalation(role: str):
 
 
 def _report_body(body: dict) -> None:
-    httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers={"X-Fleet": "1"}, timeout=5)
+    httpx.post(f"{CONTROLLER}/api/usage/calls", json=body, headers=_headers(), timeout=5)
 
 
 @mcp.tool()
@@ -227,11 +245,8 @@ def gateway_health(role: str = "fast") -> str:
 
 
 def _controller(method: str, path: str, body: dict | None = None, scope: str | None = None) -> str:
-    headers = {"X-Fleet": "1"}
-    if scope:
-        headers["X-Fleet-Scope"] = scope  # the controller only ever lowers access with this, never raises it
     try:
-        r = httpx.request(method, f"{CONTROLLER}{path}", json=body, headers=headers, timeout=30)
+        r = httpx.request(method, f"{CONTROLLER}{path}", json=body, headers=_headers(scope), timeout=30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__}); is it running on the master?"
     if r.is_error:
@@ -297,7 +312,8 @@ def _q(value: str) -> str:
 @mcp.tool()
 def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: str = "auto-edit",
                gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
-               role: str = "", kind: str = "", effort: str = "", budget_override: str = "") -> str:
+               role: str = "", kind: str = "", effort: str = "", budget_override: str = "", link: str = "",
+               profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
     """Delegate work to an agent on the fleet and return immediately with the task.
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
@@ -310,14 +326,45 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
           to use; a limited model's task is queued until its reset (or rerouted, per the rules).
     effort: low | medium | high; default from the budget rules.
     budget_override: the owner's (admin) decision only; this bridge's calls have operate scope, so it is refused.
+    link: why it exists relative to parent_id: retry, resume, review, fix, merge, check.
+    profile: pin a runner profile (its account), e.g. 'spare'; refused when unknown or not signed in.
+    stage: display-only step name for Live, e.g. 'test-1' (lowercase letters, digits, dashes).
+    independence: 'waived' (with independence_reason) lets a review/test run on a model that built the work;
+          advisory and shown to the owner on Live. kind 'test' is a test pass.
     Then use wait_tasks; don't poll."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
     for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node,
                  "parent_id": parent_id, "role": role, "kind": kind, "effort": effort,
-                 "budget_override": budget_override}.items():
+                 "budget_override": budget_override, "link": link, "profile": profile, "stage": stage,
+                 "independence": independence, "independence_reason": independence_reason}.items():
         if v:
             body[k] = v
     return _controller("POST", "/api/tasks", body, scope="operate")
+
+
+@mcp.tool()
+def report_activity(title: str, kind: str, account_label: str, model: str, status: str = "running",
+                    work_item: str = "", tokens: dict | None = None, note: str = "", activity_id: str = "") -> str:
+    """Self-report paid work that can't run as a fleet task (e.g. an in-session read-only subagent), so it shows on
+    Live, labelled "self-reported". Never affects budgets, limits or reviews. kind: a task kind, or 'orchestrator'
+    (a one-line note of what you're doing), 'subagent' or 'hints'. account_label: a known label, e.g. 'spare'.
+    status: running | done | failed. tokens: {input, output, cached} from a subagent's report. To finish a record,
+    call again with activity_id and status 'done'."""
+    body = {"title": title, "kind": kind, "account_label": account_label, "model": model, "status": status}
+    if activity_id:
+        body = {"id": activity_id, "status": status}
+    for k, v in {"work_item": work_item, "tokens": tokens, "note": note}.items():
+        if v:
+            body[k] = v
+    return _controller("POST", "/api/activity", body, scope="operate")
+
+
+@mcp.tool()
+def set_chain(work_item: str, stages: list[dict]) -> str:
+    """Describe a work item's planned chain for Live: [{stage, agent, model?, profile?}], e.g.
+    [{"stage": "build", "agent": "claude", "model": "claude-opus-5-5"}, {"stage": "review", "agent": "claude",
+    "model": "claude-fable-5-2"}]. Descriptive only: it never starts or admits anything. work_item: the root task id."""
+    return _controller("PUT", f"/api/work/{_q(work_item)}/chain", {"stages": stages}, scope="operate")
 
 
 @mcp.tool()
@@ -326,7 +373,7 @@ def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False)
     with any_of=True. Returns each task's state and final result text. Max timeout 1800s."""
     params = f"ids={','.join(_q(i) for i in ids)}&timeout={timeout_seconds}&mode={'any' if any_of else 'all'}"
     try:
-        r = httpx.get(f"{CONTROLLER}/api/tasks/wait?{params}", timeout=timeout_seconds + 30)
+        r = httpx.get(f"{CONTROLLER}/api/tasks/wait?{params}", headers=_headers(), timeout=timeout_seconds + 30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__})"
     return json.dumps(r.json(), indent=2)

@@ -13,9 +13,9 @@ REVIEW_SCHEMA = (
     '"expected":"","actual":"","fix":""}]}'
 )
 REVIEW_GUIDANCE = (
-    "Evidence must be an exact quote from an added, removed, or context line. State the expected "
-    "and actual behavior for each issue. A fix must differ from the evidence and from lines already "
-    "in the diff. If there is no defensible issue, abstain."
+    "Evidence must be an exact quote from one added, removed, or context line, or from consecutive "
+    "lines in one hunk. State the expected and actual behavior for each issue. A fix must differ "
+    "from the evidence and from lines already in the diff. If there is no defensible issue, abstain."
 )
 
 
@@ -23,15 +23,74 @@ def _normalise(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _plain_file_header(lines: list[str], index: int) -> bool:
+    """Return whether ``index`` starts a plain unified-diff file header."""
+    return (index + 2 < len(lines)
+            and lines[index].startswith("--- ")
+            and lines[index + 1].startswith("+++ ")
+            and lines[index + 2].startswith("@@"))
+
+
+def _hunk_counts(header: str) -> tuple[int, int] | None:
+    """Return the old/new line counts declared by a unified-diff hunk."""
+    match = re.match(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", header)
+    if not match:
+        return None
+    return tuple(int(count) if count is not None else 1 for count in match.groups())
+
+
+def _diff_hunks(diff: str) -> list[list[str]]:
+    """Return normalised content lines, preserving file and hunk boundaries."""
+    raw_lines = diff.splitlines()
+    hunks: list[list[str]] = []
+    current_hunk: list[str] | None = None
+    remaining: tuple[int, int] | None = None
+    git_file = False
+    index = 0
+    while index < len(raw_lines):
+        line = raw_lines[index]
+        if line.startswith("diff --git "):
+            current_hunk = None
+            remaining = None
+            git_file = True
+        elif line.startswith("@@"):
+            current_hunk = []
+            hunks.append(current_hunk)
+            remaining = _hunk_counts(line)
+        elif (current_hunk is not None and remaining == (0, 0) and not git_file
+              and _plain_file_header(raw_lines, index)):
+            # A plain unified diff has no ``diff --git`` boundary. Its paired
+            # file headers followed by a hunk header start the next file.
+            current_hunk = None
+            remaining = None
+            index += 1  # Skip both file-header lines; ``@@`` is handled next.
+        elif current_hunk is not None and line.startswith(("+", "-", " ")):
+            current_hunk.append(_normalise(line[1:]))
+            if remaining is not None:
+                old_count, new_count = remaining
+                if line[0] in ("-", " "):
+                    old_count -= 1
+                if line[0] in ("+", " "):
+                    new_count -= 1
+                remaining = (old_count, new_count)
+        index += 1
+    if not hunks and "@@" not in diff:
+        # A diff fragment without hunk headers (e.g. pasted lines): its content lines form one hunk.
+        fragment = [_normalise(line[1:]) for line in raw_lines
+                    if line.startswith(("+", "-", " ")) and not line.startswith(("+++ ", "--- "))]
+        if fragment:
+            hunks.append(fragment)
+    return hunks
+
+
 def _diff_lines(diff: str) -> list[str]:
     """Return content from unified-diff added, removed, and context lines."""
-    lines = []
-    for line in diff.splitlines():
-        if line.startswith(("+++", "---")):
-            continue
-        if line.startswith(("+", "-", " ")):
-            lines.append(_normalise(line[1:]))
-    return lines
+    return [line for hunk in _diff_hunks(diff) for line in hunk]
+
+
+def _evidence_is_supported(evidence: str, hunks: list[list[str]]) -> bool:
+    """Check for a verbatim quote contained within a single diff hunk."""
+    return any(evidence in _normalise(" ".join(hunk)) for hunk in hunks)
 
 
 def _result(status: str, verdict: str | None = None, issues: list[dict] | None = None,
@@ -87,15 +146,15 @@ def check_review(raw_text: str, diff: str) -> dict:
     if verdict == "abstain":
         return _result("abstained", verdict)
 
-    diff_lines = _diff_lines(diff)
-    normal_diff = " ".join(line for line in diff_lines if line)
+    diff_hunks = _diff_hunks(diff)
+    diff_lines = [line for hunk in diff_hunks for line in hunk]
     supported = []
     unsupported = 0
     identical_fix = 0
     existing_lines = set(diff_lines)
     for issue in clean_issues:
         evidence = _normalise(issue["evidence"])
-        if evidence not in normal_diff:
+        if not _evidence_is_supported(evidence, diff_hunks):
             unsupported += 1
             continue
         fix = _normalise(issue["fix"])

@@ -78,6 +78,112 @@ class CheckReview(unittest.TestCase):
         self.assertEqual(len(result["issues"]), 1)
         self.assertEqual(result["unsupported"], 0)
 
+    def test_consecutive_lines_in_one_hunk_are_supported(self):
+        evidence = ("return db.execute(\"SELECT * FROM users WHERE name = ?\", (name,)) "
+                    "return db.execute(f\"SELECT * FROM users WHERE name = '{name}'\")")
+        result = grounding.check_review(
+            review("request_changes", issue(evidence=evidence)), DIFF)
+        self.assertEqual(len(result["issues"]), 1)
+        self.assertEqual(result["unsupported"], 0)
+
+    def test_evidence_cannot_span_hunks(self):
+        diff = """--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+-old one
++new one
+@@ -10 +10 @@
+-old two
++new two
+"""
+        result = grounding.check_review(
+            review("request_changes", issue(evidence="new one new two")), diff)
+        self.assertEqual((result["issues"], result["unsupported"]), ([], 1))
+
+    def test_evidence_cannot_span_files(self):
+        diff = """diff --git a/x.py b/x.py
+--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+-old one
++new one
+diff --git a/y.py b/y.py
+--- a/y.py
++++ b/y.py
+@@ -1 +1 @@
+-old two
++new two
+"""
+        result = grounding.check_review(
+            review("request_changes", issue(evidence="new one new two")), diff)
+        self.assertEqual((result["issues"], result["unsupported"]), ([], 1))
+
+    def test_evidence_cannot_skip_a_line(self):
+        diff = """--- a/x.py
++++ b/x.py
+@@ -1,3 +1,3 @@
++first line
++middle line
++last line
+"""
+        result = grounding.check_review(
+            review("request_changes", issue(evidence="first line last line")), diff)
+        self.assertEqual((result["issues"], result["unsupported"]), ([], 1))
+
+    def test_diff_content_that_resembles_headers_is_quotable(self):
+        diff = """--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+---counter
++++counter
+"""
+        for evidence in ("--counter", "++counter"):
+            with self.subTest(evidence=evidence):
+                result = grounding.check_review(
+                    review("request_changes", issue(evidence=evidence)), diff)
+                self.assertEqual(len(result["issues"]), 1)
+                self.assertEqual(result["unsupported"], 0)
+
+    def test_header_like_content_before_another_plain_hunk_is_quotable(self):
+        diff = """--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+--- counter
++++ counter
+@@ -3 +3 @@
+-old
++new
+"""
+        for evidence in ("-- counter", "++ counter"):
+            with self.subTest(evidence=evidence):
+                result = grounding.check_review(
+                    review("request_changes", issue(evidence=evidence)), diff)
+                self.assertEqual(len(result["issues"]), 1)
+                self.assertEqual(result["unsupported"], 0)
+
+    def test_plain_diff_file_headers_split_hunks(self):
+        diff = """--- a/x.py
++++ b/x.py
+@@ -1 +1 @@
+-old one
++new one
+--- a/y.py
++++ b/y.py
+@@ -1 +1 @@
+-old two
++new two
+"""
+        result = grounding.check_review(
+            review("request_changes", issue(evidence="new one new two")), diff)
+        self.assertEqual((result["issues"], result["unsupported"]), ([], 1))
+
+    def test_file_headers_are_not_quotable(self):
+        for evidence in ("a/app.py", "b/app.py"):
+            with self.subTest(evidence=evidence):
+                result = grounding.check_review(
+                    review("request_changes", issue(evidence=evidence)), DIFF)
+                self.assertEqual((result["issues"], result["unsupported"]), ([], 1))
+
     def test_fix_equal_to_evidence_is_dropped(self):
         evidence = issue()["evidence"]
         result = grounding.check_review(
@@ -109,3 +215,11 @@ class EmptyFix(unittest.TestCase):
             "problem": "wrong value", "evidence": "return 2", "expected": "1", "actual": "2", "fix": ""}]})
         r = grounding.check_review(raw, diff)
         self.assertEqual((r["status"], len(r["issues"]), r["identical_fix"]), ("valid", 1, 0))
+
+
+class Fragment(unittest.TestCase):
+    def test_diff_fragment_without_hunk_header_is_one_hunk(self):
+        raw = json.dumps({"verdict": "request_changes", "issues": [{"severity": "high", "file": "app.py",
+            "problem": "greeting regressed", "evidence": "hello", "expected": "hi", "actual": "hello", "fix": "say hi"}]})
+        r = grounding.check_review(raw, "+hello\n")
+        self.assertEqual((r["status"], len(r["issues"])), ("valid", 1))

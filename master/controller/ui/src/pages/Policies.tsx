@@ -75,9 +75,11 @@ export function PoliciesPage() {
           ))}
         </nav>
         <div style={{ minWidth: 0 }}>
-          <LayerEditor key={sel.scope + sel.id} layer={sel}
-            current={(instructions.data ?? []).find((x) => x.scope === sel.scope && x.scope_id === sel.id)}
-            policy={(policies.data ?? []).find((x) => x.scope === sel.scope && x.scope_id === sel.id)} />
+          {instructions.isSuccess && policies.isSuccess ? (() => {
+            const current = instructions.data.find((x) => x.scope === sel.scope && x.scope_id === sel.id);
+            const policy = policies.data.find((x) => x.scope === sel.scope && x.scope_id === sel.id);
+            return <LayerEditor key={`${sel.scope}/${sel.id}/${current?.version ?? 0}/${policy?.version ?? 0}`} layer={sel} current={current} policy={policy} />;
+          })() : !(instructions.error || policies.error) && <p className="quiet">Loading this layer…</p>}
           <Simulator roles={roles} />
         </div>
       </div>
@@ -113,14 +115,15 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
     if (json) {
       try { next = JSON.parse(jsonText); } catch { return run(async () => { throw new Error("The JSON doesn't parse. Fix it or switch back to the form."); }); }
     }
+    const outgoing = json ? next : compact(next);
     const changedText = text !== (current?.text ?? "");
-    const changedPolicy = JSON.stringify(compact(next)) !== JSON.stringify(compact(policy?.body ?? {}));
+    const changedPolicy = JSON.stringify(outgoing) !== JSON.stringify(policy?.body ?? {});
     const ok = await run(async () => {
       if (changedText) await put(`/api/instructions/${path}`, { text });
-      if (changedPolicy) await put(`/api/policies/${path}`, { body: compact(next) });
+      if (changedPolicy) await put(`/api/policies/${path}`, { body: outgoing });
       return true;
     });
-    if (ok) { setBody(compact(next)); setSaved(changedText || changedPolicy ? "Saved as a new version." : "Nothing changed."); history.refetch(); }
+    if (ok) { setBody(outgoing); setSaved(changedText || changedPolicy ? "Saved as a new version." : "Nothing changed."); history.refetch(); }
   }
 
   const modes = fleet.data?.modes ?? ["read-only", "supervised", "auto-edit", "full"];
@@ -148,11 +151,14 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
       </div>
 
       {json ? (
+        <>
+        <p className="small quiet" style={{ margin: "0 0 6px" }}>Saved exactly as written. An empty list here means "allow nothing", unlike an empty field in the form.</p>
         <textarea className="mono" style={{ minHeight: 260 }} value={jsonText} onChange={(e) => setJsonText(e.target.value)} aria-label="Policy as JSON" />
+        </>
       ) : (
         <div className="stack">
           <div className="grid-form">
-            <label className="field">Folders agents may work in (one per line)
+            <label className="field">Folders agents may work in (one per line; empty means no limit at this layer)
               <textarea className="mono" style={{ minHeight: 70 }} value={joinLines(body.filesystem?.allowed_roots)} placeholder="~/code"
                         onChange={(e) => set((b) => ({ ...b, filesystem: { ...b.filesystem, allowed_roots: lines(e.target.value) } }))} />
             </label>
@@ -162,7 +168,7 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
             </label>
           </div>
           <div className="grid-form">
-            <label className="field">Claude tools allowed (empty: no restriction)
+            <label className="field">Claude tools allowed (empty means no limit at this layer)
               <textarea className="mono" style={{ minHeight: 60 }} value={joinLines(body.tools?.claude_allow)} placeholder={"Read\nEdit\nBash(npm test:*)"}
                         onChange={(e) => set((b) => ({ ...b, tools: { ...b.tools, claude_allow: lines(e.target.value) } }))} />
             </label>
@@ -207,28 +213,37 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
         <span className="small quiet">Running tasks keep the version they started with.</span>
       </div>
 
-      <History data={history.data} onRestore={(t, b) => { setText(t ?? text); if (b) setBody(b); setSaved("Restored into the editor. Save to make it the current version."); }} />
+      <History data={history.data} current={{ text, body }} onRestore={(t, b) => {
+        setText(t ?? text);
+        if (b) { setBody(b); setJsonText(JSON.stringify(b, null, 2)); }
+        setSaved("Restored into the editor. Save to make it the current version.");
+      }} />
     </form>
   );
 }
 
-function History({ data, onRestore }: { data?: { instructions: InstructionSet[]; policies: PolicyDoc[] }; onRestore: (t?: string, b?: PolicyBody) => void }) {
+function History({ data, current, onRestore }: {
+  data?: { instructions: InstructionSet[]; policies: PolicyDoc[] };
+  current: { text: string; body: PolicyBody };
+  onRestore: (t?: string, b?: PolicyBody) => void;
+}) {
   const rows = useMemo(() => [
-    ...(data?.instructions ?? []).map((x) => ({ kind: "Instructions", v: x.version, at: x.created_at, by: x.author, restore: () => onRestore(x.text) })),
-    ...(data?.policies ?? []).map((x) => ({ kind: "Policy", v: x.version, at: x.created_at, by: x.author, restore: () => onRestore(undefined, x.body) })),
-  ].sort((a, b) => b.at - a.at), [data, onRestore]);
-  if (rows.length < 2) return null;
+    ...(data?.instructions ?? []).map((x) => ({ kind: "Instructions", v: x.version, at: x.created_at, by: x.author, content: x.text,
+      same: x.text === current.text, restore: () => onRestore(x.text) })),
+    ...(data?.policies ?? []).map((x) => ({ kind: "Policy", v: x.version, at: x.created_at, by: x.author, content: JSON.stringify(x.body, null, 2),
+      same: JSON.stringify(x.body) === JSON.stringify(current.body), restore: () => onRestore(undefined, x.body) })),
+  ].sort((a, b) => b.at - a.at), [data, current, onRestore]);
+  if (!rows.length) return null;
   return (
     <details style={{ marginTop: 16 }}>
       <summary className="small">Version history ({rows.length})</summary>
-      <table style={{ marginTop: 6 }}>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.kind + r.v}><td>{r.kind} v{r.v}</td><td className="quiet small">{ago(r.at)} by {r.by}</td>
-              <td><button type="button" className="ghost small" onClick={r.restore}>Restore into editor</button></td></tr>
-          ))}
-        </tbody>
-      </table>
+      {rows.map((r) => (
+        <details key={r.kind + r.v} style={{ margin: "6px 0 0 12px" }}>
+          <summary className="small">{r.kind} v{r.v} · {ago(r.at)} by {r.by}{r.same ? " · same as the editor" : ""}</summary>
+          <pre className="out">{r.content || "(empty)"}</pre>
+          {!r.same && <button type="button" className="ghost small" onClick={r.restore}>Restore into editor</button>}
+        </details>
+      ))}
     </details>
   );
 }
@@ -283,7 +298,7 @@ function Simulator({ roles }: { roles: string[] }) {
             <dl className="kv">
               <dt>Folders</dt><dd>{p?.filesystem?.allowed_roots ? (p.filesystem.allowed_roots.length ? p.filesystem.allowed_roots.join(", ") : <span className="tone-bad">none: the layers' folder lists don't overlap</span>) : "node's own list"}{src("filesystem.allowed_roots")}</dd>
               <dt>Off limits</dt><dd>{p?.filesystem?.denied?.join(", ") || "node's built-in list only"}{src("filesystem.denied")}</dd>
-              <dt>Internet</dt><dd>{p?.network?.agents === "allow" ? "allowed if the node allows it" : "blocked"}{src("network.agents")}</dd>
+              <dt>Internet</dt><dd>{p?.network?.agents === "allow" ? "allowed if the node allows it" : p?.network?.agents === "deny" ? "blocked" : "no policy: Codex has no network by default; Claude's web tools aren't blocked"}{src("network.agents")}</dd>
               <dt>Highest mode</dt><dd>{p?.mode_ceiling ?? "node ceiling"}{src("mode_ceiling")}</dd>
               <dt>Claude tools</dt><dd>{p?.tools?.claude_allow ? `only ${p.tools.claude_allow.join(", ")}` : "no allow-list"}{p?.tools?.claude_deny?.length ? `; never ${p.tools.claude_deny.join(", ")}` : ""}{src("tools.claude_deny")}</dd>
               <dt>Task time</dt><dd>{p?.limits?.task_minutes ? `${p.limits.task_minutes} min` : "node limit"}{src("limits.task_minutes")}</dd>

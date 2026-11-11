@@ -132,10 +132,16 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     reviewer = p["reviewers"][index]
     usable = parsed.get("status") == "valid" or parsed.get("verdict") == "abstain"
     parsed["fallback"] = fallback
+    # Roles are trusted when the pipeline names them, or when the controller reports (from benchmark data, at
+    # review time) that every model holding the role is a trusted reviewer.
+    auto_trusted = event.get("trusted_roles") if isinstance(event.get("trusted_roles"), list) else []
+    role_trusted = reviewer["kind"] == "role" and (reviewer.get("role") in p.get("trusted_roles", [])
+                                                   or reviewer.get("role") in auto_trusted)
     parsed["trusted"] = bool(usable and not fallback and (
-        (reviewer["kind"] == "agent" and reviewer.get("agent") in {"claude", "codex"})
-        or (reviewer["kind"] == "role" and reviewer.get("role") in p.get("trusted_roles", []))
+        (reviewer["kind"] == "agent" and reviewer.get("agent") in {"claude", "codex"}) or role_trusted
     ))
+    if parsed["trusted"] and reviewer["kind"] == "role" and reviewer.get("role") not in p.get("trusted_roles", []):
+        parsed["trusted_by"] = "benchmark"
     p["reviews"][key] = parsed
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []

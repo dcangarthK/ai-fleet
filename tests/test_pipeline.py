@@ -114,6 +114,25 @@ class Machine(unittest.TestCase):
         self.assertEqual(p["state"], "escalated")
         self.assertFalse(p["reviews"]["0"]["trusted"])
 
+    def test_role_trusted_from_benchmark_via_review_event(self):
+        reviewers = [{"kind": "role", "role": "reviewer"}]
+        p, _ = PL.start(PL.new(spec(reviewers=reviewers)))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF,
+                           "trusted_roles": ["reviewer"]})
+        self.assertEqual(p["state"], "ready")
+        self.assertTrue(p["reviews"]["0"]["trusted"])
+        self.assertEqual(p["reviews"]["0"]["trusted_by"], "benchmark")
+        self.assertEqual(p["trusted_roles"], [])  # the stored pipeline spec is untouched
+
+        for event_extra in ({"trusted_roles": ["other"]}, {"trusted_roles": ["reviewer"], "fallback": True}):
+            p, _ = PL.start(PL.new(spec(reviewers=reviewers)))
+            p, _ = PL.step(p, {"type": "build", "state": "review"})
+            p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF,
+                               **event_extra})
+            self.assertEqual(p["state"], "escalated", event_extra)
+            self.assertFalse(p["reviews"]["0"]["trusted"], event_extra)
+
     def test_role_fallback_answer_is_never_trusted(self):
         reviewers = [{"kind": "role", "role": "reviewer"}]
         p, _ = PL.start(PL.new(spec(reviewers=reviewers, trusted_roles=["reviewer"])))

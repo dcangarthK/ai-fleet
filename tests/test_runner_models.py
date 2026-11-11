@@ -143,7 +143,7 @@ class RunnerModels(unittest.TestCase):
         self.stop()
         self.temp.cleanup()
 
-    def start(self, models_cfg=None, ram_gb=16):
+    def start(self, models_cfg=None, ram_gb=16, free_disk_gb=500):
         cfg = {"max_mode": "auto-edit", "allowed_roots": [], "gate_profiles": {},
                "models": {"remote_management": True, "disk_reserve_gb": 0, "ram_reserve_gb": 4, "max_loaded": 1}}
         if models_cfg is not None:
@@ -154,7 +154,8 @@ class RunnerModels(unittest.TestCase):
         env.update({"FLEET_DIR": str(self.fleet), "RUNNER_BIND": "127.0.0.1:%d" % self.port, "RUNNER_TOKEN": self.token,
                     "OLLAMA_URL": "http://127.0.0.1:%d" % self.ollama.server_address[1],
                     "OLLAMA_REGISTRY": "http://127.0.0.1:%d/v2" % self.registry.server_address[1],
-                    "FLEET_RAM_GB": str(ram_gb)})  # test hook: pretend this much RAM
+                    "FLEET_RAM_GB": str(ram_gb),  # test hooks: pretend this much RAM and free disk
+                    "FLEET_FREE_DISK_GB": str(free_disk_gb)})
         self.proc = subprocess.Popen([sys.executable, str(base.RUNNER)], env=env, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         end = time.time() + 10

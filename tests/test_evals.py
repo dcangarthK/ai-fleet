@@ -571,8 +571,10 @@ class GroundedRole(unittest.TestCase):
         grounded = [r for r in results if "grounded" in r.get("roles", {})]
         if not grounded:
             self.assertIn("No grounded evaluations have been recorded", E.grounding_report(results))
-        # LEADERBOARD.md carries a timestamp, so check its grounding table rather than the whole file.
+        import re as _re
+        strip = lambda text: _re.sub(r"Generated [^.]*\.", "Generated X.", text)  # noqa: E731
         leaderboard = (E.HERE / "results" / "LEADERBOARD.md").read_text()
+        self.assertEqual(strip(leaderboard), strip(E.leaderboard(results)))
         for result in grounded:
             decisions = E.signal_decisions(result["roles"]["grounded"])
             for signal in E.GROUNDING_SIGNALS:
@@ -580,6 +582,130 @@ class GroundedRole(unittest.TestCase):
         if not grounded:
             for signal in E.GROUNDING_SIGNALS:
                 self.assertIn(f"| — | {signal} | dropped |", leaderboard)
+
+
+def _mixed_results():
+    real = {"score": 60.0, "metrics": {"holdout": {"precision": 0.5, "recall": 0.4}}}
+    grounded = {"score": 70.0, "hallucination_rate": 0.1, "correct_abstain_rate": 0.9, "quote_validity": 1.0,
+                "cases": [], "signal_decisions": {}}
+    base = {"median_s": 1.0, "tokens_per_s": 5.0, "size_gb": 2.0, "fits_16gb": True}
+    return [
+        {"model": "only-real", "roles": {"reviewer_real": real}, **base},
+        {"model": "old-trio", "roles": {"coder": {"score": 50.0}, "reviewer": {"score": 40.0},
+                                        "fast": {"score": 30.0}}, **base},
+        {"model": "all-in", "roles": {"coder": {"score": 90.0}, "reviewer_real": real, "grounded": grounded}, **base},
+        {"model": "big-no-fit", "roles": {"coder": {"score": 99.0}}, **{**base, "fits_16gb": False}},
+        {"model": "no-meta", "roles": {"coder": {"score": 20.0, "think": False}}, "size_gb": None},
+    ]
+
+
+class ReportAndThinkTests(unittest.TestCase):
+    def test_leaderboard_lists_every_model_per_section_with_empty_cells(self):
+        board = E.leaderboard(_mixed_results())
+        section = board.split("## reviewer_real")[1].split("\n## ")[0]
+        self.assertIn("| only-real |", section)
+        self.assertIn("| all-in |", section)
+        self.assertNotIn("| old-trio |", section)
+        for model in ("only-real", "old-trio", "all-in"):
+            self.assertIn(f"| {model} |", board)
+        self.assertIn("| only-real |  |  |  | 60 |  |", board)  # empty cells for missing roles
+        self.assertIn("| all-in | 90 |", board)
+        grounding = board.split("## Grounding signal policy")[1]
+        self.assertIn("| all-in |", grounding)
+
+    def test_rows_sorted_by_mean_of_present_roles_then_role_count(self):
+        board = E.leaderboard(_mixed_results())
+        order = [m for m in ("big-no-fit", "all-in", "only-real", "old-trio", "no-meta")]
+        positions = [board.index(f"| {m} |") for m in order]
+        self.assertEqual(positions, sorted(positions))
+        two = {"model": "two", "roles": {"coder": {"score": 50.0}, "fast": {"score": 50.0}}}
+        one = {"model": "one", "roles": {"coder": {"score": 50.0}}}
+        tied = E.leaderboard([one, two])
+        self.assertLess(tied.index("| two |"), tied.index("| one |"))
+        self.assertIn("mean score", board)
+
+    def test_missing_fields_and_recommendations_only_name_models_with_the_role(self):
+        board = E.leaderboard(_mixed_results())
+        self.assertIn("| no-meta | 20 |", board)  # no median_s / fits_16gb: empty cells, no crash
+        self.assertIn("(last run)", board)
+        recs = board.split("## Recommendation")[1].split("Treat role scores")[0]
+        has = {}
+        for row in _mixed_results():
+            for role in row["roles"]:
+                has.setdefault(role, set()).add(row["model"])
+        names = {row["model"] for row in _mixed_results()}
+        for line in recs.splitlines():
+            if not line.startswith("- **"):
+                continue
+            role = line.split("**")[1]
+            for name in names - has[role]:
+                self.assertNotIn(name, line)
+        self.assertIn("- **coder**: big-no-fit (99%); on a 16GB laptop: all-in (90%)", recs)
+        self.assertIn("- **reviewer_real**: only-real (60%)", recs)
+
+    def test_think_is_stored_per_role_and_unknown_is_noted(self):
+        raw = json.dumps({"verdict": "approve", "issues": []})
+        with (mock.patch.object(E, "chat", return_value={"text": raw, "seconds": 0.1, "tokens_per_s": 1}),
+              mock.patch.object(E, "loaded_size_gb", return_value=1.0),
+              mock.patch.object(E, "unload")):
+            result = E.eval_model("http://unused", "model", ["reviewer_real"], 1)
+        self.assertIs(result["roles"]["reviewer_real"]["think"], False)
+        board = E.leaderboard(_mixed_results())
+        note = [x for x in board.splitlines() if x.startswith("think: unknown (before think=false) for:")]
+        self.assertEqual(len(note), 1)
+        self.assertIn("only-real", note[0])
+        self.assertNotIn("no-meta", note[0])  # its role result records think=false
+        self.assertIn("| no-meta | 20 |", board)
+        self.assertIn(" off |", board)
+
+    def test_report_only_requires_results_json(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with (mock.patch.object(sys, "argv", ["run_evals.py", "--report-only", "--out", tmp]),
+                  mock.patch("sys.stderr")):
+                with self.assertRaises(SystemExit):
+                    E.main()
+            self.assertFalse(Path(tmp, "LEADERBOARD.md").exists())
+
+    def test_models_still_required_without_report_only(self):
+        with (mock.patch.object(sys, "argv", ["run_evals.py"]), mock.patch("sys.stderr")):
+            with self.assertRaises(SystemExit):
+                E.main()
+
+    def test_merge_of_subset_run_keeps_other_roles(self):
+        old = {"model": "m", "evaluated_at": 1.0,
+               "roles": {"coder": {"score": 1.0}, "reviewer_real": {"score": 2.0}, "fast": {"score": 3.0}}}
+        new = {"model": "m", "evaluated_at": 2.0, "roles": {"fast": {"score": 9.0}}}
+        merged = E.merge_result(old, new)
+        self.assertEqual(set(merged["roles"]), {"coder", "reviewer_real", "fast"})
+        self.assertEqual(merged["roles"]["fast"]["score"], 9.0)
+
+    def test_report_only_makes_no_model_calls(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "results.json").write_text(json.dumps(_mixed_results()))
+            before = Path(tmp, "results.json").read_bytes()
+            with (mock.patch.object(E, "ollama", side_effect=AssertionError("model call")),
+                  mock.patch.object(E, "eval_model", side_effect=AssertionError("model call")),
+                  mock.patch.object(sys, "argv", ["run_evals.py", "--report-only", "--out", tmp]),
+                  mock.patch("builtins.print")):
+                self.assertEqual(E.main(), 0)
+            board = Path(tmp, "LEADERBOARD.md").read_text()
+            self.assertIn("| only-real |", board)
+            self.assertTrue(Path(tmp, "GROUNDING.md").exists())
+            self.assertEqual(Path(tmp, "results.json").read_bytes(), before)
+
+    def test_chat_sends_think_false_by_default(self):
+        captured = {}
+
+        def fake_ollama(base, path, body):
+            captured.update(body)
+            return {"message": {"content": "<think>x</think>ok"}}
+
+        with mock.patch.object(E, "ollama", side_effect=fake_ollama):
+            out = E.chat("http://unused", "qwen3:8b", "s", "p")
+        self.assertIs(captured["think"], False)
+        self.assertEqual(out["text"], "ok")
 
 
 if __name__ == "__main__":

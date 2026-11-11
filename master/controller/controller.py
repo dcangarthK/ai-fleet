@@ -1170,7 +1170,7 @@ async def model_call(role: str, spec: str, diff: str) -> str:
         + grounding.REVIEW_GUIDANCE + " Return JSON only: " + grounding.REVIEW_SCHEMA
     )
     headers = {"Authorization": f"Bearer {MASTER_KEY}"} if MASTER_KEY else {}
-    async with httpx.AsyncClient(trust_env=False, timeout=600) as client:
+    async with httpx.AsyncClient(trust_env=False, timeout=REVIEW_TIMEOUT) as client:
         response = await client.post(f"{LITELLM_URL}/v1/chat/completions", headers=headers, json={
             "model": role, "temperature": 0.2, "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": system},
@@ -1180,10 +1180,32 @@ async def model_call(role: str, spec: str, diff: str) -> str:
         return response.json()["choices"][0]["message"]["content"] or ""
 
 
+REVIEW_TIMEOUT = float(os.environ.get("FLEET_REVIEW_TIMEOUT", "1200"))
+
+
 async def pipeline_model_call(role: str, spec: str, diff: str) -> str:
     """Named pipeline seam; patch this or ``model_call`` in controller tests."""
     result = model_call(role, spec, diff)
     return await result if inspect.isawaitable(result) else result
+
+
+def role_fallback(role: str) -> str | None:
+    with db() as c:
+        row = c.execute("SELECT fallback FROM roles WHERE name=?", (role,)).fetchone()
+    return row["fallback"] if row and row["fallback"] else None
+
+
+async def role_review(role: str, spec: str, diff: str) -> tuple[str, str | None]:
+    """Ask a role for a review; on an error or timeout try its fallback once. Returns (raw, reason-if-failed)."""
+    reasons = []
+    for name in dict.fromkeys(r for r in (role, role_fallback(role)) if r):
+        try:
+            result = pipeline_model_call(name, spec, diff)
+            raw = await result if inspect.isawaitable(result) else result
+            return raw, (f"answered by fallback role {name} after: {reasons[0]}" if reasons else None)
+        except Exception as exc:  # noqa: BLE001 - any failure means "try the fallback, then give up"
+            reasons.append(f"{name}: {exc.__class__.__name__}{(': ' + str(exc)[:120]) if str(exc) else ''}")
+    return "", "model call failed (" + "; ".join(reasons) + ")"
 
 
 def review_prompt(spec: str, diff: str, branch: str | None = None) -> str:
@@ -1233,13 +1255,9 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
             reviewer = p["reviewers"][index]
             diff = await _pipeline_diff(p)
             if reviewer["kind"] == "role":
-                try:
-                    result = pipeline_model_call(reviewer["role"], p["spec"], diff)
-                    raw = await result if inspect.isawaitable(result) else result
-                except Exception:
-                    raw = ""
+                raw, reason = await role_review(reviewer["role"], p["spec"], diff)
                 p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
-                                                       "raw": raw, "diff": diff})
+                                                       "raw": raw, "diff": diff, "reason": reason})
             else:
                 builder = tasks.get_task(p["build_task"])
                 try:
@@ -1252,9 +1270,9 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
                     ))
                     p["reviews"][str(index)]["task_id"] = review_task["id"]
                     save_pipeline(p)
-                except HTTPException:
-                    p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
-                                                           "raw": "", "diff": diff})
+                except HTTPException as exc:
+                    p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
+                                                           "reason": f"{reviewer['agent']} task not started: {exc.detail}"})
     return p
 
 
@@ -1307,10 +1325,15 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 save_pipeline(p)
                 _pipeline_events(p, before)
                 return
-            if review_task["state"] in ("review", "failed", "interrupted"):
+            # "blocked" counts as finished too: a read-only reviewer that hit a denied tool still has its answer.
+            if review_task["state"] in ("review", "failed", "interrupted", "blocked"):
+                reason = None
+                if review_task["state"] != "review":
+                    reason = f"{reviewer['agent']} review task {review_task['state']}" + (
+                        f": {review_task['error']}" if review_task.get("error") else "")
                 p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
                                                        "raw": review_task.get("result") or "", "diff": diff,
-                                                       "task_id": review_task["id"]})
+                                                       "task_id": review_task["id"], "reason": reason})
 
 
 async def pipeline_loop() -> None:
@@ -1373,6 +1396,14 @@ def list_pipelines() -> list[dict]:
 @app.get("/api/pipelines/{pipeline_id}")
 def read_pipeline(pipeline_id: str) -> dict:
     return get_pipeline(pipeline_id)
+
+
+@app.post("/api/pipelines/{pipeline_id}/retry")
+async def retry_pipeline(pipeline_id: str) -> dict:
+    """Run this round's reviews again after an escalation (e.g. a reviewer was offline or out of battery)."""
+    if get_pipeline(pipeline_id)["state"] != "escalated":
+        raise HTTPException(409, "only an escalated pipeline can retry its reviews")
+    return await advance_pipeline(pipeline_id, {"type": "retry"})
 
 
 @app.post("/api/pipelines/{pipeline_id}/cancel")

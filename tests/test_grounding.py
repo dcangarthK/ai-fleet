@@ -99,3 +99,13 @@ class CheckReview(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyFix(unittest.TestCase):
+    def test_empty_fix_is_not_an_identical_fix_even_with_blank_diff_lines(self):
+        import json as _json
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n def f():\n \n-    return 1\n+    return 2\n"
+        raw = _json.dumps({"verdict": "request_changes", "issues": [{"severity": "high", "file": "x.py",
+            "problem": "wrong value", "evidence": "return 2", "expected": "1", "actual": "2", "fix": ""}]})
+        r = grounding.check_review(raw, diff)
+        self.assertEqual((r["status"], len(r["issues"]), r["identical_fix"]), ("valid", 1, 0))

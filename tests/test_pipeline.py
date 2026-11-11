@@ -139,6 +139,33 @@ class Machine(unittest.TestCase):
         p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("abstain"), "diff": DIFF})
         self.assertEqual(p["state"], "ready")
 
+    def test_reasons_for_unusable_reviews_are_kept(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "", "diff": DIFF, "reason": "model call failed: ReadTimeout"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": "", "diff": DIFF, "reason": "master: on battery (28%)"})
+        self.assertEqual(p["state"], "escalated")
+        self.assertEqual(p["reviews"]["0"]["reason"], "model call failed: ReadTimeout")
+        self.assertIn("on battery (28%)", p["history"][-1]["note"])
+        self.assertIn("ReadTimeout", p["history"][-1]["note"])
+
+    def test_escalated_pipeline_can_retry_its_reviews(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "", "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": "", "diff": DIFF})
+        self.assertEqual(p["state"], "escalated")
+        p, actions = PL.step(p, {"type": "retry"})
+        self.assertEqual(p["state"], "reviewing")
+        self.assertEqual(actions, [{"do": "spawn_review", "reviewer": 0}, {"do": "spawn_review", "reviewer": 1}])
+        self.assertTrue(all(r["status"] == "pending" for r in p["reviews"].values()))
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+        # Only an escalated pipeline can be retried.
+        q, actions = PL.step(PL.start(PL.new(spec()))[0], {"type": "retry"})
+        self.assertEqual((q["state"], actions), ("building", []))
+
     def test_build_failures_and_cancel(self):
         p, _ = PL.start(PL.new(spec()))
         p, _ = PL.step(p, {"type": "build", "state": "failed"})

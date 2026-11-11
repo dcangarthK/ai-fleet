@@ -83,9 +83,15 @@ def _resolution_text(issues: list[dict]) -> str:
 def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     """Apply one event and return the new state plus controller actions."""
     p = copy.deepcopy(pipeline)
+    kind = event.get("type")
+    if kind == "retry" and p.get("state") == "escalated":
+        # A person decided to try the reviews of this round again (e.g. after plugging in or fixing a model).
+        p["state"] = "reviewing"
+        p["reviews"] = {str(i): {"status": "pending"} for i in range(len(p["reviewers"]))}
+        _history(p, "reviewing", note="reviews retried")
+        return p, [{"do": "spawn_review", "reviewer": i} for i in range(len(p["reviewers"]))]
     if p.get("state") in TERMINAL:
         return p, []
-    kind = event.get("type")
     if kind == "cancel":
         p["state"] = "cancelled"
         _history(p, "cancelled", note="cancelled by user")
@@ -112,6 +118,8 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     parsed = parse_review(event.get("raw", ""), event.get("diff", ""))
     if event.get("task_id"):
         parsed["task_id"] = event["task_id"]
+    if event.get("reason"):
+        parsed["reason"] = str(event["reason"])[:300]
     p["reviews"][key] = parsed
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
@@ -121,8 +129,9 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     identical_fix = sum(review.get("identical_fix", 0) for review in p["reviews"].values())
     if not valid:
         p["state"] = "escalated"
+        reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
         _history(p, "escalated", unsupported=unsupported, identical_fix=identical_fix,
-                 note="all reviewers returned invalid reviews")
+                 note="no usable review" + (f" ({reasons})" if reasons else " (all replies were invalid)"))
         return p, []
     actionable = []
     seen = set()

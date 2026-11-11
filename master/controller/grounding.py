@@ -99,7 +99,7 @@ def check_review(raw_text: str, diff: str) -> dict:
             unsupported += 1
             continue
         fix = _normalise(issue["fix"])
-        if fix == evidence or fix in existing_lines:
+        if fix and (fix == evidence or fix in existing_lines):  # an empty fix is just "no suggestion"
             identical_fix += 1
             continue
         supported.append(issue)

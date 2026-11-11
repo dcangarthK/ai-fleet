@@ -145,6 +145,7 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const [builder, setBuilder] = useState("codex");
   const [reviewers, setReviewers] = useState<string[]>(["role:reviewer", "agent:claude"]);
   const [rounds, setRounds] = useState(3);
+  const [bypass, setBypass] = useState(false);
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
@@ -163,7 +164,7 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
   async function submit(e: FormEvent) {
     e.preventDefault();
     const body = {
-      title, spec, repo: repo || null, gate: gate || null, mode: "auto-edit", max_rounds: rounds,
+      title, spec, repo: repo || null, gate: gate || null, mode: "auto-edit", max_rounds: rounds, bypass,
       builder: { agent: builder },
       reviewers: reviewers.filter((r) => r !== `agent:${builder}`).map((r) => {
         const [kind, name] = r.split(":");
@@ -208,6 +209,10 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
             </label>
           ))}
         </fieldset>
+        <label className="row small" style={{ gap: 8 }}>
+          <input type="checkbox" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />
+          <span>Let the builder skip permission prompts (full mode). Reviewers stay read-only.</span>
+        </label>
         <div className="row">
           <button className="primary" disabled={busy || !reviewers.filter((r) => r !== `agent:${builder}`).length}>Start pipeline</button>
           <span className="small quiet">Review issues must quote the diff; claims that don't are dropped.</span>

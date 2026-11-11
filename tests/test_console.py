@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 TMP = Path(tempfile.mkdtemp(prefix="fleet-console-"))
+(TMP / "no-plugins").mkdir(exist_ok=True)
+os.environ.setdefault("FLEET_PLUGINS_DIR", str(TMP / "no-plugins"))
 os.environ.setdefault("FLEET_DB", str(TMP / "fleet.db"))
 os.environ.setdefault("TAILSCALE_BIN", "/usr/bin/false")
 os.environ.setdefault("LITELLM_MASTER_KEY", "")

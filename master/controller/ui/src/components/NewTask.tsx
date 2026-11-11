@@ -17,6 +17,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
   const [repo, setRepo] = useState("");
   const [gate, setGate] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [bypass, setBypass] = useState(false);
 
   useEffect(() => {
     const d = ref.current;
@@ -32,7 +33,8 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const body: Record<string, string> = { agent, mode, prompt };
+    const body: Record<string, string | boolean> = { agent, mode, prompt };
+    if (bypass && agent !== "ollama") body.trusted_bypass = true;
     if (node) body.node = node;
     if (repo.trim()) body.repo = repo.trim();
     if (gate.trim()) body.gate = gate.trim();
@@ -92,6 +94,12 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
         <label className="field">What should the agent do?
           <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} required />
         </label>
+        {agent !== "ollama" && (
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />
+            <span>Skip permission prompts: {agent === "claude" ? "Claude" : "Codex"} runs in full mode without asking. Needs the node to allow full mode and a policy that pre-approves it.</span>
+          </label>
+        )}
         <div className="row">
           <button className="primary" disabled={busy || !prompt.trim()}>Start task</button>
           <span className="quiet small">Supervised and full modes wait for your approval before they start.</span>

@@ -216,6 +216,7 @@ export interface PolicyBody {
   network?: { agents?: "allow" | "deny" };
   mode_ceiling?: Mode;
   limits?: { task_minutes?: number; max_concurrent?: number; agent_minutes_per_day?: number; quiet_hours?: string[] };
+  auto_approve?: { agents?: ("claude" | "codex")[]; full_mode?: boolean; denied_tools?: boolean };
 }
 
 export interface Versioned {

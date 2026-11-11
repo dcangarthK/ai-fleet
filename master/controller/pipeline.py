@@ -46,12 +46,17 @@ def new(spec: dict) -> dict:
     if (not isinstance(trusted_roles, list)
             or any(not isinstance(role, str) or not role for role in trusted_roles)):
         raise ValueError("trusted_roles must be a list of role names")
+    bypass = spec.get("bypass", False)
+    if not isinstance(bypass, bool):
+        raise ValueError("bypass must be a boolean")
+    if bypass and builder.get("agent") not in ("claude", "codex"):
+        raise ValueError("only a Claude or Codex builder can skip permission prompts")
     mode = spec.get("mode", "auto-edit")
     return {
         "title": spec.get("title", ""), "state": "building", "round": 1,
         "max_rounds": maximum, "spec": spec.get("spec", ""),
         "repo": spec.get("repo"), "gate": spec.get("gate"), "mode": mode,
-        "require_trusted": require_trusted, "trusted_roles": list(dict.fromkeys(trusted_roles)),
+        "require_trusted": require_trusted, "bypass": bypass, "trusted_roles": list(dict.fromkeys(trusted_roles)),
         "builder": copy.deepcopy(builder), "reviewers": clean_reviewers,
         "build_task": None, "reviews": {}, "history": [],
     }

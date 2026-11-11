@@ -9,7 +9,8 @@ import re
 MODES = ("read-only", "supervised", "auto-edit", "full")
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 QUIET_RE = re.compile(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$")
-TOP_KEYS = {"filesystem", "tools", "network", "mode_ceiling", "limits"}
+TOP_KEYS = {"filesystem", "tools", "network", "mode_ceiling", "limits", "auto_approve"}
+AUTO_APPROVE_AGENTS = {"claude", "codex"}
 NESTED_KEYS = {
     "filesystem": {"allowed_roots", "denied"},
     "tools": {"claude_allow", "claude_deny"},
@@ -66,6 +67,16 @@ def validate(body: dict) -> dict:
     network = body.get("network", {})
     if "agents" in network and network["agents"] not in ("allow", "deny"):
         raise ValueError("network.agents must be allow or deny")
+    if "auto_approve" in body:
+        value = body["auto_approve"]
+        if not isinstance(value, dict):
+            raise ValueError("auto_approve must be an object")
+        _unknown(value, {"agents", "full_mode", "denied_tools"}, "auto_approve")
+        if "agents" in value:
+            _string_list(value["agents"], "auto_approve.agents", lambda a: a in AUTO_APPROVE_AGENTS)
+        for flag in ("full_mode", "denied_tools"):
+            if flag in value and not isinstance(value[flag], bool):
+                raise ValueError(f"auto_approve.{flag} must be true or false")
     if "mode_ceiling" in body and body["mode_ceiling"] not in MODES:
         raise ValueError(f"mode_ceiling must be one of {list(MODES)}")
     limits = body.get("limits", {})
@@ -157,6 +168,21 @@ def merge(layers: list[dict]) -> dict:
         winner = denied[-1] if denied else networks[-1]
         _set_nested(result, "network", "agents", winner[1])
         sources["network.agents"] = winner[0]
+
+    # Auto-approval only ever narrows: agents intersect across the layers that set it; a flag is on only if
+    # every layer that mentions it says so.
+    approvals = [(label, body["auto_approve"]) for label, body in bodies if "auto_approve" in body]
+    if approvals:
+        merged = {}
+        lists = [set(a["agents"]) for _, a in approvals if "agents" in a]
+        if lists:
+            merged["agents"] = sorted(set.intersection(*lists))
+        for flag in ("full_mode", "denied_tools"):
+            values = [a[flag] for _, a in approvals if flag in a]
+            if values:
+                merged[flag] = all(values)
+        result["auto_approve"] = merged
+        sources["auto_approve"] = [label for label, _ in approvals]
 
     ceilings = [(label, body["mode_ceiling"]) for label, body in bodies if "mode_ceiling" in body]
     if ceilings:

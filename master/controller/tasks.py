@@ -417,8 +417,28 @@ async def poll_task(task_id: str) -> None:
             fields.update(close_run(task, agent_end))  # the gate's run time isn't agent time
         if new == "working":
             update(task_id, **fields)
-        else:
-            transition(task, {"working"}, new, **fields)
+        elif transition(task, {"working"}, new, **fields) and new == "blocked":
+            await auto_approve_denials(get_task(task_id))
+
+
+AUTO_APPROVE_ROUNDS = 3
+
+
+async def auto_approve_denials(task: dict) -> None:
+    """If the task's policy pre-approves denied tools for its agent, resume with them (a few rounds at most)."""
+    auto = (task.get("policy") or {}).get("auto_approve") or {}
+    if not (auto.get("denied_tools") and task["agent"] in (auto.get("agents") or [])):
+        return
+    if (task.get("auto_approvals") or 0) >= AUTO_APPROVE_ROUNDS:
+        emit(task["id"], "task.auto_approve_exhausted", {"title": task["title"], "rounds": AUTO_APPROVE_ROUNDS})
+        return
+    tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None, ""})
+    if not tools:
+        return
+    update(task["id"], auto_approvals=(task.get("auto_approvals") or 0) + 1)
+    emit(task["id"], "task.auto_approved", {"title": task["title"], "tools": tools, "agent": task["agent"]})
+    await resume(get_task(task["id"]), "Policy pre-approves the tools you were denied: " + ", ".join(tools)
+                 + ". Continue the task.", tools)
 
 
 async def poll_loop() -> None:
@@ -455,6 +475,7 @@ class TaskIn(BaseModel):
     role: str | None = None
     policy: dict | None = None
     skills: list[str] = Field(default_factory=list)
+    trusted_bypass: bool = False  # Claude/Codex: run in full mode without permission prompts
 
     @field_validator("prompt")
     @classmethod
@@ -493,6 +514,10 @@ async def create_task(t: TaskIn) -> dict:
         raise HTTPException(400, f"mode must be one of {MODES}")
     if t.agent == "ollama" and not t.model:
         raise HTTPException(400, "ollama tasks need a model")
+    if t.trusted_bypass:
+        if t.agent not in ("claude", "codex"):
+            raise HTTPException(400, "skipping permission prompts is only for Claude and Codex tasks")
+        t.mode = "full"
     if t.gate and rank(t.mode) < rank("auto-edit"):
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.parent_id:
@@ -509,15 +534,21 @@ async def create_task(t: TaskIn) -> dict:
     task_id = "t-" + secrets.token_hex(4)
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
-    state = "awaiting_approval" if t.mode in NEEDS_APPROVAL else "queued"
+    auto = (effective["policy"].get("auto_approve") or {})
+    pre_approved = t.agent in (auto.get("agents") or []) and bool(auto.get("full_mode"))
+    if t.trusted_bypass and not pre_approved:
+        raise HTTPException(403, f"policy doesn't let {t.agent} skip permission prompts here; turn on auto-approval "
+                                 "for it on the Policies page (and the node must allow full mode)")
+    state = "awaiting_approval" if t.mode in NEEDS_APPROVAL and not pre_approved else "queued"
     with db() as c:
         c.execute("""INSERT INTO tasks (id, parent_id, title, agent, model, prompt, mode, repo, worktree, gate,
-                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error, skills)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error, skills,
+                     trusted_bypass)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (task_id, t.parent_id, title, t.agent, t.model, t.prompt, t.mode, t.repo, int(t.worktree),
                    t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
                    effective["hash"], t.role, queued_reason if state == "queued" else None,
-                   json.dumps(effective["skills"])))
+                   json.dumps(effective["skills"]), int(t.trusted_bypass)))
         if t.model:
             c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
                       "(SELECT id FROM model_catalog WHERE reference=?)",

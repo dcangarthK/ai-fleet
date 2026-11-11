@@ -39,7 +39,8 @@ print("fake eval complete")
 FAKE_TS = TMP / "tailscale"
 FAKE_TS.write_text("#!/bin/sh\necho '{\"Peer\":{}}'\n")
 FAKE_TS.chmod(0o755)
-os.environ.update({"FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_TS),
+(TMP / "no-plugins").mkdir(exist_ok=True)  # never load the real notification plugin in tests
+os.environ.update({"FLEET_PLUGINS_DIR": str(TMP / "no-plugins"), "FLEET_DB": str(TMP / "fleet.db"), "TAILSCALE_BIN": str(FAKE_TS),
                    "FLEET_POLL_SECONDS": "0.3", "FLEET_TASK_POLL_SECONDS": "0.2",
                    "FLEET_PUBLIC_HOST": "master.tail.ts.net", "FLEET_PUBLIC_PORT": "8701", "LITELLM_MASTER_KEY": "",
                    "FLEET_SKILLS_DIR": str(SKILLS_DIR), "FLEET_EVAL_RESULTS": str(EVAL_RESULTS),
@@ -311,10 +312,82 @@ class ControllerTests(unittest.TestCase):
         events.PLUGINS.append({"name": "test", "events": {"task.awaiting_approval"},
                                "command": [sys.executable, str(script)]})
         try:
-            t = self.task(mode="supervised")
+            t = self.task(mode="supervised", title="Tidy the README")
             wait_for(lambda: out.exists() and t["id"] in out.read_text())
+            sent = [json.loads(line) for line in out.read_text().splitlines() if t["id"] in line][0]
+            self.assertEqual(sent["notification"]["title"], "Approval needed")
+            self.assertEqual(sent["notification"]["subtitle"], "Tidy the README")
+            self.assertIn("supervised mode", sent["notification"]["message"])
         finally:
             events.PLUGINS.pop()
+
+    def test_no_real_plugins_in_tests(self):
+        self.assertEqual([p for p in events.PLUGINS if p["name"] == "macos-notify"], [])
+
+    def test_notification_text(self):
+        d = events.describe
+        self.assertIsNone(d({"type": "task.state", "data": {}}))  # nothing meaningful: not shown
+        self.assertIsNone(d({"type": "task.working", "data": {"title": "x"}}))
+        self.assertEqual(d({"type": "pipeline.ready", "data": {"title": "G2"}})["title"], "Ready to merge")
+        esc = d({"type": "pipeline.escalated", "data": {"title": "G2", "note": "no trusted review"}})
+        self.assertEqual((esc["title"], esc["subtitle"], esc["message"]), ("Pipeline needs you", "G2", "no trusted review"))
+        self.assertIsNone(d({"type": "model.state", "data": {"state": "ready"}}))
+        self.assertIn("blocked", d({"type": "model.state", "data": {"state": "blocked", "model": "m", "node": "n"}})["title"])
+        self.assertEqual(d({"type": "notify.test", "data": {}})["subtitle"], "Test notification")
+
+    def test_repeated_notifications_are_dropped(self):
+        out = TMP / "plugin2.out"
+        script = TMP / "plug2.py"
+        script.write_text(f"import sys; open({str(out)!r}, 'a').write(sys.stdin.read() + '\\n')")
+        events.PLUGINS.append({"name": "test2", "events": {"pipeline.ready"}, "command": [sys.executable, str(script)]})
+        try:
+            for _ in range(3):
+                events.run_plugins({"id": 1, "ts": 0, "task_id": None, "type": "pipeline.ready", "data": {"title": "Same"}})
+            time.sleep(1)
+            self.assertEqual(len(out.read_text().splitlines()), 1)
+        finally:
+            events.PLUGINS.pop()
+
+    def test_trusted_bypass_needs_policy_and_auto_approves(self):
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)
+        self.assertEqual(r.status_code, 409, r.text)  # the node's ceiling doesn't allow full mode
+        self.assertIn("ceiling", r.text)
+        r = self.c.post("/api/tasks", json={"agent": "ollama", "model": "fake-model:1b", "prompt": "p",
+                                             "trusted_bypass": True}, headers=W)
+        self.assertEqual(r.status_code, 400)
+        old = FakeRunner.max_mode
+        FakeRunner.max_mode = "full"
+        self.c.post("/api/refresh", headers=W)
+        self.c.post("/api/nodes/master/ceiling", json={"mode": "full"}, headers=W)
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)
+        self.assertEqual(r.status_code, 403, r.text)  # ceiling allows it, but no policy pre-approves it
+        self.c.put("/api/policies/agent/claude", json={"body": {"auto_approve": {"agents": ["claude"], "full_mode": True}}}, headers=W)
+        try:
+            r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            t = r.json()
+            self.assertEqual(t["mode"], "full")
+            self.assertNotEqual(t["state"], "awaiting_approval")
+            sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == t["id"]][0]
+            self.assertEqual(sent["mode"], "full")
+        finally:
+            self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
+            self.c.post("/api/nodes/master/ceiling", json={"mode": "auto-edit"}, headers=W)
+            FakeRunner.max_mode = old
+            self.c.post("/api/refresh", headers=W)
+
+    def test_denied_tools_are_auto_approved_by_policy(self):
+        self.c.put("/api/policies/agent/claude", json={"body": {"auto_approve": {"agents": ["claude"], "denied_tools": True}}}, headers=W)
+        try:
+            t = self.task(title="needs bash")
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, denials=[{"tool_name": "Bash"}])
+            wait_for(lambda: [b for p_, b in FakeRunner.calls if p_ == f"/jobs/{t['id']}/message"])
+            msg = [b for p_, b in FakeRunner.calls if p_ == f"/jobs/{t['id']}/message"][0]
+            self.assertEqual(msg["allowed_tools"], ["Bash"])
+            types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
+            self.assertIn("task.auto_approved", types)
+        finally:
+            self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
 
     def test_validation_and_eligibility(self):
         bad = lambda body: self.c.post("/api/tasks", json=body, headers=W)  # noqa: E731

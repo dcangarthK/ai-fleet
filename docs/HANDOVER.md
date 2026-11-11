@@ -56,8 +56,8 @@ Fleet policy (`fleet/*`): `auto_approve {agents: [claude, codex], denied_tools: 
 persist for the task, cap 3 consecutive). Full-mode bypass exists but is **off** (needs policy `full_mode` + node ceiling full).
 Notifications: macOS plugin `master/plugins/macos-notify.py`; rules on Settings page; tests never load real plugins.
 
-Rebuild/redeploy after merging: `bash master/setup.sh --services-only` (never run the full setup.sh: it does
-`tailscale up --reset` and MCP registration). Rebuild the console bundle when `ui/src` changes:
+Rebuild/redeploy after merging: `bash master/setup.sh --services-only` (the full setup.sh also re-tags
+Tailscale, without `--reset` unless you pass `--reset-tailscale`, and re-registers the MCP servers). Rebuild the console bundle when `ui/src` changes:
 `cd master/controller/ui && npx vite build` (node_modules is a symlink to `~/ai-fleet-ui/master/controller/ui/node_modules`).
 
 ## 4a. Where the fleet runs, and how to start it

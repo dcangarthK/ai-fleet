@@ -1,3 +1,54 @@
+# Current state: 2026-11-12 00:50 SAST (read this first)
+
+**Repo:** `main` is the working branch, pushed by the owner to `github.com/dcangarthK/ai-fleet` over the SSH alias
+`github-personal`. The commit email is `dcankoolbye@gmail.com`. The orchestrator can't push; the owner pushes.
+
+**Merged and live:**
+- G1–G6 (grounding).
+- Task lineage.
+- Paid-model budget, Parts A and B: the Budget page, admission and limits.
+- Part C: account pools, limit handoff, auto-resume.
+- Part D: the Live page (`/app/live`), heartbeats, failover, presence, account room.
+- Laptop 2 onboarding fixes, plus `docs/LAPTOP2-JOIN.md`.
+- The evals leaderboard and `think: false` fix.
+- Live alerts showing only what still needs attention.
+
+**Owner rules:** CLAUDE.md, including the "Paid-model budget" section.
+- Rule 0: Fable only reviews; it never builds, fixes or tests.
+- Codex keeps the owner's personal profile.
+- Cheapest capable model first; use local models for drafts, summaries and commit messages.
+
+**Accounts:**
+- **Fleet Claude:** the owner's personal account, used by the runner. Its 5-hour limit resets often.
+- **This orchestrator session's account ("spare"):** control plane and standby. It is not yet a registered fleet
+  profile.
+- **Codex:** the owner's personal profile.
+
+The Live and Budget pages show limits. The controller queues work for a limited account automatically.
+
+**In flight overnight (watch `~/.ai-fleet/lead-status.md` and `~/.ai-fleet/overnight-report.md`):**
+- `t-939f6b2a`: Codex (medium effort) scoping networking, writing `docs/SPEC-networking.md` in its worktree. Inputs
+  are `docs/research/`.
+- `t-5c1fc50f`: fleet Sonnet, three Part D test follow-ups. Queued until the fleet reset.
+- `t-3a9b8dbd`: the overnight lead on fleet Sonnet. It reviews the networking scope (Sonnet), builds it in phases,
+  gets a Codex security review and a Fable final review, merges into main, updates this handover, and writes the
+  overnight report. Queued until the fleet reset, then it starts automatically.
+
+**If you're taking over:**
+1. Read the status file.
+2. `GET /api/live` and `/api/tasks?limit=20`.
+3. Resume a stopped lead with `POST /api/tasks/<id>/message`, or start a new one with the same brief, which is in the
+   lead task's `prompt`.
+4. Send the presence headers on controller calls: `X-Fleet-Session`, `X-Fleet-Model`.
+
+**Owner actions pending:**
+- Register the spare account as a runner profile.
+- Install Tailscale on the master and join Laptop 2 (`docs/LAPTOP2-JOIN.md`).
+- Push `main` after overnight merges.
+- Optionally apply the leftover G1 patch at `~/ai-fleet-leftover-g1-t-59b834a4.patch`.
+
+---
+
 # Handover: ai-fleet, 2026-11-11 10:35 SAST
 
 For the next Claude session (any account) picking up from Claude Opus 5.5's session. Read this file first, then

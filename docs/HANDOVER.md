@@ -60,6 +60,86 @@ Rebuild/redeploy after merging: `bash master/setup.sh --services-only` (never ru
 `tailscale up --reset` and MCP registration). Rebuild the console bundle when `ui/src` changes:
 `cd master/controller/ui && npx vite build` (node_modules is a symlink to `~/ai-fleet-ui/master/controller/ui/node_modules`).
 
+## 4a. Where the fleet runs, and how to start it
+
+**Where:** everything runs on the master Mac (`duncansynthesis.co.za`'s MacBook, macOS, 48 GB), under the owner's
+user account. Nothing runs in the cloud. Files:
+
+| Path | What |
+|---|---|
+| `~/ai-fleet` | The repo; the controller and runner run **from this checkout** (merging into it changes the live code after a restart) |
+| `~/ai-fleet/master/controller/` | Controller (`controller.py`, `tasks.py`, …), console source `ui/src`, built console `ui/dist` |
+| `~/ai-fleet/master/controller/fleet.db` | Controller database (tasks, pipelines, policies, catalog, skills…) |
+| `~/ai-fleet/master/litellm/` | LiteLLM `docker-compose.yml`, `.env` (secrets, mode 0600: never print or send it) |
+| `~/ai-fleet/nodes/runner.py` | Agent runner (the master runs it directly; other nodes get it via `nodes/onboard.sh`) |
+| `~/.ai-fleet/` | Runner state: `runner.json` (node policy), `runner.token` (secret), `jobs/`, `operations/`, `worktrees/<task-id>` (each task's git worktree), `audit.jsonl` |
+| `~/.claude-fleet/` | The fleet's own Claude Code profile (login) |
+| `~/Library/LaunchAgents/local.ai-fleet.{controller,runner}.plist` | Login services |
+| `~/Library/Logs/ai-fleet-controller.log`, `ai-fleet-runner.log` | Logs |
+
+**Start it up** (after a reboot or if anything is down), in this order:
+
+```bash
+# 1. Docker (for LiteLLM) and the gateway containers
+open -a Docker            # wait until `docker info` works
+cd ~/ai-fleet/master/litellm && docker compose start
+curl -s http://127.0.0.1:4000/health/liveliness          # → "I'm alive!"
+
+# 2. Ollama (login service)
+brew services start ollama
+curl -s http://127.0.0.1:11434/api/version
+
+# 3. Controller + runner (login services; this also rewrites their launchd files and registers the runner token)
+cd ~/ai-fleet && bash master/setup.sh --services-only
+curl -s http://127.0.0.1:8700/api/me                      # → {"scope":"admin","label":"local",...}
+curl -s http://127.0.0.1:8700/api/fleet | python3 -c "import json,sys; n=json.load(sys.stdin)['nodes'][0]; print(n['id'], n['runner_ok'], n['healthy'], n['runner']['agents'])"
+```
+
+Restart just one piece: `launchctl kickstart -k gui/$(id -u)/local.ai-fleet.controller` (or `.runner`).
+Stop: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.ai-fleet.controller.plist` (same for runner);
+`docker compose stop` in `master/litellm`; `brew services stop ollama`.
+Console: http://127.0.0.1:8700/app/ (Overview, Tasks, Pipelines, Models, Roles, Nodes, Policies, Skills, Evals,
+Activity, Settings). If `~/.cache` or `~/.docker` lose their execute bit again (seen twice), `chmod u+x` them.
+Laptop power: Claude/Codex tasks are refused on battery below `power.min_battery_pct` (set to 0 on the master).
+
+## 4b. Delegating the remaining work (copy-paste starters)
+
+Each of these hands the next step to the fleet; read the result, then pass it on (review → fix → merge).
+Replace nothing except where marked. Claude-account tasks work again after **2:30 PM SAST**; Codex after **1 PM**.
+
+```bash
+B=http://127.0.0.1:8700; H=(-H 'Content-Type: application/json' -H 'X-Fleet: 1'); R=/Users/duncansynthesis.co.za/ai-fleet
+
+# A) Resend the fleet-fixes batch to its Claude builder (same worktree, same brief)
+curl -s -X POST $B/api/tasks/t-c0998ec1/message "${H[@]}" -d '{"text":"Your previous run stopped at the account usage limit before making changes. Do the four fixes from your original brief now, then run bash scripts/gate.sh twice; both must pass."}'
+
+# B) Review G4 (built by Claude). After 1 PM prefer Codex; otherwise Fable 5.1.
+#    Build the prompt with python (brief + diff + schema) exactly as section 5 describes, then:
+curl -s -X POST $B/api/tasks "${H[@]}" -d '{"agent":"codex","mode":"read-only","worktree":false,"repo":"'$R'","node":"master","title":"Review: G4","prompt":"<brief + /api/tasks/t-002eb9b6/diff + JSON schema; also tell it the full changed files are under /Users/duncansynthesis.co.za/.ai-fleet/worktrees/t-002eb9b6>"}'
+
+# C) Restart G6 as a new pipeline from the old record's spec
+python3 - <<'EOF'
+import json, urllib.request
+B = "http://127.0.0.1:8700"
+old = json.load(urllib.request.urlopen(B + "/api/pipelines/p-f7c0f0c9"))
+body = {k: old[k] for k in ("title", "spec", "repo", "gate", "mode", "max_rounds")} | {
+    "builder": {"agent": "claude"}, "reviewers": [{"kind": "agent", "agent": "codex"}]}
+r = urllib.request.Request(B + "/api/pipelines", data=json.dumps(body).encode(), method="POST",
+                           headers={"Content-Type": "application/json", "X-Fleet": "1"})
+print(json.load(urllib.request.urlopen(r))["id"])
+EOF
+
+# D) After fixes (A) are reviewed and merged: finish the G3 benchmark and commit results (Claude task)
+curl -s -X POST $B/api/tasks "${H[@]}" -d '{"agent":"claude","mode":"auto-edit","worktree":false,"repo":"'$R'","node":"master","title":"Finish G3 benchmark","prompt":"Run python3 evals/run_evals.py --models glm-4.7-flash:latest --roles grounded in this repo (qwen2.5-coder:14b and phi4:14b results are already in evals/results, uncommitted). Check GROUNDING.md and LEADERBOARD.md were regenerated by code, run bash scripts/gate.sh (must pass), then git add evals/results and commit with message \"G3 benchmark: grounded eval on local models\" and the Co-Authored-By trailer. Report the table."}'
+
+# E) Then the G2 reviewer benchmark (Claude task), same shape as D with:
+#    python3 evals/run_evals.py --models qwen2.5-coder:14b,phi4:14b,glm-4.7-flash:latest,fleet-glm-4.7-flash-latest --roles reviewer_real
+```
+
+Watching work without polling by hand: run a background loop with `sleep 30` inside that reads
+`/api/pipelines/<id>` or `/api/tasks/<id>` and exits when the state leaves `building/reviewing/working`.
+Merges after an approval: a Claude task with the exact merge steps in section 5, then restart the controller.
+
 ## 5. How to delegate (the orchestrator's toolkit)
 
 All via the controller API on the local port (send header `X-Fleet: 1` on writes):

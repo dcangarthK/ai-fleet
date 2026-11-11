@@ -1370,7 +1370,7 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
                     review_task = await tasks.create_task(tasks.TaskIn(
                         agent=reviewer["agent"], model=reviewer.get("model"), prompt=review_prompt(p["spec"], diff, builder.get("branch")),
                         title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"),
-                        worktree=False, node=builder["node_id"], parent_id=p["build_task"],
+                        worktree=False, node=builder["node_id"], parent_id=p["build_task"], link="review",
                     ))
                     p["reviews"][str(index)]["task_id"] = review_task["id"]
                     save_pipeline(p)
@@ -1479,26 +1479,29 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
     identifier, now = "p-" + secrets.token_hex(4), time.time()
     p, actions = pipeline_machine.start(p)
     p |= {"id": identifier, "created_at": now, "updated_at": now}
-    with db() as c:
-        c.execute("""INSERT INTO pipelines
-            (id,title,state,round,max_rounds,spec,repo,gate,mode,builder,reviewers,build_task,reviews,history,
-             created_at,updated_at,require_trusted,trusted_roles,bypass)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                p["id"], p["title"], p["state"], p["round"], p["max_rounds"], p["spec"], p.get("repo"),
-                p.get("gate"), p["mode"], json.dumps(p["builder"]), json.dumps(p["reviewers"]), p.get("build_task"),
-                json.dumps(p["reviews"]), json.dumps(p["history"]), now, now, int(p["require_trusted"]),
-                json.dumps(p["trusted_roles"]), int(p.get("bypass", False)),
-            ))
-    _pipeline_events(p, 0)
-    try:
-        p = await _pipeline_actions(p, actions)
-    except HTTPException:
-        before = len(p["history"])
-        p["state"] = "failed"
-        p["history"].append({"round": p["round"], "state": "failed", "at": time.time(),
-                             "note": "builder task could not start"})
-        save_pipeline(p)
-        _pipeline_events(p, before)
+    # Hold the pipeline's lock from the insert: otherwise the poll loop can see the new row (building, no build
+    # task yet) and spawn a second builder while this request spawns the first.
+    async with _pipeline_locks.setdefault(identifier, asyncio.Lock()):
+        with db() as c:
+            c.execute("""INSERT INTO pipelines
+                (id,title,state,round,max_rounds,spec,repo,gate,mode,builder,reviewers,build_task,reviews,history,
+                 created_at,updated_at,require_trusted,trusted_roles,bypass)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    p["id"], p["title"], p["state"], p["round"], p["max_rounds"], p["spec"], p.get("repo"),
+                    p.get("gate"), p["mode"], json.dumps(p["builder"]), json.dumps(p["reviewers"]), p.get("build_task"),
+                    json.dumps(p["reviews"]), json.dumps(p["history"]), now, now, int(p["require_trusted"]),
+                    json.dumps(p["trusted_roles"]), int(p.get("bypass", False)),
+                ))
+        _pipeline_events(p, 0)
+        try:
+            p = await _pipeline_actions(p, actions)
+        except HTTPException:
+            before = len(p["history"])
+            p["state"] = "failed"
+            p["history"].append({"round": p["round"], "state": "failed", "at": time.time(),
+                                 "note": "builder task could not start"})
+            save_pipeline(p)
+            _pipeline_events(p, before)
     return p
 
 

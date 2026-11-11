@@ -159,6 +159,15 @@ export interface Task {
   instructions?: string | null;
   policy?: PolicyBody | null;
   policy_hash?: string | null;
+  // Lineage (absent on older controllers).
+  link?: "retry" | "resume" | "review" | "fix" | "merge" | "check" | null;
+  failure_reason?: "limit" | "gate_failed" | "denied" | "error" | "interrupted" | "cancelled" | null;
+  resets_at?: number | null;
+  resolution?: { kind: "resolved_by" | "dismissed" | "done_elsewhere"; task_id?: string; title?: string; commit?: string; by?: string; note?: string; at: number } | null;
+  outcome?: { kind: "merged" | "done" | "abandoned"; commit?: string; at: number } | null;
+  hidden?: boolean;
+  display?: { tone: "running" | "ok" | "paused" | "attention" | "resolved" | "muted"; label: string };
+  root_id?: string;
 }
 
 export interface UsageRow {

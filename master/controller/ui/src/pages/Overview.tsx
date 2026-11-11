@@ -1,9 +1,10 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { get, type CallOutcome, type CallStat } from "../lib/api";
-import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel } from "../components/bits";
+import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel, StatusPill } from "../components/bits";
 import { taskAction, useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
-import { ago, denialTools, duration, needsYou, nodeName, nodeSignal, pctText } from "../lib/format";
+import { ago, denialTools, duration, nodeName, nodeSignal, pctText } from "../lib/format";
+import { capped, displayOf, overviewSets, readyForReview } from "../lib/lineage";
 
 // Outcome counts only exist for grounded calls (G4); older controllers omit them.
 const cnt = (c: CallStat, k: CallOutcome) => (c.grounded ? (c.outcomes?.[k] ?? 0) : "—");
@@ -18,10 +19,9 @@ export function OverviewPage() {
 
   const nodes = fleet.data?.nodes ?? [];
   const all = tasks.data ?? [];
-  const waiting = all.filter(needsYou);
-  const working = all.filter((t) => t.state === "working" || t.state === "starting");
-  const review = all.filter((t) => t.state === "review");
-  const problems = all.filter((t) => t.state === "failed" || t.state === "interrupted");
+  const { working, attention: waiting, paused } = overviewSets(all);
+  const { shown: waitingShown, more: waitingMore } = capped(waiting);
+  const review = readyForReview(all);
   const up = nodes.filter((n) => nodeSignal(n) === "up").length;
   const routed = (fleet.data?.assignments ?? []).filter((a) => {
     if (a.routed != null) return Boolean(a.routed);
@@ -30,7 +30,7 @@ export function OverviewPage() {
   }).length;
   const calls = useQuery({ queryKey: ["calls"], queryFn: () => get<CallStat[]>("/api/usage/calls?days=7"), retry: 0 });
   const agentTime = (usage.data ?? []).reduce((s, r) => s + (r.seconds || 0), 0);
-  const open = (id: string) => nav(`/tasks?tab=all&task=${encodeURIComponent(id)}`);
+  const open = (id: string) => nav(`/tasks?view=all&tab=all&task=${encodeURIComponent(id)}`);
 
   return (
     <>
@@ -41,32 +41,37 @@ export function OverviewPage() {
       <div className="stats" aria-label="Fleet summary">
         <div className="stat"><b>{up}/{nodes.length}</b><span>nodes up</span></div>
         <div className="stat"><b>{working.length}</b><span>tasks working</span></div>
-        <div className="stat"><b className={waiting.length ? "tone-warn" : ""}>{waiting.length}</b><span>need you</span></div>
+        <div className="stat"><b className={waiting.length ? "tone-warn" : ""}>{waiting.length}</b><span>need attention</span></div>
         <div className="stat"><b>{review.length}</b><span>ready for review</span></div>
         <div className="stat"><b>{routed}/{fleet.data?.assignments.length ?? 0}</b><span>role routes live</span></div>
         <div className="stat"><b>{duration(agentTime)}</b><span>agent time today</span></div>
       </div>
 
-      <Section title="Needs you" aside={waiting.length ? `${waiting.length} waiting` : undefined}>
+      <Section title="Needs attention" aside={waiting.length ? `${waiting.length} waiting` : undefined}>
         {waiting.length === 0 ? (
-          <p className="quiet">Nothing is waiting on you.</p>
+          <p className="quiet">Nothing needs you.</p>
         ) : (
           <div className="asks">
-            {waiting.map((t) => (
+            {waitingShown.map((t) => (
               <article className="ask" key={t.id}>
                 <h3>{t.title}</h3>
                 <p>
                   {t.state === "awaiting_approval"
                     ? <>Wants to start in <b>{t.mode}</b> mode on {nodeName(nodes, t.node_id)}.</>
-                    : <>Stopped after being denied {denialTools(t).map((x) => <span className="tag" key={x}>{x}</span>)}</>}
+                    : t.state === "blocked"
+                      ? <>Stopped after being denied {denialTools(t).map((x) => <span className="tag" key={x}>{x}</span>)}</>
+                      : <><StatusPill display={displayOf(t)} />{t.error && <span className="quiet"> {t.error}</span>}</>}
                 </p>
                 <div className="row">
-                  {can.admin && <button className="primary" disabled={busy} onClick={() => run(() => taskAction(t.id, "approve"))}>Approve</button>}
-                  {can.admin && <button className="danger" disabled={busy} onClick={() => run(() => taskAction(t.id, "reject"))}>Reject</button>}
+                  {can.admin && (t.state === "awaiting_approval" || t.state === "blocked") && <button className="primary" disabled={busy} onClick={() => run(() => taskAction(t.id, "approve"))}>Approve</button>}
+                  {can.admin && (t.state === "awaiting_approval" || t.state === "blocked") && <button className="danger" disabled={busy} onClick={() => run(() => taskAction(t.id, "reject"))}>Reject</button>}
                   <button className="ghost" onClick={() => open(t.id)}>Details</button>
                 </div>
               </article>
             ))}
+            {waitingMore > 0 && (
+              <p className="small"><Link to="/tasks?view=all&tab=attention">{waitingMore} more needing attention</Link></p>
+            )}
           </div>
         )}
       </Section>
@@ -76,9 +81,9 @@ export function OverviewPage() {
           <table>
             <thead><tr><th>Task</th><th>State</th><th className="hide-sm">Node</th><th>Started</th></tr></thead>
             <tbody>
-              {[...working, ...problems.slice(0, 5)].map((t) => (
+              {working.map((t) => (
                 <tr key={t.id} className="click" onClick={() => open(t.id)}>
-                  <td><Link to={`/tasks?tab=all&task=${encodeURIComponent(t.id)}`} onClick={(e) => e.stopPropagation()}><b>{t.title}</b></Link><div className="sub">{t.agent}{t.model && ` (${t.model})`}</div></td>
+                  <td><Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(t.id)}`} onClick={(e) => e.stopPropagation()}><b>{t.title}</b></Link><div className="sub">{t.agent}{t.model && ` (${t.model})`}</div></td>
                   <td><StateLabel state={t.state} /></td>
                   <td className="hide-sm">{nodeName(nodes, t.node_id)}</td>
                   <td className="quiet small">{ago(t.started_at ?? t.created_at)}</td>
@@ -86,8 +91,16 @@ export function OverviewPage() {
               ))}
             </tbody>
           </table>
-          {working.length + problems.length === 0 && <div className="empty">No tasks running and no failures. <Link to="/tasks">Start a task</Link>.</div>}
+          {working.length === 0 && <div className="empty">No tasks running. <Link to="/tasks">Start a task</Link>.</div>}
         </div>
+        {paused.length > 0 && (
+          <p className="paused-line small">
+            <b className="tone-warn">Paused</b>
+            {paused.map((t) => (
+              <span key={t.id}> · <Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(t.id)}`}>{t.title}</Link> <span className="quiet">{displayOf(t).label.replace(/^Paused: /, "")}</span></span>
+            ))}
+          </p>
+        )}
       </Section>
 
       {(calls.data ?? []).length > 0 && (

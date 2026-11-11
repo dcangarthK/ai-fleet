@@ -179,6 +179,16 @@ td .sub { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
 .tone-info { color: var(--info); }
 .tone-accent { color: var(--action); }
 .tone-quiet { color: var(--ink-3); }
+.state.resolved::before { display: none; }
+.paused-line { margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 0 4px; }
+.view-switch { justify-content: space-between; align-items: center; padding-right: 12px; border-bottom: 1px solid var(--line); }
+.view-switch .tabs { border-bottom: 0; }
+.view-switch .check { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.timeline-row td { background: var(--surface-2); }
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; }
+.timeline li:not(:last-child)::after { content: "→"; color: var(--ink-3); margin: 0 4px; }
+.timeline .attempt { display: inline-flex; gap: 8px; align-items: center; max-width: 100%; text-align: left; }
+.timeline .attempt.selected { outline: 2px solid var(--action); }
 
 .tag {
   display: inline-block; font: 12px/1.5 var(--mono); padding: 0 6px; margin: 0 4px 4px 0;

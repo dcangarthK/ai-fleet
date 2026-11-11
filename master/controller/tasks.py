@@ -26,7 +26,11 @@ from pydantic import BaseModel, Field, field_validator
 from events import changed, emit, events_after, last_event_id, snapshot
 import policy as fleet_policy
 import skills as fleet_skills
-from store import db
+from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
+    CHAIN_LINKS, FAILURE_STATES, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status, failure_reason,
+    parse_reset, resolution_targets, tail, valid_commit,
+)
+from store import db, task_root
 
 RUNNER_PORT = 11436
 RUNNER_TOKEN = os.environ.get("RUNNER_TOKEN", "")
@@ -281,7 +285,30 @@ def task_view(row) -> dict:
     t["gate_result"] = json.loads(t["gate_result"]) if t["gate_result"] else None
     t["policy"] = json.loads(t.get("policy") or "{}")
     t["skills"] = json.loads(t.get("skills") or "[]")
+    t["resolution"] = json.loads(t["resolution"]) if t.get("resolution") else None
+    t["outcome"] = json.loads(t["outcome"]) if t.get("outcome") else None
+    t["hidden"] = bool(t.get("hidden"))
+    derive_reason(t)
+    t["display"] = display_status(t)
     return t
+
+
+def derive_reason(t: dict) -> dict:
+    """Read-path only: a failed task stored before lineage has no failure_reason; work it out from its text.
+    The database is not rewritten."""
+    if t.get("state") in FAILURE_STATES and not t.get("failure_reason"):
+        t["failure_reason"] = failure_reason(t)
+        if t["failure_reason"] == "limit" and t.get("resets_at") is None:
+            ended = t.get("ended_at") or t.get("updated_at")
+            if ended:
+                t["resets_at"] = parse_reset(f"{tail(t.get('result'))}\n{tail(t.get('error'))}", ended)
+    return t
+
+
+def with_root(task: dict) -> dict:
+    with db() as c:
+        task["root_id"] = task_root(c, task["id"])
+    return task
 
 
 def approvable_tools(task: dict, tools) -> list[str]:
@@ -320,6 +347,17 @@ def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
         if task.get("run_started_at") and "agent_seconds" not in fields:
             # Agent time counts only while a run is going, not while a human reviews.
             fields.update(close_run(task, now))
+    if state in FAILURE_STATES:
+        merged = {**task, **fields}
+        reason = failure_reason(merged, None, state)
+        fields["failure_reason"] = reason
+        fields["resets_at"] = None
+        if reason == "limit":
+            text = f"{tail(merged.get('result'))}\n{tail(merged.get('error'))}"
+            fields["resets_at"] = parse_reset(text, merged.get("ended_at") or now)
+    else:
+        fields.setdefault("failure_reason", None)
+        fields.setdefault("resets_at", None)
     fields["updated_at"] = now
     cols = ", ".join(f"{k}=?" for k in fields)
     marks = ",".join("?" * len(expected))
@@ -329,7 +367,39 @@ def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
     if moved and state != task["state"]:
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
+    if moved and state in ("review", "done"):
+        auto_resolve(task["id"])
     return moved
+
+
+def lineage_rows(c, root_id: str) -> dict[str, dict]:
+    """Every task in the work item rooted at `root_id` (the root and all its descendants), keyed by id."""
+    items: dict[str, dict] = {}
+    frontier = [root_id]
+    while frontier:
+        marks = ",".join("?" * len(frontier))
+        rows = c.execute(f"SELECT id,parent_id,link,title,state,resolution FROM tasks WHERE id IN ({marks}) "
+                         f"OR parent_id IN ({marks})", (*frontier, *frontier)).fetchall()
+        frontier = []
+        for row in rows:
+            if row["id"] not in items:
+                items[row["id"]] = dict(row)
+                frontier.append(row["id"])
+    return items
+
+
+def auto_resolve(task_id: str) -> None:
+    """A task just ended well: mark the earlier failed attempts it supersedes as resolved by it."""
+    with db() as c:
+        items = lineage_rows(c, task_root(c, task_id))
+        success = items.get(task_id)
+        targets = resolution_targets(success, items) if success else []
+        blob = json.dumps({"kind": "resolved_by", "task_id": task_id, "title": success["title"] if success else None,
+                           "at": time.time()})
+        targets = [t for t in targets
+                   if c.execute("UPDATE tasks SET resolution=? WHERE id=? AND resolution IS NULL", (blob, t)).rowcount]
+    for target in targets:
+        emit(target, "task.resolved", {"title": items[target]["title"], "kind": "resolved_by", "by_task": task_id})
 
 
 def close_run(task: dict, end: float) -> dict:
@@ -509,6 +579,7 @@ class TaskIn(BaseModel):
     gate: str | None = None
     node: str | None = None
     parent_id: str | None = None
+    link: str | None = None  # why this task exists relative to parent_id: retry, resume, review, fix, merge, check
     role: str | None = None
     policy: dict | None = None
     skills: list[str] = Field(default_factory=list)
@@ -541,7 +612,19 @@ def list_tasks(state: str | None = None, parent_id: str | None = None, limit: in
         q += " AND parent_id=?"
         args.append(parent_id)
     with db() as c:
-        return [task_view(r) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit))]
+        views = [task_view(r) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit))]
+        parents = {r["id"]: r["parent_id"] for r in c.execute("SELECT id,parent_id FROM tasks")}
+    for view in views:
+        view["root_id"] = root_in(parents, view["id"])
+    return views
+
+
+def root_in(parents: dict, task_id: str) -> str:
+    seen = {task_id}
+    while parents.get(task_id) in parents and parents[task_id] not in seen:
+        task_id = parents[task_id]
+        seen.add(task_id)
+    return task_id
 
 
 @router.post("/api/tasks")
@@ -558,8 +641,14 @@ async def create_task(t: TaskIn) -> dict:
         t.mode = "full"
     if t.gate and rank(t.mode) < rank("auto-edit"):
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
+    if t.link is not None and t.link not in LINKS:
+        raise HTTPException(400, f"link must be one of {list(LINKS)}")
+    if t.link and t.link != "check" and not t.parent_id:
+        raise HTTPException(400, "a link needs a parent_id (only 'check' may stand alone)")
     if t.parent_id:
-        get_task(t.parent_id)
+        with db() as c:
+            if not c.execute("SELECT 1 FROM tasks WHERE id=?", (t.parent_id,)).fetchone():
+                raise HTTPException(400, f"unknown parent task {t.parent_id}")
     if t.role is not None and not ROLE_RE.fullmatch(t.role):
         raise HTTPException(400, "role must be lowercase letters, digits, dashes")
     if t.policy is not None and "auto_approve" in t.policy:
@@ -584,12 +673,12 @@ async def create_task(t: TaskIn) -> dict:
     with db() as c:
         c.execute("""INSERT INTO tasks (id, parent_id, title, agent, model, prompt, mode, repo, worktree, gate,
                      node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error, skills,
-                     trusted_bypass)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     trusted_bypass, link, hidden)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (task_id, t.parent_id, title, t.agent, t.model, t.prompt, t.mode, t.repo, int(t.worktree),
                    t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
                    effective["hash"], t.role, queued_reason if state == "queued" else None,
-                   json.dumps(effective["skills"]), int(t.trusted_bypass)))
+                   json.dumps(effective["skills"]), int(t.trusted_bypass), t.link, int(t.link == "check")))
         if t.model:
             c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
                       "(SELECT id FROM model_catalog WHERE reference=?)",
@@ -600,7 +689,7 @@ async def create_task(t: TaskIn) -> dict:
     if state == "queued":
         async with _locks[task_id]:
             await try_start(get_task(task_id))
-    return get_task(task_id)
+    return with_root(get_task(task_id))
 
 
 @router.get("/api/tasks/wait")
@@ -624,7 +713,7 @@ async def wait(ids: str, timeout: float = 300, mode: str = "all") -> dict:
 
 @router.get("/api/tasks/{task_id}")
 def read_task(task_id: str) -> dict:
-    return get_task(task_id)
+    return with_root(get_task(task_id))
 
 
 @router.get("/api/tasks/{task_id}/log")
@@ -648,10 +737,15 @@ async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_
         update(task["id"], approved_tools=json.dumps(tools))
     await runner_call(node_of(task), "POST", f"/jobs/{task['id']}/message",
                       {"text": text, "allowed_tools": tools, "mode": None})
-    fields = {"runs": (task["runs"] or 0) + 1, "ended_at": None, "denials": "[]", "error": None}
+    fields = {"runs": (task["runs"] or 0) + 1, "ended_at": None, "denials": "[]", "error": None,
+              "failure_reason": None, "resets_at": None, "resolution": None}
     if reset_auto_approvals:
         fields["auto_approvals"] = 0
-    transition(task, RESUMABLE, "working", **fields)
+    if transition(task, RESUMABLE, "working", **fields):
+        # The earlier run's story lives in the event log: how it ended, shown without any later resolution.
+        emit(task["id"], "task.resumed", {
+            "title": task["title"], "run": fields["runs"], "from": task["state"], "ended_at": task.get("ended_at"),
+            "failure_reason": task.get("failure_reason"), "display": display_status({**task, "resolution": None})})
 
 
 @router.post("/api/tasks/{task_id}/message")
@@ -715,6 +809,165 @@ async def complete(task_id: str) -> dict:
         if not transition(task, RESUMABLE, "done"):
             raise HTTPException(409, f"can't complete a task that is {task['state']}")
     return get_task(task_id)
+
+
+RESOLVABLE = {"failed", "interrupted", "blocked", "cancelled", "review"}
+
+
+class ResolveIn(BaseModel):
+    kind: str
+    commit: str | None = None
+    by: str | None = None
+    note: str | None = None
+
+
+class OutcomeIn(BaseModel):
+    kind: str
+    commit: str | None = None
+
+
+@router.post("/api/tasks/{task_id}/resolve")
+async def resolve(task_id: str, body: ResolveIn, request: Request) -> dict:
+    """Admin only: record that a settled task no longer needs attention. Never changes the task's state,
+    so a blocked task stays blocked (it only stops being listed as needing attention)."""
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if body.kind not in ("dismissed", "done_elsewhere"):
+            raise HTTPException(400, "kind must be dismissed or done_elsewhere")
+        by = (body.by or "").strip()[:120]
+        commit = (body.commit or "").strip()
+        if commit and not valid_commit(commit):
+            raise HTTPException(400, "commit must be 7 to 40 hex characters")
+        if body.kind == "done_elsewhere" and not by:
+            raise HTTPException(400, "done_elsewhere needs 'by' (who finished it)")
+        if task["state"] not in RESOLVABLE:
+            raise HTTPException(409, f"can't resolve a task that is {task['state']}")
+        resolution = {"kind": body.kind, "at": time.time()}
+        if by:
+            resolution["by"] = by
+        if commit:
+            resolution["commit"] = commit
+        if body.note and body.note.strip():
+            resolution["note"] = body.note.strip()[:500]
+        update(task_id, resolution=json.dumps(resolution))
+    emit(task_id, "task.resolved", {"title": task["title"], "kind": body.kind, "by": by or None,
+                                    "commit": commit or None, "actor": getattr(request.state, "actor", None)})
+    return with_root(get_task(task_id))
+
+
+@router.post("/api/tasks/{task_id}/outcome")
+async def set_outcome(task_id: str, body: OutcomeIn, request: Request) -> dict:
+    """Admin only: record how a work item ended. Only on a root task. Marks a settled root done for merged/done,
+    but never moves a blocked or awaiting-approval task."""
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["parent_id"]:
+            raise HTTPException(400, "an outcome belongs on the root task of the work item")
+        if body.kind not in OUTCOME_KINDS:
+            raise HTTPException(400, f"kind must be one of {list(OUTCOME_KINDS)}")
+        commit = (body.commit or "").strip()
+        if (body.kind == "merged" or commit) and not valid_commit(commit):
+            raise HTTPException(400, "commit must be 7 to 40 hex characters" + (" (required for merged)" if body.kind == "merged" else ""))
+        outcome_value = {"kind": body.kind, "at": time.time()}
+        if commit:
+            outcome_value["commit"] = commit
+        update(task_id, outcome=json.dumps(outcome_value))
+        if body.kind in ("merged", "done"):
+            transition(task, {"review", "failed", "interrupted"}, "done")
+    emit(task_id, "task.outcome", {"title": task["title"], "kind": body.kind, "commit": commit or None,
+                                   "actor": getattr(request.state, "actor", None)})
+    return with_root(get_task(task_id))
+
+
+WORK_COLUMNS = ("id,parent_id,link,title,agent,model,state,failure_reason,resets_at,resolution,outcome,hidden,"
+                "created_at,updated_at,started_at,ended_at,runs,gate,gate_result,exit_code,error,"
+                # The end of the output is where a usage-limit message sits (same slice derive_reason uses).
+                "CASE WHEN failure_reason IS NULL AND state IN ('failed','blocked','interrupted','cancelled') "
+                "THEN substr(result,-4000) END AS result")
+
+
+def outcome_display(value: dict) -> dict:
+    kind = value.get("kind")
+    if kind == "merged":
+        return {"tone": "ok", "label": f"Merged {(value.get('commit') or '')[:7]}".strip()}
+    if kind == "done":
+        return {"tone": "ok", "label": "Done"}
+    return {"tone": "muted", "label": "Abandoned"}
+
+
+def attempt_entries(row: dict, resumed: list[dict]) -> list[dict]:
+    """One entry per run of a task: earlier runs come from task.resumed events, the last from the row."""
+    def entry(**kw) -> dict:
+        return {"id": row["id"], "title": row["title"], "agent": row["agent"], "model": row["model"],
+                "link": row["link"], "created_at": row["created_at"]} | kw
+
+    at = row["created_at"]
+    out, started = [], row["started_at"] or at
+    for number, event in enumerate(resumed, start=1):
+        data = event["data"]
+        out.append(entry(state=data.get("from"), display=data.get("display") or {"tone": "muted", "label": str(data.get("from"))},
+                         failure_reason=data.get("failure_reason"), started_at=started, ended_at=data.get("ended_at"),
+                         run=number, at=at))
+        at = started = event["ts"]
+    out.append(entry(state=row["state"], display=display_status(row), failure_reason=row["failure_reason"],
+                     started_at=started if resumed else row["started_at"], ended_at=row["ended_at"],
+                     run=len(resumed) + 1, at=at))
+    return out
+
+
+@router.get("/api/work")
+def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
+    """One entry per root task (a piece of work), newest activity first, with every attempt in order."""
+    limit = max(1, min(limit, 500))
+    # Every task with the root of its work item. An orphan (parent missing) is its own root.
+    tree = ("WITH RECURSIVE tree(id, root) AS ("
+            "SELECT id, id FROM tasks WHERE parent_id IS NULL OR parent_id NOT IN (SELECT id FROM tasks) "
+            "UNION ALL SELECT t.id, tree.root FROM tasks t JOIN tree ON t.parent_id = tree.id)")
+    with db() as c:
+        # Newest `limit` work items by latest activity across the whole item (an outcome bumps updated_at too).
+        hidden = "" if include_hidden else "WHERE r.hidden = 0 "
+        roots = [r[0] for r in c.execute(
+            f"{tree} SELECT tree.root FROM tree JOIN tasks t ON t.id = tree.id JOIN tasks r ON r.id = tree.root "
+            f"{hidden}GROUP BY tree.root ORDER BY MAX(t.updated_at) DESC, tree.root LIMIT ?", (limit,))]
+        if not roots:
+            return []
+        marks = ",".join("?" * len(roots))
+        scoped = (f"WITH RECURSIVE tree(id, root) AS (SELECT id, id FROM tasks WHERE id IN ({marks}) "
+                  "UNION ALL SELECT t.id, tree.root FROM tasks t JOIN tree ON t.parent_id = tree.id)")
+        rows = [dict(r) for r in c.execute(
+            f"{scoped} SELECT {WORK_COLUMNS} FROM tasks WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid",
+            roots)]
+        resumed: dict[str, list[dict]] = defaultdict(list)
+        for r in c.execute(f"{scoped} SELECT task_id, ts, data FROM events WHERE type='task.resumed' "
+                           "AND task_id IN (SELECT id FROM tree) ORDER BY id", roots):
+            resumed[r["task_id"]].append({"ts": r["ts"], "data": json.loads(r["data"] or "{}")})
+    by_id = {r["id"]: r for r in rows}
+    parents = {r["id"]: r["parent_id"] for r in rows}
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        r["resolution"] = json.loads(r["resolution"]) if r["resolution"] else None
+        derive_reason(r)
+        groups[root_in(parents, r["id"])].append(r)
+    items = []
+    for root_id, members in groups.items():
+        root = by_id[root_id]
+        if root["hidden"] and not include_hidden:
+            continue
+        attempts = []
+        for index, member in enumerate(members):
+            if member["hidden"] and not include_hidden:
+                continue
+            for part in attempt_entries(member, resumed.get(member["id"], [])):
+                attempts.append((part["at"], index, part["run"], part))
+        attempts.sort(key=lambda item: item[:3])
+        shown = [{k: v for k, v in part.items() if k not in ("at", "created_at")} for *_, part in attempts]
+        outcome_value = json.loads(root["outcome"]) if root["outcome"] else None
+        display = outcome_display(outcome_value) if outcome_value else (shown[-1]["display"] if shown else display_status(root))
+        activity = max([m["updated_at"] or 0 for m in members] + [(outcome_value or {}).get("at") or 0])
+        items.append({"root_id": root_id, "title": root["title"], "outcome": outcome_value, "display": display,
+                      "updated_at": activity, "attempts": shown})
+    items.sort(key=lambda item: item["updated_at"], reverse=True)
+    return items
 
 
 @router.post("/api/tasks/{task_id}/cleanup")

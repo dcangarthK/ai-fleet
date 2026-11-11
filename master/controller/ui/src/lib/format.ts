@@ -21,6 +21,7 @@ export const TASK_TABS: Record<string, { label: string; states: TaskState[] | nu
   review: { label: "Review", states: ["review"] },
   problems: { label: "Problems", states: ["failed", "interrupted"] },
   finished: { label: "Finished", states: ["done", "cancelled"] },
+  attention: { label: "Needs attention", states: null }, // filtered by display tone in the Tasks page
   all: { label: "All", states: null },
 };
 
@@ -87,6 +88,7 @@ export function taskActions(t: Task) {
     complete: ["review", "failed", "interrupted", "blocked"].includes(t.state),
     cleanup: ["done", "cancelled", "review", "failed", "interrupted"].includes(t.state) && !!t.branch,
     message: ["review", "failed", "blocked", "interrupted"].includes(t.state),
+    resolve: ["failed", "interrupted", "blocked", "cancelled", "review"].includes(t.state) && !t.resolution,
     diff: !!t.branch,
   };
 }

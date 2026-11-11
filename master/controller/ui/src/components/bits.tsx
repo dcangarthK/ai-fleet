@@ -1,10 +1,16 @@
 import type { ReactNode } from "react";
 import type { FleetNode, TaskState } from "../lib/api";
 import { nodeSignal, SIGNAL_LABEL, STATE } from "../lib/format";
+import { pillText, toneClass, type Display } from "../lib/lineage";
 
 export function StateLabel({ state }: { state: TaskState }) {
   const s = STATE[state] ?? { tone: "quiet", label: state };
   return <span className={`state tone-${s.tone}`}>{s.label}</span>;
+}
+
+/** The honest status of a task or work item, as the controller computed it. */
+export function StatusPill({ display }: { display: Display }) {
+  return <span className={`state ${toneClass(display.tone)}${display.tone === "resolved" ? " resolved" : ""}`}>{pillText(display)}</span>;
 }
 
 export function NodeLight({ node }: { node: FleetNode }) {

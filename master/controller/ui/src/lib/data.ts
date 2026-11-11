@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { WorkItem } from "./lineage";
 import { ApiError, get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageRow } from "./api";
 
 export const queryClient = new QueryClient({
@@ -10,6 +11,8 @@ export const queryClient = new QueryClient({
 
 export const useFleet = () => useQuery({ queryKey: ["fleet"], queryFn: () => get<Fleet>("/api/fleet") });
 export const useTasks = () => useQuery({ queryKey: ["tasks"], queryFn: () => get<Task[]>("/api/tasks?limit=300") });
+export const useWork = (includeHidden: boolean) =>
+  useQuery({ queryKey: ["work", includeHidden], queryFn: () => get<WorkItem[]>(`/api/work?limit=100&include_hidden=${includeHidden ? 1 : 0}`) });
 export const useTask = (id: string | undefined) =>
   useQuery({ queryKey: ["task", id], queryFn: () => get<Task>(`/api/tasks/${id}`), enabled: !!id });
 export const useUsage = (days = 1) =>

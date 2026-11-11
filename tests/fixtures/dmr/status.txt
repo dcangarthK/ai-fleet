@@ -1,0 +1,6 @@
+Docker Model Runner version v0.1.41
+Docker Engine Kind: Docker Desktop
+Docker Model Runner is running
+
+Status:
+llama.cpp: running llama.cpp latest-metal (sha256:aa3e239c5737a7fa56f3908a865eb75dfae214b9cfec2cdd929e4d5353c2d714) version: ac4cdde

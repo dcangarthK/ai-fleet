@@ -1,0 +1,1 @@
+{"object":"list","data":[{"id":"ai/deepseek-r1-distill-llama","object":"model","created":1742905580,"owned_by":"docker"},{"id":"ai/gemma3:4B-Q4_0","object":"model","created":1745577207,"owned_by":"docker"}]}

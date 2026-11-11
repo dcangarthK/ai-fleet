@@ -2235,7 +2235,7 @@
     "model": "qwen3:8b",
     "roles": {
       "coder": {
-        "score": 75.6,
+        "score": 73.7,
         "json_valid": null,
         "cases": [
           {
@@ -2274,23 +2274,24 @@
             "error": null
           },
           {
-            "id": "flatten_dict",
-            "score": 1.0,
-            "passed": 5,
-            "total": 5,
-            "error": null
-          },
-          {
             "id": "chunked",
             "score": 0.8,
             "passed": 4,
             "total": 5,
             "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
           }
-        ]
+        ],
+        "evaluated_at": 1794415300.7980092
       },
       "reviewer": {
-        "score": 92.9,
+        "score": 89.3,
         "json_valid": 100.0,
         "cases": [
           {
@@ -2298,100 +2299,170 @@
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "sql_injection",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "missing_none_check",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "wrong_comparison_operator",
-            "score": 1.0,
+            "score": 0.5,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "resource_leak",
-            "score": 1.0,
+            "score": 0.5,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
           },
           {
             "id": "race_condition_counter",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "swallowed_exception",
-            "score": 1.0,
+            "score": 0.5,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "path_traversal",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": true
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_rename",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": null
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_bugfix",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": null
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_test_added",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": null
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_logging",
-            "score": 0.0,
+            "score": 1.0,
             "valid_json": true,
-            "verdict_ok": false,
-            "found_bug": null
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_constant",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": null
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           },
           {
             "id": "clean_guard",
             "score": 1.0,
             "valid_json": true,
             "verdict_ok": true,
-            "found_bug": null
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
           }
-        ]
+        ],
+        "metrics": {
+          "dev": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.625,
+            "precision": 0.7142857142857143,
+            "fp_rate": 0.0,
+            "bug_cases": 8,
+            "found": 5,
+            "clean_cases": 6,
+            "alarmed": 0,
+            "serious": 7,
+            "matched": 5,
+            "unsupported": 1,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794415583.164682
       },
       "fast": {
         "score": 97.2,
@@ -2399,13 +2470,13 @@
         "cases": [
           {
             "id": "commit_summary_auth",
-            "score": 0.8333333333333334,
-            "reply": "Fix JWT expiration handling and refresh token access token issuance with tests for expired/refreshed tokens"
+            "score": 1.0,
+            "reply": "Fix JWT expiration handling, refresh token support, and test coverage"
           },
           {
             "id": "commit_summary_perf",
-            "score": 1.0,
-            "reply": "Optimize product listings with Redis caching and latency reduction"
+            "score": 0.8333333333333334,
+            "reply": "Cache product listings in Redis (5min TTL) with invalidation and latency reduction"
           },
           {
             "id": "classify_bug",
@@ -2427,77 +2498,1068 @@
             "score": 1.0,
             "reply": "docs"
           }
-        ]
+        ],
+        "evaluated_at": 1794415645.996971
+      },
+      "grounded": {
+        "score": 90.0,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "config_default_role",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "reviewer",
+            "quotes": [
+              "default_role: reviewer"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_ollama_port",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "11434",
+            "quotes": [
+              "listen: 127.0.0.1:11434"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 0.99,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_temperature",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "0",
+            "quotes": [
+              "temperature: 0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_headroom",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "3",
+            "quotes": [
+              "HEADROOM_GB = 3"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_task_complete",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "complete",
+            "quotes": [
+              "2026-11-11T08:12:09Z task=7 state=complete exit=0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_denial_reason",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "expired_token",
+            "quotes": [
+              "auth request id=req-19 subject=node-3 decision=deny reason=expired_token"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 0.95,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_model_speed",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "18.6",
+            "quotes": [
+              "eval_rate=18.6 tok/s"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_gate_failure",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "tests.test_policy.PolicyTests.test_denied_action",
+            "quotes": [
+              "failed_test=tests.test_policy.PolicyTests.test_denied_action"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_canonical_suffix",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "latest",
+            "quotes": [
+              "return name if ':' in name.split('/')[-1'] else f'{name}:latest'"
+            ],
+            "quote_valid": 0,
+            "quote_invalid": 1,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_timeout",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "20",
+            "quotes": [
+              "return proc.communicate(timeout=20)"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_allowed_verdicts",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "abstain",
+            "quotes": [
+              "VERDICTS = {'approve', 'request_changes', 'abstain'}"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_sandbox_network",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "none",
+            "quotes": [
+              "--network",
+              "none"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_escalation_order",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "role fallback",
+            "quotes": [
+              "On ABSTAIN, try the role fallback once."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_signal_policy",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "telemetry",
+            "quotes": [
+              "Self-confidence and token probabilities remain telemetry until an evaluation shows that they predict errors."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_review_evidence",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "exact quote",
+            "quotes": [
+              "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_missing_fallback",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_no_tls_cert",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_removed_api_router",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "The standalone API-key router is disabled. Requests go through the authenticated controller."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_unknown_queue_limit",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_exit_code",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_contradicted_success",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "pipeline=release-4 result=failed"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_missing_model",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_duration",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_no_return_value",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_missing_hash",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_contradicted_async",
+            "outcome": "hallucinated",
+            "status": "ANSWER",
+            "answer": "None",
+            "quotes": [
+              "def ask_model(prompt):",
+              "    # This client is deliberately synchronous."
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.0,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_unknown_retry_delay",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_no_windows_support",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_rejected_threshold",
+            "outcome": "hallucinated",
+            "status": "ANSWER",
+            "answer": "None",
+            "quotes": [
+              "Fixed confidence thresholds are not adopted.",
+              "Thresholds must be calibrated separately for each model."
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "INFERRED"
+            ],
+            "confidence": 0.9,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_unknown_owner",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "Node approval is the user's responsibility and is performed from the dashboard."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          }
+        ],
+        "hallucination_rate": 0.1333,
+        "correct_abstain_rate": 0.8667,
+        "quote_validity": 0.9565,
+        "risk_coverage": {
+          "logprob_min": [],
+          "logprob_mean": [],
+          "confidence": [
+            [
+              0.9,
+              1.0,
+              0.17647058823529413
+            ],
+            [
+              0.95,
+              0.9411764705882353,
+              0.125
+            ],
+            [
+              0.99,
+              0.8823529411764706,
+              0.13333333333333333
+            ],
+            [
+              1.0,
+              0.8235294117647058,
+              0.14285714285714285
+            ]
+          ],
+          "agreement": [
+            [
+              0.0,
+              0.9411764705882353,
+              0.1875
+            ],
+            [
+              0.6666666666666666,
+              0.8823529411764706,
+              0.13333333333333333
+            ],
+            [
+              1.0,
+              0.7647058823529411,
+              0.15384615384615385
+            ]
+          ]
+        },
+        "signal_decisions": {
+          "logprob_min": {
+            "decision": "dropped",
+            "threshold": null,
+            "coverage": null,
+            "error_rate": null,
+            "baseline_error_rate": null,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "no training threshold reaches 70% coverage"
+          },
+          "logprob_mean": {
+            "decision": "dropped",
+            "threshold": null,
+            "coverage": null,
+            "error_rate": null,
+            "baseline_error_rate": null,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "no training threshold reaches 70% coverage"
+          },
+          "confidence": {
+            "decision": "dropped",
+            "threshold": 0.99,
+            "coverage": 0.75,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.25,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          },
+          "agreement": {
+            "decision": "kept",
+            "threshold": 0.6666666666666666,
+            "coverage": 0.75,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.25,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": null
+          }
+        },
+        "evaluated_at": 1794416723.224302
+      },
+      "reviewer_real": {
+        "score": 62.5,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "erase_running_install_op",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "ready_before_derived_model",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "check_then_write_race",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "weak_idempotency_key",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "role_routes_base_not_derived",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "cwd_git_dir_unchecked",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_echoed_on_terminal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "model_ref_matches_spec",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "network_deny_wins",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "quiet_hours_wrap_midnight",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "claim_row_before_runner_call",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.6,
+            "precision": 0.75,
+            "fp_rate": 0.3333333333333333,
+            "bug_cases": 5,
+            "found": 3,
+            "clean_cases": 3,
+            "alarmed": 1,
+            "serious": 4,
+            "matched": 3,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.4,
+            "precision": 0.6666666666666666,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 3,
+            "matched": 2,
+            "unsupported": 3,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.5,
+            "precision": 0.7142857142857143,
+            "fp_rate": 0.16666666666666666,
+            "bug_cases": 10,
+            "found": 5,
+            "clean_cases": 6,
+            "alarmed": 1,
+            "serious": 7,
+            "matched": 5,
+            "unsupported": 4,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794417882.701616
       }
     },
     "latencies": [
-      49.34889187500039,
-      0,
-      48.39244416599968,
-      61.84417125000027,
-      98.92870158299957,
-      76.11200408399964,
-      297.3060827500003,
-      63.65268712499983,
-      0,
-      8.600426209000034,
-      8.92787670799953,
-      17.508246374999544,
-      14.402675999999701,
-      9.948298457999954,
-      7.585330124999928,
-      6.954352707999533,
-      9.709571708999647,
-      12.469215541000267,
-      21.94490974999917,
-      22.916054708000047,
-      17.433102209000026,
-      7.431163833000028,
-      11.209705165999367,
-      6.509815458000048,
-      5.653559332999976,
-      5.326674124999954,
-      3.52715495800021,
-      4.870240167000702,
-      6.572965291999935
+      8.908827457998996,
+      7.885476916999323,
+      7.8695348750043195,
+      8.068688333005412,
+      7.2684948749956675,
+      7.112318915998912,
+      5.776145958006964,
+      6.875949957990088,
+      6.18186224999954,
+      7.364580833003856,
+      6.21680362499319,
+      6.803671707995818,
+      7.217113749997225,
+      5.6013209160009865,
+      6.190574875014136,
+      7.185321708995616,
+      11.517692875000648,
+      11.744442625000374,
+      13.435080832990934,
+      20.05858504200296,
+      24.82693041699531,
+      19.31586091600184,
+      17.98943899999722,
+      13.590845209007966,
+      14.40998350000882,
+      15.7264605419914,
+      13.11042058399471,
+      12.018037916001049,
+      12.785391583005548,
+      13.434645291999914,
+      14.60248300000967,
+      12.691903165992699,
+      14.234501666011056,
+      8.502794750005705,
+      8.873639833007473,
+      10.139630749996286,
+      10.986817291995976,
+      16.029250416992,
+      17.158579374998226,
+      16.38569304200064,
+      18.228233457994065,
+      9.874773957999423,
+      10.641885125005501,
+      16.258903750000172,
+      11.147605374993873,
+      14.450954750005621,
+      27.12318758299807,
+      17.036594207995222,
+      18.39794883300783,
+      15.000062207996962,
+      14.693125666002743,
+      11.22838016699825,
+      9.905517666993546,
+      14.32775933299854,
+      12.599536084002466,
+      13.359188457994605,
+      13.297889416993712,
+      10.810374459004379,
+      7.934226541998214,
+      9.385655082995072,
+      7.75587862500106,
+      9.815700874998583,
+      11.902260375005426,
+      9.015440832998138,
+      9.889002291005454,
+      12.71200516699173,
+      9.41964791699138,
+      11.191576500001247,
+      14.10998091599322,
+      10.252558874999522,
+      10.453895915998146,
+      9.923163583996939,
+      7.119592167000519,
+      8.819142249994911,
+      8.874063750001369,
+      9.119657542003551,
+      8.796585874995799,
+      9.94995187499444,
+      26.147779292004998,
+      36.73442533399793,
+      58.40054770799179,
+      36.686087667010725,
+      20.40994787499949,
+      34.57018441599212,
+      26.952676291999524,
+      55.7820320410101,
+      24.11481083399849,
+      16.296913917001802,
+      13.405105541998637,
+      54.413969500004896,
+      101.92894387499837,
+      20.53368741700251,
+      33.139058957996895
     ],
     "tps": [
-      39.37220052653917,
-      32.07569378996943,
-      31.72280267039301,
-      30.88313138393972,
-      30.980638432619678,
-      30.644519994883495,
-      33.732087241575336,
-      37.44760258843331,
-      37.74140509967979,
-      41.20837447315206,
-      40.181400983425185,
-      38.66785895142958,
-      38.13023388422585,
-      37.82837187735286,
-      38.790315672104065,
-      39.9522371005463,
-      44.4158213099631,
-      42.12875912073943,
-      39.8016696493149,
-      37.14295747129141,
-      39.48117753022588,
-      36.128392958737216,
-      35.35257242976086,
-      35.222589131657635,
-      35.164565885913504,
-      35.15631118832451,
-      34.970779488241305
+      38.38814166825185,
+      38.1686947391252,
+      39.99338617761798,
+      38.16194822900862,
+      38.62259227636639,
+      37.12431489582751,
+      37.66457033776512,
+      37.55121566494791,
+      37.33815668637092,
+      36.43538492362797,
+      35.983987025018706,
+      33.72800084616809,
+      34.85123308438361,
+      34.16933137750566,
+      34.557095513443755,
+      32.76143595433663,
+      33.18228689972007,
+      31.199831315437724,
+      28.743232306005492,
+      20.98226866338549,
+      24.33644124395694,
+      22.846072042278116,
+      25.801879896138438,
+      27.303949441438267,
+      26.80849385221799,
+      29.72777481772587,
+      25.645245051001982,
+      27.581214546548846,
+      29.094630382300533,
+      29.336725715857877,
+      30.878336094174937,
+      27.7648079176802,
+      30.159337806485425,
+      26.716131980823707,
+      26.9480383007468,
+      27.433395316803935,
+      22.930050094280436,
+      29.572449801062188,
+      30.998321260304838,
+      29.9445319069508,
+      23.76495614243886,
+      28.31926532415237,
+      23.009774371786193,
+      29.057530608356792,
+      24.960428983910358,
+      25.65615181219801,
+      23.942776131483065,
+      29.02507910050134,
+      29.157191791102466,
+      25.31517012971188,
+      23.027544100731163,
+      21.662109282965552,
+      29.801146728078052,
+      34.72377289744098,
+      30.213025289360935,
+      29.337857995325024,
+      33.260188464969055,
+      33.716640274184655,
+      30.384214843432968,
+      32.81359996125301,
+      31.998007731695303,
+      32.012147958772736,
+      31.71263043831997,
+      31.683271841888327,
+      32.163894182572534,
+      34.529177068299774,
+      30.626036247748797,
+      32.73577137098958,
+      30.93150747137182,
+      31.661295805047075,
+      32.923855006486065,
+      32.90472944182785,
+      32.061915696591235,
+      33.2791795175863,
+      31.79456562968314,
+      31.689635191425367,
+      32.66386126434821,
+      30.349003326222054,
+      28.898436605533814,
+      29.838351010471175,
+      28.890542908948383,
+      40.86395238296892,
+      30.096294442829695,
+      30.410409134233213,
+      30.214439355417436,
+      29.771491736775868,
+      31.198377275575346,
+      30.07523045628874,
+      34.13118295594666,
+      29.170051944688602,
+      36.621585629036474,
+      29.282918891880552,
+      40.3441491478654
     ],
-    "size_gb": 6.6,
+    "size_gb": 6.0,
     "errors": [
-      "coder/parse_duration: timed out",
-      "coder/is_valid_ipv4: timed out"
+      "reviewer_real/policy_errors_are_400: timed out"
     ],
-    "evaluated_at": 1794351057.095435,
-    "median_s": 9.95,
-    "tokens_per_s": 37.4,
+    "evaluated_at": 1794415812.444,
+    "median_s": 12.02,
+    "tokens_per_s": 30.4,
     "fits_16gb": true
   },
   {

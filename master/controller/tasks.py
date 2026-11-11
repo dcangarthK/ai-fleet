@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from events import changed, emit, events_after, last_event_id, snapshot
 import budget
 import policy as fleet_policy
+import presence
 import skills as fleet_skills
 from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
     CHAIN_LINKS, FAILURE_STATES, HANDOFF_KINDS, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status,
@@ -134,13 +135,40 @@ async def runner_call(node: dict, method: str, path: str, body: dict | None = No
 async def runner_health(client: httpx.AsyncClient, base: str, node: dict | str = MASTER_ID) -> dict | None:
     token = node_runner_token(node)
     headers = {"X-Runner-Token": token} if token else {}
+    node_id = node if isinstance(node, str) else node["id"]
+    if NODE_ID_RE.fullmatch(node_id or ""):
+        # The runner learns its node id from us (docs/SPEC-live-monitor.md 12.1), for its signed heartbeats.
+        headers["X-Fleet-Node-Id"] = node_id
     try:
         r = await client.get(f"{base}/health", timeout=3, headers=headers)
         r.raise_for_status()
         body = r.json()
-        return body if isinstance(body, dict) and body.get("ok") else None
+        return clean_health(body) if isinstance(body, dict) and body.get("ok") else None
     except (httpx.HTTPError, ValueError):
         return None
+
+
+NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+# The /health fields the controller keeps, whether polled or pushed in a heartbeat (live monitor 12.1): a
+# heartbeat can claim nothing a poll couldn't, and unknown fields are dropped.
+HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "running", "gate_profiles",
+                 "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
+                 "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
+                 "age_s"}
+
+
+def clean_health(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k in HEALTH_FIELDS}
+
+
+def health_age(body: dict | None) -> float | None:
+    """The runner's own age of its cached metrics (the body's age_s, or the metrics block's)."""
+    if not isinstance(body, dict):
+        return None
+    for value in (body.get("age_s"), (body.get("metrics") or {}).get("age_s") if isinstance(body.get("metrics"), dict) else None):
+        if isinstance(value, (int, float)) and value >= 0:
+            return float(value)
+    return None
 
 
 # ---------- scheduling ----------
@@ -178,8 +206,9 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     """
     if node["status"] != "approved":
         return "not approved"
-    if not node["runner"] or (node.get("runner_fails") or 0) >= 3:
-        return "runner offline"
+    offline = runner_offline(node)
+    if offline:
+        return offline
     if not (node["runner"].get("agents") or {}).get(agent):
         return f"no {agent} on this node"
     power = node["runner"].get("power") or {}
@@ -200,6 +229,49 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     if escalation and agent not in ((policy or {}).get("escalation") or {}).get("agents", []):
         return f"node policy does not allow escalation to {agent}"
     return None
+
+
+HEARTBEAT_TTL = float(os.environ.get("FLEET_HEARTBEAT_TTL", "25"))
+NODE_POLL_SECONDS = float(os.environ.get("FLEET_POLL_SECONDS", "30"))  # the controller's node poll (controller.py)
+
+
+def in_startup_grace(now: float | None = None) -> bool:
+    import live  # local import: live builds on this module
+    now = time.time() if now is None else now
+    return now - live.STARTED_AT < HEARTBEAT_TTL + NODE_POLL_SECONDS
+
+
+def runner_offline(node: dict, now: float | None = None, grace: bool | None = None) -> str | None:
+    """The one liveness rule (docs/SPEC-live-monitor.md 12.2): why this node's runner is OFFLINE, or None.
+    1. no runner report, or 3 failed polls in a row (every runner);
+    2. heartbeat expiry: an accepted heartbeat, more than HEARTBEAT_TTL old, and the last good poll (or none) more
+       than one poll interval + 5 s old. Not applied during the controller's startup grace."""
+    now = time.time() if now is None else now
+    if not node.get("runner") or (node.get("runner_fails") or 0) >= 3:
+        return "runner offline"
+    beat = node.get("heartbeat_at")
+    if beat is None:
+        return None
+    if grace is None:
+        grace = in_startup_grace(now)
+    if grace:
+        return None
+    polled = node.get("polled_at")
+    if now - beat > HEARTBEAT_TTL and (polled is None or now - polled > NODE_POLL_SECONDS + 5):
+        return f"runner offline: no heartbeat for {int(now - beat)} s"
+    return None
+
+
+def warm_models(node: dict, now: float | None = None) -> set[str]:
+    """Ollama models loaded on the node per its latest /health (poll or heartbeat), only while that report is under
+    60 s old by `now - max(heartbeat_at, polled_at) + runner_age_s` (12.3)."""
+    now = time.time() if now is None else now
+    seen = max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0])
+    if not seen or now - seen + (node.get("runner_age_s") or 0) >= 60:
+        return set()
+    metrics = (node.get("runner") or {}).get("metrics") or {}
+    loaded = (metrics.get("ollama") or {}).get("loaded") if isinstance(metrics, dict) else None
+    return {m for m in loaded or [] if isinstance(m, str)}
 
 
 def ram(node: dict) -> int:
@@ -288,7 +360,7 @@ def placement(agent: str, wanted: str | None) -> list[dict]:
     """Usable slots for this agent on eligible-looking nodes (the named node only, when one is named), least busy
     node first, then each node's own profile order."""
     nodes = [n for n in node_rows() if n["status"] == "approved" and n.get("runner")
-             and ((n["runner"].get("agents") or {}).get(agent))]
+             and ((n["runner"].get("agents") or {}).get(agent)) and runner_offline(n) is None]
     if wanted:
         nodes = [n for n in nodes if n["id"] == wanted or n["name"] == wanted]
     nodes.sort(key=lambda n: (n["running_tasks"], -ram(n)))
@@ -328,9 +400,12 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
                                        _esc_view(n, role, agent, snapshot, task_policy, escalation), escalation)
                    for n, snapshot in candidates}
         raise HTTPException(409, f"no node can run {agent} in {mode} mode: {reasons}")
-    # Prefer a node that can start now, then least busy, then the bigger machine.
+    # Prefer a node that can start now, then (Ollama) one with the model already loaded (live monitor 12.3), then
+    # least busy, then the bigger machine.
+    now = time.time()
     node, snapshot = sorted(ok, key=lambda item: (
         temporary_reason(item[0], item[1]["policy"]) is not None,
+        agent == "ollama" and model not in warm_models(item[0], now),
         item[0]["running_tasks"], -ram(item[0])))[0]
     return node, snapshot, temporary_reason(node, snapshot["policy"])
 
@@ -355,14 +430,42 @@ def task_view(row) -> dict:
     t["resolution"] = json.loads(t["resolution"]) if t.get("resolution") else None
     t["outcome"] = json.loads(t["outcome"]) if t.get("outcome") else None
     t["hidden"] = bool(t.get("hidden"))
-    for field, fallback in (("usage", None), ("prompt_omitted", []), ("launch_extra", {}), ("limits_applied", None)):
+    for field, fallback in (("usage", None), ("prompt_omitted", []), ("launch_extra", {}), ("limits_applied", None),
+                            ("independence", None), ("placement", None), ("chain", None)):
         try:
             t[field] = json.loads(t[field]) if t.get(field) else fallback
         except (TypeError, ValueError):
             t[field] = fallback
     derive_reason(t)
-    t["display"] = display_status(t)
+    t["display"] = live_display(t)
     return t
+
+
+def live_display(t: dict, now: float | None = None) -> dict:
+    """display_status, plus what only the database knows (docs/SPEC-live-monitor.md 13):
+    (c) a failed attempt with a retry child shows "Retried as <newest child>" (Part C's handoff already shows itself);
+    (a) a paused limit follows the account's current limit state for that identity, not the row's saved reset."""
+    now = time.time() if now is None else now
+    shown = display_status(t, now=now)
+    if t.get("resolution") or t.get("state") not in ("failed", "interrupted", "blocked"):
+        return shown
+    with db() as c:
+        child = c.execute("SELECT id FROM tasks WHERE parent_id=? AND link='retry' ORDER BY created_at DESC, rowid DESC "
+                          "LIMIT 1", (t["id"],)).fetchone()
+        own_limit = (t.get("failure_reason") == "limit" and t.get("agent") in budget.PAID_AGENTS
+                     and c.execute("SELECT 1 FROM agent_usage WHERE task_id=? AND outcome='limit'",
+                                   (t["id"],)).fetchone() is not None)
+    if child:
+        return {"tone": "resolved", "label": f"Retried as {child['id']}"}
+    if not own_limit or (t.get("resets_at") is not None and t["resets_at"] <= now):
+        return shown  # no provider limit on record for this run, or its reset has passed: as before
+    rules = budget.current_rules()
+    snap = budget.limit_snapshot(rules, now, budget.task_account(t))
+    ident = t.get("budget_identity") or budget.identity(t["agent"], t.get("model"))
+    until, _ = budget.limited_for(snap, t["agent"], ident)
+    if until:
+        return {"tone": "paused", "label": f"Paused: limit, resets {clock(until)}"}
+    return {"tone": "attention", "label": "Limit cleared: resume or hand off"}
 
 
 def derive_reason(t: dict) -> dict:
@@ -408,8 +511,9 @@ def update(task_id: str, **fields) -> None:
         c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
 
 
-def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
-    """Move the task to `state` only if it is still in one of `expected`. Returns whether it moved."""
+def transition(task: dict, expected: set[str], state: str, *, where_node: str | None = None, **fields) -> bool:
+    """Move the task to `state` only if it is still in one of `expected` (and, with `where_node`, still on that
+    node: a start's lease, docs/SPEC-live-monitor.md 12.5). Returns whether it moved."""
     now = time.time()
     if state == "working":
         fields.setdefault("run_started_at", now)
@@ -434,8 +538,9 @@ def transition(task: dict, expected: set[str], state: str, **fields) -> bool:
     cols = ", ".join(f"{k}=?" for k in fields)
     marks = ",".join("?" * len(expected))
     with db() as c:
-        moved = c.execute(f"UPDATE tasks SET state=?, {cols} WHERE id=? AND state IN ({marks})",
-                          (state, *fields.values(), task["id"], *expected)).rowcount == 1
+        node_sql, node_args = (" AND node_id=?", (where_node,)) if where_node is not None else ("", ())
+        moved = c.execute(f"UPDATE tasks SET state=?, {cols} WHERE id=? AND state IN ({marks}){node_sql}",
+                          (state, *fields.values(), task["id"], *expected, *node_args)).rowcount == 1
     if moved and state != task["state"]:
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
@@ -582,7 +687,8 @@ async def try_start(task: dict) -> bool:
         if fields:
             update(task["id"], **fields)
         return False
-    if not transition(task, {"queued"}, "starting", error=None, budget_wait=None):
+    # The lease: claimed only on the node this check was for; a re-placement in between wins (12.5).
+    if not transition(task, {"queued"}, "starting", where_node=task["node_id"], error=None, budget_wait=None):
         return False
     await start(get_task(task["id"]))
     return True
@@ -689,10 +795,16 @@ def record_usage(task_id: str) -> None:
            "prompt_bytes": prompt_bytes, "effort": t.get("effort"), "outcome": outcome_name,
            "num_turns": t.get("num_turns"), "identity": t.get("budget_identity") or budget.identity(t["agent"], t.get("model")),
            "resets_at": t.get("resets_at") if outcome_name == "limit" else None,
-           "account": budget.task_account(t) if t["agent"] in budget.PAID_AGENTS else None}
+           "account": budget.task_account(t) if t["agent"] in budget.PAID_AGENTS else None,
+           "account_label": t.get("account_label") if t["agent"] in budget.PAID_AGENTS else None}
     with db() as c:
         inserted = c.execute(f"INSERT OR IGNORE INTO agent_usage ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                              tuple(row.values())).rowcount
+    if inserted and outcome_name == "limit":
+        # The provider's own limit message (docs/SPEC-live-monitor.md 4.2 alerts).
+        emit(task_id, "budget.limit", {"agent": t["agent"], "model": row["model"], "account": row["account"],
+                                       "label": row["account_label"], "resets_at": row["resets_at"],
+                                       "title": t.get("title")})
     if inserted and t.get("failure_reason") == "limit" and outcome_name != "limit":
         # Shown as a limit but not the provider's own message: say so once per run, so a new wording can be added.
         text = f"{tail(t.get('result'))}\n{tail(t.get('error'))}".strip()
@@ -788,6 +900,12 @@ class TaskIn(BaseModel):
     budget_override: str | None = None  # admin only: why the kind check is bypassed (recorded)
     review_of: str | None = None  # read-only review run inside that task's worktree
     origin_kind: str | None = None  # a re_review's originating review kind (review, final_review, security_review)
+    # Live monitor (docs/SPEC-live-monitor.md 2.1, 3.2, 6): pin a runner profile (its account), a display-only
+    # stage, and an advisory independence waiver ("waived" + a reason) for an ad-hoc review or test.
+    profile: str | None = None
+    stage: str | None = None
+    independence: str | None = None
+    independence_reason: str | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -862,9 +980,46 @@ async def create_task_route(t: TaskIn, request: Request) -> dict:
     return await create_task(t, scope=getattr(request.state, "scope", "admin"))
 
 
-async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None = None) -> dict:
+STAGE_RE = re.compile(r"^[a-z0-9-]{1,24}$")
+INDEPENDENT_KINDS = budget.REVIEW_KINDS | {"test"}
+
+
+def profile_slots(agent: str, profile: str, wanted_node: str | None) -> list[dict]:
+    """Usable slots of one pinned profile; 400 when no node has it, or none has it ready and signed in."""
+    usable_slots = [s for s in placement(agent, wanted_node) if s["profile"] == profile]
+    if usable_slots:
+        return usable_slots
+    flags = signed_out()
+    known = [s for n in node_rows() if n["status"] == "approved" and n.get("runner")
+             for s in node_slots(n, agent, flags) if s["profile"] == profile]
+    if not known:
+        raise HTTPException(400, f"unknown {agent} profile {profile}")
+    raise HTTPException(400, f"{agent} profile {profile} isn't ready or isn't signed in")
+
+
+def check_independence(t: "TaskIn", kind: str, agent: str, model: str | None, node: dict, pipeline: bool) -> dict | None:
+    """Ad-hoc review/test independence (docs/SPEC-live-monitor.md 6), after admission, on the resolved model. Raises
+    400 on a match with a recorded builder, or an unresolvable model, unless waived; returns the waiver or None."""
+    if pipeline or kind not in INDEPENDENT_KINDS or not t.parent_id:
+        return None
+    if t.independence == "waived":
+        return {"waived": True, "reason": (t.independence_reason or "").strip()[:300]}
+    import handoff  # local import: handoff builds on this module
+    resolved = model or (budget.node_default_model(agent, node["id"]) if agent in budget.PAID_AGENTS else None)
+    if not resolved:
+        raise HTTPException(400, f"independence: can't tell which {agent} model this {kind} would run, so it can't be "
+                                 "checked against the builders; name a model, or set independence 'waived' with a reason")
+    if (agent, resolved) in handoff.build_attempts(t.parent_id):
+        raise HTTPException(400, f"independence: {agent}:{resolved} built this work, so it can't {kind} it; use another "
+                                 "model, or set independence 'waived' with a reason (shown to the owner)")
+    return None
+
+
+async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None = None,
+                      pipeline: bool = False) -> dict:
     """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
-    `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to."""
+    `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to.
+    `pipeline` (in-process only): the pipeline engine, whose reviews keep their own independence check."""
     if t.agent not in AGENTS:
         raise HTTPException(400, f"agent must be one of {sorted(AGENTS)}")
     if t.mode not in MODES:
@@ -887,6 +1042,19 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                 raise HTTPException(400, f"unknown parent task {t.parent_id}")
     if t.role is not None and not ROLE_RE.fullmatch(t.role):
         raise HTTPException(400, "role must be lowercase letters, digits, dashes")
+    if t.stage is not None and not STAGE_RE.fullmatch(t.stage):
+        raise HTTPException(400, "stage must be 1-24 lowercase letters, digits or dashes")
+    if t.profile is not None:
+        if t.agent not in budget.PAID_AGENTS:
+            raise HTTPException(400, "profile is for Claude and Codex tasks")
+        if not PROFILE_RE.fullmatch(t.profile):
+            raise HTTPException(400, "profile must be a runner profile id")
+    if t.independence is not None:
+        if t.independence != "waived":
+            raise HTTPException(400, "independence can only be 'waived'")
+        if not (t.independence_reason or "").strip():
+            raise HTTPException(400, "an independence waiver needs a reason")
+    requested_node = t.node
     if t.policy is not None and "auto_approve" in t.policy:
         # Approval authority comes only from the stored (admin-only) policy layers, never from the request.
         raise HTTPException(403, "a task can't grant itself auto-approval; set it on the Policies page")
@@ -929,14 +1097,20 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
 
     def slots_for(of_agent: str) -> list[dict]:
         if of_agent not in slot_cache:
-            slot_cache[of_agent] = placement(of_agent, t.node) if of_agent in budget.PAID_AGENTS else []
+            if t.profile and of_agent == t.agent:
+                slot_cache[of_agent] = profile_slots(of_agent, t.profile, t.node)
+            else:
+                slot_cache[of_agent] = placement(of_agent, t.node) if of_agent in budget.PAID_AGENTS else []
         return slot_cache[of_agent]
+
+    if t.profile:
+        slots_for(t.agent)  # an unknown or unready profile is a 400 before admission
 
     try:
         decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
                                 failures=failures, node_id=t.node, origin_kind=t.origin_kind,
                                 accounts_for=lambda of_agent: accounts_of(slots_for(of_agent), of_agent),
-                                forbidden=forbidden)
+                                forbidden=forbidden, reroute=not t.profile)  # a pinned profile never moves
     except budget.Refusal as refusal:
         budget.log_decision("refused", refusal.detail, agent=t.agent, model=t.model, kind=kind,
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
@@ -965,6 +1139,11 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         mine = node_slots(node, agent)
         slot = next((s for s in mine if usable(s)), mine[0] if mine else None)
     account = (slot["account"] if slot else None) if agent in budget.PAID_AGENTS else None
+    # Before the row and any budget decision is logged, so a refused task leaves no trace (Fable's note b).
+    waiver = check_independence(t, kind, agent, model, node, pipeline)
+    placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
+              "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
+              "accounts": [s["node"] for s in on_account] if on_account else None}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -1003,7 +1182,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             "budget_wait": decision["wait"] if state == "queued" else None,
             "approved_tools": json.dumps(tools_at_launch),
             "profile": slot["profile"] if slot else "fleet", "account_label": slot["label"] if slot else None,
-            "account": account,
+            "account": account, "stage": t.stage, "independence": json.dumps(waiver) if waiver else None,
+            "placement": json.dumps(placed),
         }
         with db() as c:
             c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
@@ -1015,6 +1195,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                 c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?, 'task', ?)", (skill_id, task_id))
         ids.append(task_id)
         emit(task_id, f"task.{state}", {"title": part_title, "node": node["id"], "agent": agent, "mode": t.mode})
+        if waiver:
+            emit(task_id, "task.independence_waived", {"title": part_title, "kind": kind, "agent": agent,
+                                                       "model": model, "reason": waiver["reason"]})
         if index == 0:
             if decision["routed_from"]:
                 budget.log_decision("rerouted", f"{decision['routed_from']} is limited; sent to {decision['identity']}",
@@ -1035,11 +1218,22 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
 
 
 @router.get("/api/tasks/wait")
-async def wait(ids: str, timeout: float = 300, mode: str = "all") -> dict:
-    """Long-poll until all (or any) of the tasks leave the active states, or the timeout passes."""
+async def wait(ids: str, request: Request, timeout: float = 300, mode: str = "all") -> dict:
+    """Long-poll until all (or any) of the tasks leave the active states, or the timeout passes. A bridge session's
+    open wait is shown on Live (docs/SPEC-live-monitor.md 2.4), from local or operate+ callers only."""
     wanted = [i for i in ids.split(",") if i]
     for i in wanted:
         get_task(i)
+    counted = getattr(request.state, "scope", "admin") in ("operate", "admin")
+    session = presence.session_of(request.headers) if counted else None
+    presence.wait_started(session, wanted)
+    try:
+        return await _wait(wanted, timeout, mode)
+    finally:
+        presence.wait_ended(session, wanted)
+
+
+async def _wait(wanted: list[str], timeout: float, mode: str) -> dict:
     deadline = time.monotonic() + min(max(timeout, 1), 1800)
     while True:
         since = snapshot()  # before reading state, so an event in between still wakes us

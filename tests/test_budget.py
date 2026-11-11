@@ -889,7 +889,8 @@ class BudgetApiTests(unittest.TestCase):
         self.put_rules(rules(prompt__max_kb=2, prompt__hard_max_kb=6))
         parent = self.ok(agent="claude", model="claude-sonnet-5-5", kind="build", gate="pytest")
         diff = "".join(section(f"pkg/m{i}.py", "k" * 700) for i in range(5))
-        first = self.ok(agent="claude", model="claude-sonnet-5-5", kind="review", mode="read-only", worktree=False,
+        # A different model from the builder: ad-hoc reviews must be independent (docs/SPEC-live-monitor.md 6).
+        first = self.ok(agent="claude", model="claude-fable-5-2", kind="review", mode="read-only", worktree=False,
                         prompt="Review these.\n" + diff, parent_id=parent["id"], link="review")
         self.assertGreater(len(first["split"]), 1)
         for part in first["split"]:

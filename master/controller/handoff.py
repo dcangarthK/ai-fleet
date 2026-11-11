@@ -135,7 +135,7 @@ def key_limited(rules: dict, snap: dict, agent: str, key: str) -> float | None:
 
 
 def _offline(node: dict) -> bool:
-    return node.get("status") != "approved" or not node.get("runner") or (node.get("runner_fails") or 0) >= 3
+    return node.get("status") != "approved" or tasks.runner_offline(node) is not None  # one rule (live monitor 12.2)
 
 
 def resources(nodes: list[dict] | None = None, now: float | None = None) -> list[dict]:

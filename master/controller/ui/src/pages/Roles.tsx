@@ -1,25 +1,55 @@
 import { useState, type FormEvent } from "react";
-import { del, post } from "../lib/api";
-import { useFleet, useRun } from "../lib/data";
+import { Link } from "react-router-dom";
+import { del, post, type Assignment, type FleetNode } from "../lib/api";
+import { useFleet, useModels, useRun } from "../lib/data";
+import { explainReason, FIT_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead } from "../components/bits";
 
 const SUGGESTED = ["coder", "reviewer", "fast"];
 
+function routing(a: Assignment, n: FleetNode | undefined, reason: string | null | undefined) {
+  if (a.state === "pending_install") return { tone: "accent", label: "Waiting for install", why: "Switches on when the model is installed and tested." };
+  if (a.state === "blocked" || a.state === "failed") return { tone: a.state === "blocked" ? "warn" : "bad", label: a.state === "blocked" ? "Install blocked" : "Install failed", why: explainReason(reason) };
+  const live = !!n?.healthy && n.models.includes(a.model);
+  if (live) return { tone: "ok", label: "Live", why: "" };
+  return { tone: "bad", label: "Not routed", why: !n ? "The node is gone." : !n.healthy ? "The node's model server isn't answering." : "The model is no longer on the node." };
+}
+
 export function RolesPage() {
   const fleet = useFleet();
+  const models = useModels();
   const { run, busy, error, clearError } = useRun();
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved");
   const [role, setRole] = useState("coder");
   const [node, setNode] = useState("");
   const [model, setModel] = useState("");
-  const models = nodes.find((n) => n.id === node)?.models ?? [];
   const assignments = fleet.data?.assignments ?? [];
   const roles = Array.from(new Set([...SUGGESTED, ...assignments.map((a) => a.role)]));
+  const chosen = nodes.find((n) => n.id === node);
+  const catalog = models.data ?? [];
+
+  // Models on the node, plus catalog models that would be installed on assignment.
+  const onNode = new Set(chosen?.models ?? []);
+  const options = [
+    ...Array.from(onNode).sort().map((ref) => ({ ref, note: "installed" })),
+    ...catalog.filter((m) => !onNode.has(m.reference)).map((m) => {
+      const fit = m.nodes[node]?.fit ?? "unknown";
+      return { ref: m.reference, note: `will install${m.download_gb ? ` (${m.download_gb.toFixed(1)} GB)` : ""} · ${FIT_LABEL[fit].label.toLowerCase()}` };
+    }),
+  ];
+  const needsInstall = !!model && !onNode.has(model);
+  const remoteOff = chosen?.runner?.models?.remote_management === false;
 
   async function assign(e: FormEvent) {
     e.preventDefault();
-    await run(() => post("/api/roles", { role, node, model }));
+    const entry = catalog.find((m) => m.reference === model);
+    await run(() => post("/api/roles", { role, node, model, ensure_model: needsInstall, catalog_id: entry?.id }));
   }
+
+  const reasonFor = (a: Assignment) => {
+    const m = catalog.find((x) => x.reference === a.model || x.id === a.catalog_id);
+    return m?.nodes[a.node_id]?.reason;
+  };
 
   return (
     <>
@@ -40,18 +70,16 @@ export function RolesPage() {
                 return [<tr key={r}><td><b>{r}</b></td><td colSpan={4} className="quiet">No model assigned. Calls to this role fail until you assign one.</td></tr>];
               }
               return rows.map((a, i) => {
-                const n = nodes.find((x) => x.id === a.node_id) ?? fleet.data?.nodes.find((x) => x.id === a.node_id);
-                const live = !!n?.healthy && n.models.includes(a.model);
+                const n = fleet.data?.nodes.find((x) => x.id === a.node_id);
+                const st = routing(a, n, reasonFor(a));
                 return (
                   <tr key={r + a.node_id + a.model}>
                     <td>{i === 0 && <b>{r}</b>}</td>
                     <td className="mono">{a.model}</td>
                     <td>{a.node ?? a.node_id}</td>
-                    <td>{live ? <span className="state tone-ok">Live</span> : <span className="state tone-bad">Not routed</span>}
-                      {!live && <div className="sub">{!n ? "node is gone" : !n.healthy ? "model server not answering" : "model no longer on the node"}</div>}
-                    </td>
+                    <td><span className={`state tone-${st.tone}`}>{st.label}</span>{st.why && <div className="sub" style={{ maxWidth: 300 }}>{st.why}</div>}</td>
                     <td>
-                      <button disabled={busy} onClick={() => confirm(`Stop routing ${r} to ${a.model} on ${a.node}?`) &&
+                      <button disabled={busy} onClick={() => confirm(`Stop routing ${r} to ${a.model} on ${a.node ?? a.node_id}?`) &&
                         run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }))}>Remove</button>
                     </td>
                   </tr>
@@ -79,14 +107,18 @@ export function RolesPage() {
             </label>
             <label className="field">Model
               <select value={model} onChange={(e) => setModel(e.target.value)} required disabled={!node}>
-                <option value="" disabled>{node ? (models.length ? "Choose a model" : "This node has no models") : "Choose a node first"}</option>
-                {models.map((m) => <option key={m}>{m}</option>)}
+                <option value="" disabled>{node ? "Choose a model" : "Choose a node first"}</option>
+                {options.map((o) => <option key={o.ref} value={o.ref} disabled={o.note !== "installed" && remoteOff}>{o.ref} ({o.note})</option>)}
               </select>
             </label>
           </div>
           <div className="row" style={{ marginTop: 12 }}>
-            <button className="primary" disabled={busy || !node || !model}>Assign</button>
-            <span className="quiet small">Only models a node already has are listed. Installing new ones from here comes with the model catalog.</span>
+            <button className="primary" disabled={busy || !node || !model}>{needsInstall ? "Install and assign" : "Assign"}</button>
+            <span className="quiet small">
+              {needsInstall ? "The node downloads and tests the model first; the role switches on when it's ready."
+                : remoteOff ? "This node doesn't allow remote model installs, so only its installed models are offered."
+                : <>Models not on the node come from the <Link to="/models">catalog</Link> and are installed for you.</>}
+            </span>
           </div>
         </form>
       </section>

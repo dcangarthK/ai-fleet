@@ -54,3 +54,20 @@ describe("format", () => {
     expect(errorText(undefined, 401)).toMatch(/login/);
   });
 });
+
+import { explainReason, progressFraction } from "./format";
+
+describe("install helpers", () => {
+  it("explains runner reasons", () => {
+    expect(explainReason("engine_upgrade: requires a newer version of Ollama")).toMatch(/Update Ollama/);
+    expect(explainReason("no_space: 3GB free")).toMatch(/disk/);
+    expect(explainReason("wont_fit: needs 20GB")).toMatch(/memory/);
+    expect(explainReason("something else")).toBe("something else");
+    expect(explainReason(null)).toBe("");
+  });
+  it("progress", () => {
+    expect(progressFraction(null)).toBeNull();
+    expect(progressFraction({ completed: 1, total: 4 })).toBe(0.25);
+    expect(progressFraction({ completed: 9, total: 4 })).toBe(1);
+  });
+});

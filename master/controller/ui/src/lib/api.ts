@@ -17,6 +17,7 @@ export interface RunnerHealth {
   allow_raw_gates?: boolean;
   allowed_roots?: string[];
   max_jobs?: number;
+  models?: { remote_management: boolean; disk_reserve_gb?: number; ram_reserve_gb?: number; max_loaded?: number };
 }
 
 export interface InventoryServer {
@@ -53,11 +54,55 @@ export interface FleetNode {
   fails: number;
 }
 
+export type AssignmentState = "pending_install" | "active" | "blocked" | "failed";
+
 export interface Assignment {
   role: string;
   model: string;
   node_id: string;
   node: string | null;
+  state?: AssignmentState;
+  catalog_id?: string | null;
+}
+
+export type InstallState =
+  | "pending" | "checking" | "pulling" | "configuring" | "verifying" | "ready"
+  | "draining" | "removing" | "removed" | "failed" | "blocked" | "cancelled";
+
+export type Fit = "fits" | "tight" | "wont_fit" | "unknown";
+
+export interface ModelParams {
+  num_ctx?: number;
+  temperature?: number;
+  top_p?: number;
+  seed?: number;
+  think?: boolean;
+  keep_alive?: string;
+}
+
+export interface NodeModelState {
+  installed: boolean;
+  desired?: "present" | "absent" | null;
+  state?: InstallState | null;
+  reason?: string | null;
+  progress?: { completed?: number; total?: number; status?: string } | null;
+  fit: Fit;
+  ownership?: "fleet-managed" | "pre-existing" | null;
+  params?: ModelParams | null;
+}
+
+export interface CatalogModel {
+  id: string;
+  reference: string;
+  engine: string;
+  display_name: string | null;
+  download_gb: number | null;
+  digest: string | null;
+  defaults: ModelParams | null;
+  suggested_roles: string[] | null;
+  evals: Record<string, number> | null;
+  source: string;
+  nodes: Record<string, NodeModelState>;
 }
 
 export interface Fleet {
@@ -101,6 +146,10 @@ export interface Task {
   runs: number;
   error: string | null;
   agent_seconds: number;
+  role?: string | null;
+  instructions?: string | null;
+  policy?: PolicyBody | null;
+  policy_hash?: string | null;
 }
 
 export interface UsageRow {
@@ -151,3 +200,32 @@ export async function api<T>(path: string, method = "GET", body?: unknown): Prom
 export const get = <T>(path: string) => api<T>(path);
 export const post = <T>(path: string, body?: unknown) => api<T>(path, "POST", body);
 export const del = <T>(path: string, body?: unknown) => api<T>(path, "DELETE", body);
+export const put = <T>(path: string, body?: unknown) => api<T>(path, "PUT", body);
+
+export type Scope = "fleet" | "node" | "role" | "agent";
+
+export interface PolicyBody {
+  filesystem?: { allowed_roots?: string[]; denied?: string[] };
+  tools?: { claude_allow?: string[]; claude_deny?: string[] };
+  network?: { agents?: "allow" | "deny" };
+  mode_ceiling?: Mode;
+  limits?: { task_minutes?: number; max_concurrent?: number; agent_minutes_per_day?: number; quiet_hours?: string[] };
+}
+
+export interface Versioned {
+  scope: Scope;
+  scope_id: string;
+  version: number;
+  author: string;
+  created_at: number;
+}
+
+export interface InstructionSet extends Versioned { text: string }
+export interface PolicyDoc extends Versioned { body: PolicyBody }
+
+export interface Effective {
+  instructions: string;
+  policy: PolicyBody;
+  sources: Record<string, string | string[]>;
+  hash: string;
+}

@@ -15,6 +15,7 @@ import { NodeDetailPage, NodesPage } from "./pages/Nodes";
 import { RolesPage } from "./pages/Roles";
 import { ModelsPage } from "./pages/Models";
 import { ActivityPage, LaterPage, SettingsPage } from "./pages/Misc";
+import { PoliciesPage } from "./pages/Policies";
 
 try {
   const t = localStorage.getItem("fleet-theme");
@@ -35,7 +36,7 @@ const router = createBrowserRouter(
         { path: "roles", element: <RolesPage /> },
         { path: "nodes", element: <NodesPage /> },
         { path: "nodes/:id", element: <NodeDetailPage /> },
-        { path: "policies", element: <LaterPage title="Policies" what="Fleet, node, role and agent instructions and limits: folders, tools, network and budgets, enforced on each node." /> },
+        { path: "policies", element: <PoliciesPage /> },
         { path: "skills", element: <LaterPage title="Skills" what="Reusable, versioned instructions you bind to the fleet, a node, a role or a task." /> },
         { path: "evals", element: <LaterPage title="Evals" what="Score models per role on your own hardware, and get suggested role assignments." /> },
         { path: "activity", element: <ActivityPage /> },

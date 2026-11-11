@@ -11,14 +11,25 @@ function when(ts: number) {
 function describe(type: string, data: Record<string, unknown> | null): string {
   const d = data ?? {};
   const title = typeof d.title === "string" ? `“${d.title}”` : "a task";
+  const node = typeof d.node === "string" ? ` on ${d.node}` : "";
   const map: Record<string, string> = {
-    "task.created": `Created ${title}`,
-    "task.state": `${title} is now ${String(d.state ?? "").replace("_", " ")}`,
+    "task.queued": `Queued ${title}`,
+    "task.awaiting_approval": `${title} is waiting for approval`,
+    "task.starting": `Starting ${title}${node}`,
+    "task.working": `${title} is working${node}`,
+    "task.blocked": `${title} was blocked by a denied permission`,
+    "task.review": `${title} is ready for review`,
+    "task.failed": `${title} failed`,
+    "task.interrupted": `${title} was interrupted`,
+    "task.done": `${title} is done`,
+    "task.cancelled": `${title} was cancelled`,
     "task.approved": `Approved ${title}`,
-    "task.rejected": `Rejected ${title}`,
-    "task.message": `Sent a follow-up to ${title}`,
+    "task.unreachable": `Couldn't reach the runner for ${title}`,
     "task.cleaned_up": `Removed the worktree of ${title}`,
     "node.ceiling": `Set ${String(d.node ?? "a node")}'s highest mode to ${String(d.mode ?? "")}`,
+    "model.state": `${String(d.model ?? "A model")} on ${String(d.node ?? "a node")}: ${String(d.state ?? "")}`,
+    "model.install": `Install of ${String(d.model ?? "a model")} on ${String(d.node ?? "a node")} requested`,
+    "model.remove": `Removal of ${String(d.model ?? "a model")} from ${String(d.node ?? "a node")} requested`,
   };
   return map[type] ?? type;
 }

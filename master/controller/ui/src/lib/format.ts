@@ -90,3 +90,41 @@ export function taskActions(t: Task) {
     diff: !!t.branch,
   };
 }
+
+export const INSTALL_LABEL: Record<string, { tone: Tone; label: string }> = {
+  pending: { tone: "quiet", label: "Queued" },
+  checking: { tone: "accent", label: "Checking" },
+  pulling: { tone: "accent", label: "Downloading" },
+  configuring: { tone: "accent", label: "Configuring" },
+  verifying: { tone: "accent", label: "Testing" },
+  ready: { tone: "ok", label: "Installed" },
+  draining: { tone: "accent", label: "Draining" },
+  removing: { tone: "accent", label: "Removing" },
+  removed: { tone: "quiet", label: "Removed" },
+  failed: { tone: "bad", label: "Failed" },
+  blocked: { tone: "warn", label: "Blocked" },
+  cancelled: { tone: "quiet", label: "Cancelled" },
+};
+
+export const FIT_LABEL: Record<string, { tone: Tone; label: string }> = {
+  fits: { tone: "ok", label: "Fits" },
+  tight: { tone: "warn", label: "Tight fit" },
+  wont_fit: { tone: "bad", label: "Won't fit" },
+  unknown: { tone: "quiet", label: "Fit unknown" },
+};
+
+/** Turn a runner reason code into a sentence that says what to do. */
+export function explainReason(reason: string | null | undefined): string {
+  if (!reason) return "";
+  if (reason.startsWith("engine_upgrade:")) return "This node's Ollama is too old for this model. Update Ollama on the node, then retry. (" + reason.slice(15).trim() + ")";
+  if (reason.startsWith("no_space")) return "Not enough free disk on the node. Free some space or remove a model, then retry.";
+  if (reason.startsWith("wont_fit")) return "The model needs more memory than the node can spare. Pick a bigger node, a smaller context, or override the fit check.";
+  if (reason.startsWith("size unknown")) return "The registry didn't report this model's size, so the node won't download it.";
+  return reason;
+}
+
+/** 0..1 download progress, or null when unknown. */
+export function progressFraction(p: { completed?: number; total?: number } | null | undefined): number | null {
+  if (!p || !p.total) return null;
+  return Math.max(0, Math.min(1, (p.completed ?? 0) / p.total));
+}

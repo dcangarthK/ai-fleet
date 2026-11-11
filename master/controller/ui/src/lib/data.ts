@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { get, post, type Fleet, type FleetEvent, type Task, type UsageRow } from "./api";
+import { get, post, type CatalogModel, type Fleet, type FleetEvent, type Task, type UsageRow } from "./api";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -14,6 +14,14 @@ export const useTask = (id: string | undefined) =>
   useQuery({ queryKey: ["task", id], queryFn: () => get<Task>(`/api/tasks/${id}`), enabled: !!id });
 export const useUsage = (days = 1) =>
   useQuery({ queryKey: ["usage", days], queryFn: () => get<UsageRow[]>(`/api/usage?days=${days}`) });
+/** The catalog with per-node install state; polls faster while anything is installing. */
+export const useModels = () =>
+  useQuery({
+    queryKey: ["models"],
+    queryFn: () => get<CatalogModel[]>("/api/models"),
+    refetchInterval: (q) => (q.state.data ?? []).some((m) => Object.values(m.nodes).some((n) => n.state && BUSY.has(n.state))) ? 1500 : 30_000,
+  });
+export const BUSY = new Set(["pending", "checking", "pulling", "configuring", "verifying", "draining", "removing"]);
 export const useEvents = () =>
   useQuery({ queryKey: ["events"], queryFn: () => get<FleetEvent[]>("/api/events/list?after=0&limit=1000") });
 

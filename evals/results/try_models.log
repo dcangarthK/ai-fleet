@@ -1,0 +1,20 @@
+2026-11-10 23:40 pull qwen2.5-coder:7b (7GB free)
+2026-11-10 23:52 pull qwen2.5-coder:7b (4.7GB, 9.5GB free)
+2026-11-11 00:04 pull qwen2.5-coder:7b (4.7GB, 51.1GB free)
+2026-11-11 00:28 keep qwen2.5-coder:7b: best 16GB model for reviewer, fast
+2026-11-11 00:28 pull qwen3:8b (5.2GB, 54.4GB free)
+2026-11-11 01:26 eval failed or incomplete for qwen3:8b; not judging it
+2026-11-11 01:26 removed qwen3:8b (unjudged)
+2026-11-11 01:26 pull gemma3:12b (8.2GB, 54.2GB free)
+2026-11-11 01:26 pull failed: gemma3:12b
+2026-11-11 01:26 pull deepseek-coder-v2:16b (8.9GB, 54.2GB free)
+2026-11-11 02:12 keep deepseek-coder-v2:16b: best 16GB model for coder
+2026-11-11 02:12 pull phi4:14b (9.1GB, 43.4GB free)
+2026-11-11 02:56 removed deepseek-coder-v2:16b: not a best 16GB model for any role
+2026-11-11 02:56 keep phi4:14b: best 16GB model for coder, reviewer, fast
+2026-11-11 02:56 pull qwen2.5-coder:14b (9.0GB, 41.1GB free)
+2026-11-11 03:42 removed qwen2.5-coder:7b: not a best 16GB model for any role
+2026-11-11 03:42 keep qwen2.5-coder:14b: best 16GB model for coder, reviewer, fast
+2026-11-11 03:42 pull qwen3:14b (9.3GB, 35.5GB free)
+2026-11-11 05:18 eval failed or incomplete for qwen3:14b; not judging it
+2026-11-11 05:18 removed qwen3:14b (unjudged)

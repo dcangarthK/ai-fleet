@@ -1,0 +1,236 @@
+[
+ {
+  "id": "erase_running_install_op",
+  "expect": "request_changes",
+  "split": "holdout",
+  "keywords": [
+   "op_id=null",
+   "op_id",
+   "running install",
+   "in progress",
+   "erases",
+   "clears the op",
+   "loses the operation",
+   "overwrit",
+   "in-flight",
+   "running operation"
+  ],
+  "spec": "Assigning a role must never disturb an install that is already running for that model on that node.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -810,6 +810,11 @@ async def assign(a: Assignment) -> dict:\n         if not installed:\n             c.execute(\n                 \"INSERT INTO node_models \"\n                 \"(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) \"\n                 \"VALUES (?,?, 'present','checking',NULL,NULL,'{}','fleet-managed',?,0,0,?) \"\n+                \"ON CONFLICT(node,catalog_id) DO UPDATE SET desired='present',state='checking',reason=NULL,op_id=NULL,\"\n+                \"params=excluded.params,updated_at=excluded.updated_at\",\n                 (node[\"id\"], catalog_id, json.dumps(params), time.time()),\n             )\n",
+  "source": "Codex review of Phase 5b, fixed in 4cfc334"
+ },
+ {
+  "id": "ready_before_derived_model",
+  "expect": "request_changes",
+  "split": "dev",
+  "keywords": [
+   "derived",
+   "fleet-",
+   "params",
+   "settings",
+   "before the derived",
+   "not created",
+   "configured model"
+  ],
+  "spec": "A node model with settings (params) is served as a derived fleet-<id> model; it is 'ready' only when that derived model exists.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -720,6 +720,8 @@ def set_node_model(name, catalog_id, request):\n         installed = model[\"reference\"] in _json(node[\"models\"], [])\n         params = (validate_model_params(request.params) if request.params is not None else\n                   _json(old[\"params\"], {}) if old else {})\n+        state = \"ready\" if request.desired == \"present\" and installed else (\n+            \"removed\" if request.desired == \"absent\" and not installed else \"checking\")\n",
+  "source": "Codex review of Phase 5b, fixed in 4cfc334"
+ },
+ {
+  "id": "check_then_write_race",
+  "expect": "request_changes",
+  "split": "holdout",
+  "keywords": [
+   "race",
+   "atomic",
+   "concurrent",
+   "toctou",
+   "time of check",
+   "check-then",
+   "between the select",
+   "conditional update",
+   "not in the same"
+  ],
+  "spec": "A request must not overwrite a row that reconciliation has claimed ('starting') or that has an operation in progress.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -724,10 +724,16 @@ def set_node_model(name, catalog_id, request):\n         old = c.execute(\"SELECT * FROM node_models WHERE node=? AND catalog_id=?\",\n                         (node[\"id\"], catalog_id)).fetchone()\n+        if old and (old[\"state\"] == \"starting\" or (old[\"op_id\"] and old[\"state\"] in BUSY_INSTALL)):\n+            raise HTTPException(409, \"operation in progress\")\n         c.execute(\n+            \"INSERT OR REPLACE INTO node_models \"\n             \"(node,catalog_id,desired,state,reason,op_id,progress,ownership,params,override_fit,confirm_preexisting,updated_at) \"\n             \"VALUES (?,?,?,?,NULL,NULL,'{}',?,?,?,?,?)\",\n             (node[\"id\"], catalog_id, request.desired, state, ownership, json.dumps(params),\n",
+  "source": "Codex review round 2, fixed in 7c4e83c"
+ },
+ {
+  "id": "weak_idempotency_key",
+  "expect": "request_changes",
+  "split": "dev",
+  "keywords": [
+   "params",
+   "derived",
+   "override_fit",
+   "different settings",
+   "different parameters",
+   "only compares",
+   "too weak",
+   "same ref"
+  ],
+  "spec": "Repeating an identical ensure request returns the running operation; a request with different settings must not be silently merged into it.",
+  "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -1150,6 +1150,8 @@ class ModelManager:\n             running = next((op for op in self.operations.values()\n                             if op.get(\"state\") not in FINAL_OPERATION_STATES), None)\n+            if running and running.get(\"kind\") == kind and running.get(\"ref\") == body.get(\"ref\"):\n+                return dict(running)  # the same request again: idempotent\n             if running:\n                 raise HttpError(409, \"operation %s is already running\" % running[\"id\"])\n",
+  "source": "Codex review round 2, fixed in 7c4e83c"
+ },
+ {
+  "id": "role_routes_base_not_derived",
+  "expect": "request_changes",
+  "split": "holdout",
+  "keywords": [
+   "derived",
+   "fleet-",
+   "params",
+   "base model",
+   "settings",
+   "routes to",
+   "nonexistent"
+  ],
+  "spec": "With settings, the role routes to the derived fleet-<id> model; it may only become active once that model exists.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -808,8 +808,9 @@ async def assign(a: Assignment) -> dict:\n         model = catalog[\"reference\"] if catalog else a.model\n+        installed = model in json.loads(node[\"models\"])\n         params = validate_model_params((_json(catalog[\"defaults\"], {}) if catalog else {}) | a.params)\n+        state = \"active\" if installed else \"pending_install\"\n",
+  "source": "Codex review round 2, fixed in 7c4e83c"
+ },
+ {
+  "id": "reviewer_repo_in_denied_dir",
+  "expect": "request_changes",
+  "split": "dev",
+  "keywords": [
+   "fleet_dir",
+   ".ai-fleet",
+   "denied",
+   "worktree",
+   "refuse",
+   "403",
+   "runner policy",
+   "builder's cwd",
+   "builder cwd"
+  ],
+  "spec": "Reviewer agents run on nodes whose runner refuses any path under its own FLEET_DIR (~/.ai-fleet); task worktrees live in ~/.ai-fleet/worktrees.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -788,8 +788,8 @@ async def _pipeline_actions(p, actions):\n                 builder = tasks.get_task(p[\"build_task\"])\n                 review_task = await tasks.create_task(tasks.TaskIn(\n                     agent=reviewer[\"agent\"], prompt=review_prompt(p[\"spec\"], diff),\n+                    title=f\"Review: {p['title']}\", mode=\"read-only\", repo=builder.get(\"cwd\") or p.get(\"repo\"),\n                     worktree=False, node=builder[\"node_id\"], parent_id=p[\"build_task\"],\n                 ))\n",
+  "source": "Claude review of Phase 7, fixed before commit"
+ },
+ {
+  "id": "ownership_flips_on_ready",
+  "expect": "request_changes",
+  "split": "holdout",
+  "keywords": [
+   "pre-existing",
+   "preexisting",
+   "ownership",
+   "overwrit",
+   "relabel",
+   "confirm"
+  ],
+  "spec": "A model that was on the node before the fleet managed it stays 'pre-existing', even after the fleet adds settings to it.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -298,6 +298,7 @@ async def reconcile_models() -> None:\n             state = operation.get(\"state\", \"failed\")\n+            ownership = \"fleet-managed\" if state == \"ready\" else row.get(\"ownership\")\n             _set_node_model(row[\"node\"], row[\"catalog_id\"], state=state, reason=operation.get(\"reason\"),\n                             progress=json.dumps(operation.get(\"progress\") or {}), ownership=ownership)\n",
+  "source": "Claude review of Phase 5b, fixed before commit"
+ },
+ {
+  "id": "cwd_git_dir_unchecked",
+  "expect": "request_changes",
+  "split": "dev",
+  "keywords": [
+   "git",
+   "common dir",
+   "common-dir",
+   "gitdir",
+   ".git file",
+   "separate-git-dir",
+   "cwd"
+  ],
+  "spec": "Every path a job uses must be inside the node's allowed roots, including a repository's git directory (a .git file can point elsewhere).",
+  "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -555,6 +555,8 @@ def create(self, body):\n         repo = self.check_path(body[\"repo\"]) if body.get(\"repo\") else None\n         if repo:\n             self._check_git_common_dir(repo)\n+        requested_cwd = self.check_path(body[\"cwd\"]) if body.get(\"cwd\") else None\n",
+  "source": "Claude review of Phase 4, fixed before commit"
+ },
+ {
+  "id": "token_echoed_on_terminal",
+  "expect": "request_changes",
+  "split": "holdout",
+  "keywords": [
+   "echo",
+   "getpass",
+   "visible",
+   "terminal",
+   "tty",
+   "screen",
+   "shown"
+  ],
+  "spec": "`runner-token set` reads a secret token; it must never be shown on screen or in logs.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -385,6 +385,7 @@ def runner_token_cli(args):\n     with db() as c:\n         node = resolve(c, name)\n         if action == \"set\":\n+            token = sys.stdin.readline().strip()\n             if not token:\n                 raise SystemExit(\"runner token is empty\")\n",
+  "source": "Claude review of Phase 4, fixed before commit"
+ },
+ {
+  "id": "token_file_truncate_race",
+  "expect": "request_changes",
+  "split": "dev",
+  "keywords": [
+   "race",
+   "o_excl",
+   "excl",
+   "overwrit",
+   "concurrent",
+   "truncat",
+   "two runners",
+   "both"
+  ],
+  "spec": "If two runners start at once and no token exists, they must end up with the same token.",
+  "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -1010,6 +1010,10 @@ def runner_token(fleet_dir):\n     if not token:\n         token = secrets.token_urlsafe(32)\n+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\n+        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as handle:\n+            handle.write(token + \"\\n\")\n",
+  "source": "phi4 review of Phase 4 (partly), fixed before commit"
+ },
+ {
+  "id": "model_ref_matches_spec",
+  "expect": "approve",
+  "split": "holdout",
+  "keywords": [],
+  "spec": "`ref` must match ^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$",
+  "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -40,0 +41,1 @@\n+MODEL_REF = re.compile(r\"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$\")\n",
+  "source": "phi4 claimed this regex didn't match the spec; its 'fix' was identical",
+  "trap": "identical-fix false positive"
+ },
+ {
+  "id": "policy_errors_are_400",
+  "expect": "approve",
+  "split": "holdout",
+  "keywords": [],
+  "spec": "An invalid task policy is a 400, not a 500.",
+  "diff": "--- a/master/controller/tasks.py\n+++ b/master/controller/tasks.py\n@@ -490,6 +490,11 @@ async def create_task(t: TaskIn) -> dict:\n+    try:\n+        if t.policy is not None:\n+            fleet_policy.validate(t.policy)\n+        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy)\n+    except ValueError as exc:\n+        raise HTTPException(400, str(exc))\n",
+  "source": "phi4 claimed missing exception handling here",
+  "trap": "generic 'add error handling' false positive"
+ },
+ {
+  "id": "network_deny_wins",
+  "expect": "approve",
+  "split": "dev",
+  "keywords": [],
+  "spec": "Network policy: 'deny' in any layer wins over 'allow'.",
+  "diff": "--- a/master/controller/policy.py\n+++ b/master/controller/policy.py\n@@ -150,0 +150,7 @@ def merge(layers):\n+    networks = [(label, body[\"network\"][\"agents\"]) for label, body in bodies\n+                if \"network\" in body and \"agents\" in body[\"network\"]]\n+    if networks:\n+        denied = [item for item in networks if item[1] == \"deny\"]\n+        winner = denied[-1] if denied else networks[-1]\n+        _set_nested(result, \"network\", \"agents\", winner[1])\n+        sources[\"network.agents\"] = winner[0]\n",
+  "source": "clean code from Phase 6"
+ },
+ {
+  "id": "quiet_hours_wrap_midnight",
+  "expect": "approve",
+  "split": "dev",
+  "keywords": [],
+  "spec": "Quiet-hour windows are HH:MM-HH:MM, half-open, and may wrap past midnight.",
+  "diff": "--- a/master/controller/policy.py\n+++ b/master/controller/policy.py\n@@ -180,0 +180,10 @@\n+def in_quiet_hours(windows, minute):\n+    for window in windows:\n+        match = QUIET_RE.fullmatch(window)\n+        if not match:\n+            continue\n+        start = int(match[1]) * 60 + int(match[2])\n+        end = int(match[3]) * 60 + int(match[4])\n+        if start < end and start <= minute < end:\n+            return True\n+        if start > end and (minute >= start or minute < end):\n+            return True\n+    return False\n",
+  "source": "clean code from Phase 6"
+ },
+ {
+  "id": "claim_row_before_runner_call",
+  "expect": "approve",
+  "split": "holdout",
+  "keywords": [],
+  "spec": "Reconciliation claims a node_models row before starting a runner operation, so concurrent requests can't change it meanwhile.",
+  "diff": "--- a/master/controller/controller.py\n+++ b/master/controller/controller.py\n@@ -317,6 +317,15 @@ async def reconcile_models() -> None:\n+        claim = time.time()\n+        with db() as c:\n+            claimed = c.execute(\n+                \"UPDATE node_models SET state='starting', updated_at=? WHERE node=? AND catalog_id=? \"\n+                \"AND updated_at=? AND op_id IS NULL AND desired=?\",\n+                (claim, row[\"node\"], row[\"catalog_id\"], row[\"updated_at\"], row[\"desired\"])).rowcount\n+        if not claimed:\n+            continue  # changed since we read it; next pass sees the new row\n",
+  "source": "clean fix from 4cfc334"
+ },
+ {
+  "id": "hmac_token_compare",
+  "expect": "approve",
+  "split": "dev",
+  "keywords": [],
+  "spec": "Every runner route requires the token; compare in constant time.",
+  "diff": "--- a/nodes/runner.py\n+++ b/nodes/runner.py\n@@ -887,3 +887,4 @@ class Handler:\n     def _authorized(self):\n         token = self.server.runner_token\n-        return not token or self.headers.get(\"X-Runner-Token\") == token\n+        supplied = self.headers.get(\"X-Runner-Token\", \"\")\n+        return bool(token and hmac.compare_digest(token, supplied))\n",
+  "source": "clean code from Phase 4"
+ }
+]

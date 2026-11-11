@@ -1,0 +1,17 @@
+{
+  "description": "macOS notification when something needs you or finishes (rules on the Settings page decide which)",
+  "events": [
+    "task.awaiting_approval",
+    "task.blocked",
+    "task.auto_approve_exhausted",
+    "pipeline.ready",
+    "pipeline.escalated",
+    "pipeline.failed",
+    "model.state",
+    "node.offline"
+  ],
+  "command": [
+    "python3",
+    "macos-notify.py"
+  ]
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "id": "slugify",
+    "prompt": "Write a Python function `slugify(text: str) -> str` that returns a URL slug: lowercase, accents converted to plain ASCII letters (e.g. 'é' -> 'e'), every run of non-alphanumeric characters replaced by a single hyphen, and no leading or trailing hyphens. An input with no letters or digits returns an empty string.",
+    "tests": "from solution import slugify\nimport unittest\nclass T(unittest.TestCase):\n    def test_basic(self): self.assertEqual(slugify('Hello, World!'), 'hello-world')\n    def test_accents(self): self.assertEqual(slugify('Crème Brûlée'), 'creme-brulee')\n    def test_runs(self): self.assertEqual(slugify('  a -- b__c  '), 'a-b-c')\n    def test_digits(self): self.assertEqual(slugify('Python 3.12 Release'), 'python-3-12-release')\n    def test_empty(self): self.assertEqual(slugify('!!!'), '')\n    def test_blank(self): self.assertEqual(slugify(''), '')\n",
+    "symbol": "slugify"
+  },
+  {
+    "id": "parse_duration",
+    "prompt": "Write a Python function `parse_duration(s: str) -> int` that converts strings like '1h30m', '45s', '2h', '1h0m5s' into a number of seconds. Units are h, m, s, each at most once and in that order. Raise ValueError for an empty string, unknown units, repeated or out-of-order units, or missing numbers.",
+    "tests": "from solution import parse_duration\nimport unittest\nclass T(unittest.TestCase):\n    def test_full(self): self.assertEqual(parse_duration('1h30m15s'), 5415)\n    def test_single(self): self.assertEqual(parse_duration('45s'), 45)\n    def test_hours(self): self.assertEqual(parse_duration('2h'), 7200)\n    def test_zero(self): self.assertEqual(parse_duration('1h0m5s'), 3605)\n    def test_empty(self):\n        with self.assertRaises(ValueError): parse_duration('')\n    def test_unknown(self):\n        with self.assertRaises(ValueError): parse_duration('5d')\n    def test_order(self):\n        with self.assertRaises(ValueError): parse_duration('5s1h')\n    def test_missing_number(self):\n        with self.assertRaises(ValueError): parse_duration('h')\n",
+    "symbol": "parse_duration"
+  },
+  {
+    "id": "merge_intervals",
+    "prompt": "Write a Python function `merge_intervals(intervals: list[list[int]]) -> list[list[int]]` that merges overlapping or touching intervals ([1,3] and [3,5] merge) and returns them sorted by start. The input may be unsorted and must not be modified. Empty input returns [].",
+    "tests": "from solution import merge_intervals\nimport unittest\nclass T(unittest.TestCase):\n    def test_basic(self): self.assertEqual(merge_intervals([[1,3],[2,6],[8,10],[15,18]]), [[1,6],[8,10],[15,18]])\n    def test_touching(self): self.assertEqual(merge_intervals([[1,3],[3,5]]), [[1,5]])\n    def test_unsorted(self): self.assertEqual(merge_intervals([[8,10],[1,4],[2,3]]), [[1,4],[8,10]])\n    def test_empty(self): self.assertEqual(merge_intervals([]), [])\n    def test_contained(self): self.assertEqual(merge_intervals([[1,10],[2,3],[4,5]]), [[1,10]])\n    def test_not_mutated(self):\n        data = [[5,6],[1,2]]\n        merge_intervals(data)\n        self.assertEqual(data, [[5,6],[1,2]])\n",
+    "symbol": "merge_intervals"
+  },
+  {
+    "id": "lru_cache",
+    "prompt": "Write a Python class `LRUCache` with `__init__(self, capacity: int)`, `get(self, key)` returning the value or -1 if missing, and `put(self, key, value)`. When over capacity, evict the least recently used key. Both get and put count as a use. Raise ValueError if capacity < 1.",
+    "tests": "from solution import LRUCache\nimport unittest\nclass T(unittest.TestCase):\n    def test_evict(self):\n        c = LRUCache(2); c.put(1,1); c.put(2,2); self.assertEqual(c.get(1),1); c.put(3,3)\n        self.assertEqual(c.get(2),-1); self.assertEqual(c.get(3),3)\n    def test_update_counts_as_use(self):\n        c = LRUCache(2); c.put(1,1); c.put(2,2); c.put(1,10); c.put(3,3)\n        self.assertEqual(c.get(1),10); self.assertEqual(c.get(2),-1)\n    def test_missing(self): self.assertEqual(LRUCache(1).get('x'), -1)\n    def test_capacity(self):\n        with self.assertRaises(ValueError): LRUCache(0)\n",
+    "symbol": "LRUCache"
+  },
+  {
+    "id": "int_to_roman",
+    "prompt": "Write a Python function `int_to_roman(n: int) -> str` converting 1..3999 to Roman numerals using subtractive notation (4 = IV, 9 = IX, 40 = XL, 90 = XC, 400 = CD, 900 = CM). Raise ValueError for values outside 1..3999 and TypeError for non-integers (including bool).",
+    "tests": "from solution import int_to_roman\nimport unittest\nclass T(unittest.TestCase):\n    def test_1(self): self.assertEqual(int_to_roman(1), 'I')\n    def test_4(self): self.assertEqual(int_to_roman(4), 'IV')\n    def test_9(self): self.assertEqual(int_to_roman(9), 'IX')\n    def test_14(self): self.assertEqual(int_to_roman(14), 'XIV')\n    def test_40(self): self.assertEqual(int_to_roman(40), 'XL')\n    def test_90(self): self.assertEqual(int_to_roman(90), 'XC')\n    def test_400(self): self.assertEqual(int_to_roman(400), 'CD')\n    def test_1994(self): self.assertEqual(int_to_roman(1994), 'MCMXCIV')\n    def test_3999(self): self.assertEqual(int_to_roman(3999), 'MMMCMXCIX')\n    def test_range(self):\n        for bad in (0, 4000, -1):\n            with self.assertRaises(ValueError): int_to_roman(bad)\n    def test_type(self):\n        with self.assertRaises(TypeError): int_to_roman(2.5)\n        with self.assertRaises(TypeError): int_to_roman(True)\n",
+    "symbol": "int_to_roman"
+  },
+  {
+    "id": "top_k_words",
+    "prompt": "Write a Python function `top_k_words(words: list[str], k: int) -> list[str]` returning the k most frequent words, most frequent first; ties are broken alphabetically. Comparison is case-insensitive and results are lowercase. If k exceeds the number of distinct words, return all of them. Raise ValueError if k < 0.",
+    "tests": "from solution import top_k_words\nimport unittest\nclass T(unittest.TestCase):\n    def test_basic(self): self.assertEqual(top_k_words(['a','b','a','c','b','a'], 2), ['a','b'])\n    def test_ties(self): self.assertEqual(top_k_words(['pear','apple','pear','apple','fig'], 2), ['apple','pear'])\n    def test_case(self): self.assertEqual(top_k_words(['Go','go','GO','rust'], 1), ['go'])\n    def test_large_k(self): self.assertEqual(top_k_words(['x','y'], 5), ['x','y'])\n    def test_zero(self): self.assertEqual(top_k_words(['x'], 0), [])\n    def test_negative(self):\n        with self.assertRaises(ValueError): top_k_words(['x'], -1)\n",
+    "symbol": "top_k_words"
+  },
+  {
+    "id": "flatten_dict",
+    "prompt": "Write a Python function `flatten_dict(d: dict, sep: str = '.') -> dict` that flattens nested dictionaries into one level by joining keys with `sep`, e.g. {'a': {'b': 1}} -> {'a.b': 1}. Lists and other values are kept as they are (not flattened). Empty nested dicts are dropped. Non-string keys are converted with str().",
+    "tests": "from solution import flatten_dict\nimport unittest\nclass T(unittest.TestCase):\n    def test_basic(self): self.assertEqual(flatten_dict({'a': {'b': 1, 'c': {'d': 2}}, 'e': 3}), {'a.b': 1, 'a.c.d': 2, 'e': 3})\n    def test_sep(self): self.assertEqual(flatten_dict({'a': {'b': 1}}, sep='/'), {'a/b': 1})\n    def test_lists_kept(self): self.assertEqual(flatten_dict({'a': [1, {'b': 2}]}), {'a': [1, {'b': 2}]})\n    def test_empty_nested(self): self.assertEqual(flatten_dict({'a': {}, 'b': 1}), {'b': 1})\n    def test_int_keys(self): self.assertEqual(flatten_dict({1: {2: 'x'}}), {'1.2': 'x'})\n",
+    "symbol": "flatten_dict"
+  },
+  {
+    "id": "chunked",
+    "prompt": "Write a Python function `chunked(iterable, n: int)` that returns an iterator yielding lists of up to n items from any iterable (including generators and other one-pass iterators), the last list possibly shorter. Validate eagerly: calling chunked(x, n) with n < 1 must raise ValueError right away, before anything is iterated (so a plain generator function is not enough on its own).",
+    "tests": "from solution import chunked\nimport unittest\nclass T(unittest.TestCase):\n    def test_list(self): self.assertEqual(list(chunked([1,2,3,4,5], 2)), [[1,2],[3,4],[5]])\n    def test_generator(self): self.assertEqual(list(chunked((i for i in range(3)), 3)), [[0,1,2]])\n    def test_empty(self): self.assertEqual(list(chunked([], 4)), [])\n    def test_lazy(self):\n        it = chunked(iter([1, 2, 3]), 2)\n        self.assertEqual(next(it), [1, 2])\n    def test_bad_n(self):\n        with self.assertRaises(ValueError): chunked([1], 0)\n",
+    "symbol": "chunked"
+  },
+  {
+    "id": "is_valid_ipv4",
+    "prompt": "Write a Python function `is_valid_ipv4(s: str) -> bool` that returns True only for dotted-quad IPv4 addresses: exactly four decimal parts 0..255, no leading zeros (except '0' itself), no signs, no spaces, only ASCII digits.",
+    "tests": "from solution import is_valid_ipv4\nimport unittest\nclass T(unittest.TestCase):\n    def test_valid(self):\n        for s in ['0.0.0.0', '192.168.1.1', '255.255.255.255']: self.assertTrue(is_valid_ipv4(s), s)\n    def test_range(self): self.assertFalse(is_valid_ipv4('256.1.1.1'))\n    def test_part_count(self):\n        for s in ['1.1.1', '1.1.1.1.1', '1..1.1', '']: self.assertFalse(is_valid_ipv4(s), s)\n    def test_leading_zero(self): self.assertFalse(is_valid_ipv4('01.1.1.1'))\n    def test_signs_spaces(self):\n        for s in ['1.1.1.-1', ' 1.1.1.1', '1.1.1.+1']: self.assertFalse(is_valid_ipv4(s), s)\n    def test_non_ascii_digits(self):\n        for s in ['a.b.c.d', '1.1.1.\\u0661']: self.assertFalse(is_valid_ipv4(s), s)\n",
+    "symbol": "is_valid_ipv4"
+  }
+]

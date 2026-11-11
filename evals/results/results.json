@@ -1,0 +1,6361 @@
+[
+  {
+    "model": "qwen2.5:3b",
+    "roles": {
+      "coder": {
+        "score": 54.5,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.3333333333333333,
+            "passed": 2,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.5,
+            "passed": 4,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 0.5,
+            "passed": 2,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.9090909090909091,
+            "passed": 10,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.0,
+            "passed": 0,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.0,
+            "passed": 0,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 60.7,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 63.9,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 0.8333333333333334,
+            "reply": "Update auth: reject past exp claims, issue new tokens, test expired/refreshed"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 1.0,
+            "reply": "Update caching for product listings to reduce latency"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 0.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 0.0,
+            "reply": "bug"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      2.510798249859363,
+      2.3182386660482734,
+      2.015102333854884,
+      2.873760749818757,
+      3.2732190408278257,
+      1.6296315840445459,
+      2.3534842079970986,
+      1.5608468749560416,
+      1.1731697500217706,
+      2.708609958179295,
+      1.94297566707246,
+      2.279110375093296,
+      0.4218043331056833,
+      2.544642624910921,
+      0.46312374994158745,
+      2.212315290933475,
+      2.0272621249314398,
+      0.49842683295719326,
+      0.4211768328677863,
+      1.9679847499355674,
+      0.45705320802517235,
+      0.45869591692462564,
+      1.6069830001797527,
+      0.3703995831310749,
+      0.2315285000950098,
+      0.1420879999641329,
+      0.1069566251244396,
+      0.10804612492211163,
+      0.10831729113124311
+    ],
+    "tps": [
+      84.93964799875319,
+      85.4957301923177,
+      85.84984256942259,
+      84.77020045266845,
+      84.3098968289989,
+      85.07926913261959,
+      84.43904362629995,
+      85.19746632106883,
+      84.53692967167768,
+      83.48212836889401,
+      84.39668866625347,
+      83.71816240968806,
+      90.97204687360187,
+      83.59933165383259,
+      92.44454522132467,
+      83.26517413865153,
+      83.7056051628218,
+      91.12831664356185,
+      89.48986223492108,
+      83.93235846975679,
+      90.57656457836418,
+      92.3309872737338,
+      83.692205114088,
+      89.47821094461386,
+      94.17226451021948,
+      164.38074690501875,
+      163.88685874042625,
+      165.68463999834316,
+      159.41919124890669
+    ],
+    "size_gb": 2.5,
+    "errors": [],
+    "median_s": 1.61,
+    "tokens_per_s": 85.2,
+    "fits_16gb": true
+  },
+  {
+    "model": "llama3.2:latest",
+    "roles": {
+      "coder": {
+        "score": 70.8,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.3333333333333333,
+            "passed": 2,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.5,
+            "passed": 4,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.9090909090909091,
+            "passed": 10,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.0,
+            "passed": 0,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 64.3,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 66.7,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "fix auth and refresh token handling for expired and refreshed tokens"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 1.0,
+            "reply": "Improved product listing caching and reduced latency"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 0.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 0.0,
+            "reply": "feature"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      2.905652750050649,
+      2.47415762511082,
+      1.5021071669179946,
+      1.8082105000503361,
+      2.3677925830706954,
+      1.235910041956231,
+      1.543904084013775,
+      1.2134403339587152,
+      1.2653976248111576,
+      1.7425793330185115,
+      1.4339379579760134,
+      1.6005273330956697,
+      1.290924415923655,
+      1.3638064998667687,
+      1.433981291949749,
+      2.085481708170846,
+      1.3708320839796215,
+      1.6810689161065966,
+      1.3969692499376833,
+      1.5000597089529037,
+      1.163160459138453,
+      1.345615959027782,
+      1.3192233329173177,
+      0.30603783391416073,
+      0.21832154202274978,
+      0.14928695908747613,
+      0.11184183298610151,
+      0.1131031250115484,
+      0.11343895783647895
+    ],
+    "tps": [
+      87.9233601377466,
+      87.96412949043378,
+      88.39365675163533,
+      87.60803277381463,
+      87.94853386590867,
+      89.0482075751506,
+      88.08333056903457,
+      89.03169511232127,
+      87.95875956531107,
+      86.87697821165624,
+      86.73860615157446,
+      87.14271313329921,
+      87.46229583030035,
+      87.74143974104464,
+      87.29006006318102,
+      86.27736349666232,
+      87.09811693378896,
+      87.82240902503997,
+      87.9346354155546,
+      88.25062312110286,
+      87.12523926654195,
+      87.12921571709131,
+      87.37043031661548,
+      92.85263729345705,
+      98.92002211109794,
+      174.97238717014972,
+      173.22641914228151,
+      174.30839006417773,
+      165.67721472744523
+    ],
+    "size_gb": 3.4,
+    "errors": [],
+    "median_s": 1.37,
+    "tokens_per_s": 87.9,
+    "fits_16gb": true
+  },
+  {
+    "model": "codellama:latest",
+    "roles": {
+      "coder": {
+        "score": 69.1,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.625,
+            "passed": 5,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.09090909090909091,
+            "passed": 1,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.2,
+            "passed": 1,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 39.3,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "sql_injection",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "missing_none_check",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 55.6,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 0.6666666666666666,
+            "reply": "\"Update auth middleware to reject JWTs with expired claims and issue new access tokens for valid refresh tokens, with te"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 0.6666666666666666,
+            "reply": "\"Improve product listing cache with Redis, invalidate on update, and reduce GET /products latency from 900ms to 120ms\""
+          },
+          {
+            "id": "classify_bug",
+            "score": 0.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "Feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 0.0,
+            "reply": "Label: bug"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      5.6103341658599675,
+      6.447925625136122,
+      3.4720927919261158,
+      4.456049291882664,
+      6.747020749840885,
+      3.5317939589731395,
+      2.8959947500843555,
+      6.232676667161286,
+      1.3514805000741035,
+      0.9328706250526011,
+      0.6049613750074059,
+      0.7054191660135984,
+      0.6995572079904377,
+      0.6105791248846799,
+      0.666178832994774,
+      1.961307000136003,
+      0.6816448750905693,
+      0.8585243329871446,
+      0.5319980829954147,
+      0.698623709147796,
+      0.6908629590179771,
+      0.6766607079189271,
+      1.7750886250287294,
+      1.0104479580186307,
+      0.9117287080734968,
+      0.3120997080113739,
+      0.14286566711962223,
+      0.14215874997898936,
+      0.18060325016267598
+    ],
+    "tps": [
+      51.43523906147017,
+      51.10576035386558,
+      51.64167855467236,
+      51.47213809059355,
+      50.77323604054685,
+      51.28047166292556,
+      51.31787292490303,
+      50.60960341719216,
+      51.410755868386126,
+      58.664299262351676,
+      55.08763986734548,
+      54.64035092656102,
+      54.73170853985964,
+      55.93178980268481,
+      56.65781444973704,
+      50.679673704234546,
+      58.05969352232789,
+      54.152408732308764,
+      55.11298299296014,
+      55.21576108500921,
+      57.50959500866174,
+      55.88247423901761,
+      50.855884271969146,
+      56.77575440940956,
+      52.65473069277951,
+      76.41259766612492,
+      77.27834131004666,
+      77.24567665603466,
+      64.69926970699318
+    ],
+    "size_gb": 8.6,
+    "errors": [],
+    "median_s": 0.86,
+    "tokens_per_s": 54.7,
+    "fits_16gb": true
+  },
+  {
+    "model": "glm-4.7-flash:latest",
+    "roles": {
+      "coder": {
+        "score": 95.9,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 1.0,
+            "passed": 8,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 1.0,
+            "passed": 11,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 1.0,
+            "passed": 5,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "evaluated_at": null
+      },
+      "reviewer": {
+        "score": 92.9,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "resource_leak",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "path_traversal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ],
+        "evaluated_at": null
+      },
+      "fast": {
+        "score": 100.0,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Reject expired JWTs and issue new access tokens"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 1.0,
+            "reply": "Cache product listings in Redis and invalidate on update"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ],
+        "evaluated_at": null
+      },
+      "grounded": {
+        "score": 86.7,
+        "json_valid": 93.3,
+        "cases": [
+          {
+            "id": "config_default_role",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "reviewer",
+            "quotes": [
+              "default_role: reviewer"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999878139229983,
+            "logprob_mean": 0.9999933933485043,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_ollama_port",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "11434",
+            "quotes": [
+              "listen: 127.0.0.1:11434"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9992292023469624,
+            "logprob_mean": 0.9996133895102963,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_temperature",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "0",
+            "quotes": [
+              "temperature: 0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999989195563482,
+            "logprob_mean": 0.9999989195563482,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_headroom",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "3",
+            "quotes": [
+              "HEADROOM_GB = 3",
+              "# macOS + apps + KV cache"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999747306056163,
+            "logprob_mean": 0.9999747306056163,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_task_complete",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "complete",
+            "quotes": [
+              "task=7 state=complete exit=0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999274851534005,
+            "logprob_mean": 0.9999274851534005,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_denial_reason",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "expired_token",
+            "quotes": [
+              "reason=expired_token"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999070183778291,
+            "logprob_mean": 0.9999522145822944,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_model_speed",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "18.6 tok/s",
+            "quotes": [
+              "eval_rate=18.6 tok/s"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9963586404619958,
+            "logprob_mean": 0.9990711333586872,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_gate_failure",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "tests.test_policy.PolicyTests.test_denied_action",
+            "quotes": [
+              "failed_test=tests.test_policy.PolicyTests.test_denied_action"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999820636120296,
+            "logprob_mean": 0.9999969464771239,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_canonical_suffix",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": ":latest",
+            "quotes": [
+              "return name if ':' in name.split('/')[-1] else f'{name}:latest'",
+              "f'{name}:latest'"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999936631912311,
+            "logprob_mean": 0.9999936631912311,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_timeout",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "20",
+            "quotes": [
+              "proc.communicate(timeout=20)"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999848932370363,
+            "logprob_mean": 0.9999848932370363,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_allowed_verdicts",
+            "outcome": "wrong_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_sandbox_network",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "none",
+            "quotes": [
+              "--network",
+              "none"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999978016795983,
+            "logprob_mean": 0.9999978016795983,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_escalation_order",
+            "outcome": "wrong",
+            "status": "INVALID",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [],
+            "confidence": null,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": false,
+            "answerable": true
+          },
+          {
+            "id": "docs_signal_policy",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "telemetry",
+            "quotes": [
+              "Self-confidence and token probabilities remain telemetry"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999038747629155,
+            "logprob_mean": 0.9999518595289518,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_review_evidence",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "an exact quote from one added, removed, or context line, or from consecutive lines in one hunk",
+            "quotes": [
+              "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9979368881802541,
+            "logprob_mean": 0.9998111481855655,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_missing_fallback",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_no_tls_cert",
+            "outcome": "wrong",
+            "status": "INVALID",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [],
+            "confidence": null,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": false,
+            "answerable": false
+          },
+          {
+            "id": "config_removed_api_router",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_unknown_queue_limit",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_exit_code",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_contradicted_success",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_missing_model",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_duration",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_no_return_value",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_missing_hash",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_contradicted_async",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_unknown_retry_delay",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_no_windows_support",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_rejected_threshold",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_unknown_owner",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          }
+        ],
+        "hallucination_rate": 0.0,
+        "correct_abstain_rate": 0.9333,
+        "quote_validity": 1.0,
+        "risk_coverage": {
+          "logprob_min": [
+            [
+              0.9963586404619958,
+              1.0,
+              0.07692307692307693
+            ],
+            [
+              0.9979368881802541,
+              0.9230769230769231,
+              0.08333333333333333
+            ],
+            [
+              0.9992292023469624,
+              0.8461538461538461,
+              0.0
+            ],
+            [
+              0.9999038747629155,
+              0.7692307692307693,
+              0.0
+            ],
+            [
+              0.9999070183778291,
+              0.6923076923076923,
+              0.0
+            ],
+            [
+              0.9999274851534005,
+              0.6153846153846154,
+              0.0
+            ],
+            [
+              0.9999747306056163,
+              0.5384615384615384,
+              0.0
+            ],
+            [
+              0.9999820636120296,
+              0.46153846153846156,
+              0.0
+            ],
+            [
+              0.9999848932370363,
+              0.38461538461538464,
+              0.0
+            ],
+            [
+              0.9999878139229983,
+              0.3076923076923077,
+              0.0
+            ],
+            [
+              0.9999936631912311,
+              0.23076923076923078,
+              0.0
+            ],
+            [
+              0.9999978016795983,
+              0.15384615384615385,
+              0.0
+            ],
+            [
+              0.9999989195563482,
+              0.07692307692307693,
+              0.0
+            ]
+          ],
+          "logprob_mean": [
+            [
+              0.9990711333586872,
+              1.0,
+              0.07692307692307693
+            ],
+            [
+              0.9996133895102963,
+              0.9230769230769231,
+              0.08333333333333333
+            ],
+            [
+              0.9998111481855655,
+              0.8461538461538461,
+              0.09090909090909091
+            ],
+            [
+              0.9999274851534005,
+              0.7692307692307693,
+              0.0
+            ],
+            [
+              0.9999518595289518,
+              0.6923076923076923,
+              0.0
+            ],
+            [
+              0.9999522145822944,
+              0.6153846153846154,
+              0.0
+            ],
+            [
+              0.9999747306056163,
+              0.5384615384615384,
+              0.0
+            ],
+            [
+              0.9999848932370363,
+              0.46153846153846156,
+              0.0
+            ],
+            [
+              0.9999933933485043,
+              0.38461538461538464,
+              0.0
+            ],
+            [
+              0.9999936631912311,
+              0.3076923076923077,
+              0.0
+            ],
+            [
+              0.9999969464771239,
+              0.23076923076923078,
+              0.0
+            ],
+            [
+              0.9999978016795983,
+              0.15384615384615385,
+              0.0
+            ],
+            [
+              0.9999989195563482,
+              0.07692307692307693,
+              0.0
+            ]
+          ],
+          "confidence": [
+            [
+              1.0,
+              1.0,
+              0.07692307692307693
+            ]
+          ],
+          "agreement": [
+            [
+              0.6666666666666666,
+              0.8461538461538461,
+              0.0
+            ],
+            [
+              1.0,
+              0.7692307692307693,
+              0.0
+            ]
+          ]
+        },
+        "signal_decisions": {
+          "logprob_min": {
+            "decision": "dropped",
+            "threshold": 0.9963586404619958,
+            "coverage": 1.0,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.3333333333333333,
+            "train_rows": 10,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "logprob_mean": {
+            "decision": "dropped",
+            "threshold": 0.9990711333586872,
+            "coverage": 1.0,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.3333333333333333,
+            "train_rows": 10,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "confidence": {
+            "decision": "dropped",
+            "threshold": 1.0,
+            "coverage": 1.0,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.3333333333333333,
+            "train_rows": 10,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "agreement": {
+            "decision": "dropped",
+            "threshold": 0.6666666666666666,
+            "coverage": 0.6666666666666666,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.3333333333333333,
+            "train_rows": 10,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          }
+        },
+        "evaluated_at": 1794395771.6933901
+      },
+      "reviewer_real": {
+        "score": 31.2,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "policy_errors_are_400",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.4,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 2,
+            "matched": 2,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.2,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 1,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 1,
+            "matched": 1,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.3,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 10,
+            "found": 3,
+            "clean_cases": 6,
+            "alarmed": 0,
+            "serious": 3,
+            "matched": 3,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794403362.985023
+      }
+    },
+    "latencies": [
+      107.24782912500086,
+      71.10633962500287,
+      118.44100329100183,
+      28.874170374998357,
+      41.86975325000094
+    ],
+    "tps": [
+      19.88053843522412,
+      18.432620457551586,
+      19.305814209811263,
+      25.31542912172653,
+      22.653189817556296
+    ],
+    "size_gb": 19.6,
+    "errors": [
+      "reviewer_real/erase_running_install_op: timed out",
+      "reviewer_real/ready_before_derived_model: timed out",
+      "reviewer_real/check_then_write_race: timed out",
+      "reviewer_real/weak_idempotency_key: timed out",
+      "reviewer_real/role_routes_base_not_derived: timed out",
+      "reviewer_real/cwd_git_dir_unchecked: timed out",
+      "reviewer_real/token_echoed_on_terminal: timed out",
+      "reviewer_real/model_ref_matches_spec: timed out",
+      "reviewer_real/network_deny_wins: timed out",
+      "reviewer_real/quiet_hours_wrap_midnight: timed out",
+      "reviewer_real/claim_row_before_runner_call: timed out"
+    ],
+    "evaluated_at": 1794396395.437278,
+    "median_s": 71.11,
+    "tokens_per_s": 19.9,
+    "fits_16gb": false
+  },
+  {
+    "model": "qwen2.5-coder:7b",
+    "roles": {
+      "coder": {
+        "score": 69.1,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.0,
+            "passed": 0,
+            "total": 6,
+            "error": "ran 1 of 6 tests"
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.875,
+            "passed": 7,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.9090909090909091,
+            "passed": 10,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.6,
+            "passed": 3,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.0,
+            "passed": 0,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 85.7,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 80.6,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Refactor JWT handling, add token refresh, and update tests"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 0.8333333333333334,
+            "reply": "Cache product listings in Redis, invalidate on update, reduce p95 latency"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 0.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      2.660849750000125,
+      3.989783958000089,
+      2.5286370829999214,
+      3.2547089170000163,
+      5.327557458000001,
+      3.8548008330001267,
+      2.600300500000003,
+      1.6962371669999357,
+      1.8718543750001118,
+      4.5394757080000545,
+      2.7551604580000912,
+      3.876089833999913,
+      0.8563672499999484,
+      3.281398500000023,
+      3.350888040999962,
+      3.7360790420000285,
+      4.135104417000093,
+      1.0076290829999834,
+      0.8509224160000031,
+      0.9247909159998926,
+      0.922234625000101,
+      0.9223132500001157,
+      0.8530253750000156,
+      0.5977453329999207,
+      0.5302495000000818,
+      0.23673541599987402,
+      0.16324420799992367,
+      0.16200320799998735,
+      0.1623391250000168
+    ],
+    "tps": [
+      47.458788642486304,
+      48.08717989322332,
+      48.444978724959874,
+      48.05623950954658,
+      47.60356433592108,
+      47.83599721033485,
+      48.198228792033795,
+      48.41762885635411,
+      48.26497710947622,
+      46.70586297700143,
+      47.04270952851288,
+      46.586567410024145,
+      49.56131130544094,
+      46.87620150106521,
+      46.92678768556012,
+      46.907372550858604,
+      46.845286871060665,
+      49.55308659641596,
+      49.711099440532955,
+      49.67646864738297,
+      49.59517965602755,
+      49.61383874835101,
+      49.67263297803917,
+      51.76870570589896,
+      50.9718365216095,
+      94.91868932856703,
+      93.65360117763784,
+      94.5566837533746,
+      93.99747626175984
+    ],
+    "size_gb": 5.3,
+    "errors": [],
+    "evaluated_at": 1794349632.031967,
+    "median_s": 1.87,
+    "tokens_per_s": 48.4,
+    "fits_16gb": true
+  },
+  {
+    "model": "qwen3:8b",
+    "roles": {
+      "coder": {
+        "score": 73.7,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 1.0,
+            "passed": 11,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "evaluated_at": 1794415300.7980092
+      },
+      "reviewer": {
+        "score": 89.3,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "path_traversal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.625,
+            "precision": 0.7142857142857143,
+            "fp_rate": 0.0,
+            "bug_cases": 8,
+            "found": 5,
+            "clean_cases": 6,
+            "alarmed": 0,
+            "serious": 7,
+            "matched": 5,
+            "unsupported": 1,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794415583.164682
+      },
+      "fast": {
+        "score": 97.2,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Fix JWT expiration handling, refresh token support, and test coverage"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 0.8333333333333334,
+            "reply": "Cache product listings in Redis (5min TTL) with invalidation and latency reduction"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ],
+        "evaluated_at": 1794415645.996971
+      },
+      "grounded": {
+        "score": 90.0,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "config_default_role",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "reviewer",
+            "quotes": [
+              "default_role: reviewer"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_ollama_port",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "11434",
+            "quotes": [
+              "listen: 127.0.0.1:11434"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 0.99,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_temperature",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "0",
+            "quotes": [
+              "temperature: 0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_headroom",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "3",
+            "quotes": [
+              "HEADROOM_GB = 3"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_task_complete",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "complete",
+            "quotes": [
+              "2026-11-11T08:12:09Z task=7 state=complete exit=0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_denial_reason",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "expired_token",
+            "quotes": [
+              "auth request id=req-19 subject=node-3 decision=deny reason=expired_token"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 0.95,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_model_speed",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "18.6",
+            "quotes": [
+              "eval_rate=18.6 tok/s"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_gate_failure",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "tests.test_policy.PolicyTests.test_denied_action",
+            "quotes": [
+              "failed_test=tests.test_policy.PolicyTests.test_denied_action"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_canonical_suffix",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "latest",
+            "quotes": [
+              "return name if ':' in name.split('/')[-1'] else f'{name}:latest'"
+            ],
+            "quote_valid": 0,
+            "quote_invalid": 1,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_timeout",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "20",
+            "quotes": [
+              "return proc.communicate(timeout=20)"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_allowed_verdicts",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "abstain",
+            "quotes": [
+              "VERDICTS = {'approve', 'request_changes', 'abstain'}"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_sandbox_network",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "none",
+            "quotes": [
+              "--network",
+              "none"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_escalation_order",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "role fallback",
+            "quotes": [
+              "On ABSTAIN, try the role fallback once."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_signal_policy",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "telemetry",
+            "quotes": [
+              "Self-confidence and token probabilities remain telemetry until an evaluation shows that they predict errors."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_review_evidence",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "exact quote",
+            "quotes": [
+              "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_missing_fallback",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_no_tls_cert",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_removed_api_router",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "The standalone API-key router is disabled. Requests go through the authenticated controller."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_unknown_queue_limit",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_exit_code",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_contradicted_success",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "pipeline=release-4 result=failed"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_missing_model",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_duration",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_no_return_value",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_missing_hash",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_contradicted_async",
+            "outcome": "hallucinated",
+            "status": "ANSWER",
+            "answer": "None",
+            "quotes": [
+              "def ask_model(prompt):",
+              "    # This client is deliberately synchronous."
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 0.0,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_unknown_retry_delay",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_no_windows_support",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_rejected_threshold",
+            "outcome": "hallucinated",
+            "status": "ANSWER",
+            "answer": "None",
+            "quotes": [
+              "Fixed confidence thresholds are not adopted.",
+              "Thresholds must be calibrated separately for each model."
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "INFERRED"
+            ],
+            "confidence": 0.9,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_unknown_owner",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "Node approval is the user's responsibility and is performed from the dashboard."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          }
+        ],
+        "hallucination_rate": 0.1333,
+        "correct_abstain_rate": 0.8667,
+        "quote_validity": 0.9565,
+        "risk_coverage": {
+          "logprob_min": [],
+          "logprob_mean": [],
+          "confidence": [
+            [
+              0.9,
+              1.0,
+              0.17647058823529413
+            ],
+            [
+              0.95,
+              0.9411764705882353,
+              0.125
+            ],
+            [
+              0.99,
+              0.8823529411764706,
+              0.13333333333333333
+            ],
+            [
+              1.0,
+              0.8235294117647058,
+              0.14285714285714285
+            ]
+          ],
+          "agreement": [
+            [
+              0.0,
+              0.9411764705882353,
+              0.1875
+            ],
+            [
+              0.6666666666666666,
+              0.8823529411764706,
+              0.13333333333333333
+            ],
+            [
+              1.0,
+              0.7647058823529411,
+              0.15384615384615385
+            ]
+          ]
+        },
+        "signal_decisions": {
+          "logprob_min": {
+            "decision": "dropped",
+            "threshold": null,
+            "coverage": null,
+            "error_rate": null,
+            "baseline_error_rate": null,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "no training threshold reaches 70% coverage"
+          },
+          "logprob_mean": {
+            "decision": "dropped",
+            "threshold": null,
+            "coverage": null,
+            "error_rate": null,
+            "baseline_error_rate": null,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "no training threshold reaches 70% coverage"
+          },
+          "confidence": {
+            "decision": "dropped",
+            "threshold": 0.99,
+            "coverage": 0.75,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.25,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          },
+          "agreement": {
+            "decision": "kept",
+            "threshold": 0.6666666666666666,
+            "coverage": 0.75,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.25,
+            "train_rows": 13,
+            "held_out_rows": 4,
+            "reason": null
+          }
+        },
+        "evaluated_at": 1794416723.224302
+      },
+      "reviewer_real": {
+        "score": 62.5,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "erase_running_install_op",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "ready_before_derived_model",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "check_then_write_race",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "weak_idempotency_key",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "role_routes_base_not_derived",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "cwd_git_dir_unchecked",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_echoed_on_terminal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "model_ref_matches_spec",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "network_deny_wins",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "quiet_hours_wrap_midnight",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "claim_row_before_runner_call",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.6,
+            "precision": 0.75,
+            "fp_rate": 0.3333333333333333,
+            "bug_cases": 5,
+            "found": 3,
+            "clean_cases": 3,
+            "alarmed": 1,
+            "serious": 4,
+            "matched": 3,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.4,
+            "precision": 0.6666666666666666,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 3,
+            "matched": 2,
+            "unsupported": 3,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.5,
+            "precision": 0.7142857142857143,
+            "fp_rate": 0.16666666666666666,
+            "bug_cases": 10,
+            "found": 5,
+            "clean_cases": 6,
+            "alarmed": 1,
+            "serious": 7,
+            "matched": 5,
+            "unsupported": 4,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794417882.701616
+      }
+    },
+    "latencies": [
+      8.908827457998996,
+      7.885476916999323,
+      7.8695348750043195,
+      8.068688333005412,
+      7.2684948749956675,
+      7.112318915998912,
+      5.776145958006964,
+      6.875949957990088,
+      6.18186224999954,
+      7.364580833003856,
+      6.21680362499319,
+      6.803671707995818,
+      7.217113749997225,
+      5.6013209160009865,
+      6.190574875014136,
+      7.185321708995616,
+      11.517692875000648,
+      11.744442625000374,
+      13.435080832990934,
+      20.05858504200296,
+      24.82693041699531,
+      19.31586091600184,
+      17.98943899999722,
+      13.590845209007966,
+      14.40998350000882,
+      15.7264605419914,
+      13.11042058399471,
+      12.018037916001049,
+      12.785391583005548,
+      13.434645291999914,
+      14.60248300000967,
+      12.691903165992699,
+      14.234501666011056,
+      8.502794750005705,
+      8.873639833007473,
+      10.139630749996286,
+      10.986817291995976,
+      16.029250416992,
+      17.158579374998226,
+      16.38569304200064,
+      18.228233457994065,
+      9.874773957999423,
+      10.641885125005501,
+      16.258903750000172,
+      11.147605374993873,
+      14.450954750005621,
+      27.12318758299807,
+      17.036594207995222,
+      18.39794883300783,
+      15.000062207996962,
+      14.693125666002743,
+      11.22838016699825,
+      9.905517666993546,
+      14.32775933299854,
+      12.599536084002466,
+      13.359188457994605,
+      13.297889416993712,
+      10.810374459004379,
+      7.934226541998214,
+      9.385655082995072,
+      7.75587862500106,
+      9.815700874998583,
+      11.902260375005426,
+      9.015440832998138,
+      9.889002291005454,
+      12.71200516699173,
+      9.41964791699138,
+      11.191576500001247,
+      14.10998091599322,
+      10.252558874999522,
+      10.453895915998146,
+      9.923163583996939,
+      7.119592167000519,
+      8.819142249994911,
+      8.874063750001369,
+      9.119657542003551,
+      8.796585874995799,
+      9.94995187499444,
+      26.147779292004998,
+      36.73442533399793,
+      58.40054770799179,
+      36.686087667010725,
+      20.40994787499949,
+      34.57018441599212,
+      26.952676291999524,
+      55.7820320410101,
+      24.11481083399849,
+      16.296913917001802,
+      13.405105541998637,
+      54.413969500004896,
+      101.92894387499837,
+      20.53368741700251,
+      33.139058957996895
+    ],
+    "tps": [
+      38.38814166825185,
+      38.1686947391252,
+      39.99338617761798,
+      38.16194822900862,
+      38.62259227636639,
+      37.12431489582751,
+      37.66457033776512,
+      37.55121566494791,
+      37.33815668637092,
+      36.43538492362797,
+      35.983987025018706,
+      33.72800084616809,
+      34.85123308438361,
+      34.16933137750566,
+      34.557095513443755,
+      32.76143595433663,
+      33.18228689972007,
+      31.199831315437724,
+      28.743232306005492,
+      20.98226866338549,
+      24.33644124395694,
+      22.846072042278116,
+      25.801879896138438,
+      27.303949441438267,
+      26.80849385221799,
+      29.72777481772587,
+      25.645245051001982,
+      27.581214546548846,
+      29.094630382300533,
+      29.336725715857877,
+      30.878336094174937,
+      27.7648079176802,
+      30.159337806485425,
+      26.716131980823707,
+      26.9480383007468,
+      27.433395316803935,
+      22.930050094280436,
+      29.572449801062188,
+      30.998321260304838,
+      29.9445319069508,
+      23.76495614243886,
+      28.31926532415237,
+      23.009774371786193,
+      29.057530608356792,
+      24.960428983910358,
+      25.65615181219801,
+      23.942776131483065,
+      29.02507910050134,
+      29.157191791102466,
+      25.31517012971188,
+      23.027544100731163,
+      21.662109282965552,
+      29.801146728078052,
+      34.72377289744098,
+      30.213025289360935,
+      29.337857995325024,
+      33.260188464969055,
+      33.716640274184655,
+      30.384214843432968,
+      32.81359996125301,
+      31.998007731695303,
+      32.012147958772736,
+      31.71263043831997,
+      31.683271841888327,
+      32.163894182572534,
+      34.529177068299774,
+      30.626036247748797,
+      32.73577137098958,
+      30.93150747137182,
+      31.661295805047075,
+      32.923855006486065,
+      32.90472944182785,
+      32.061915696591235,
+      33.2791795175863,
+      31.79456562968314,
+      31.689635191425367,
+      32.66386126434821,
+      30.349003326222054,
+      28.898436605533814,
+      29.838351010471175,
+      28.890542908948383,
+      40.86395238296892,
+      30.096294442829695,
+      30.410409134233213,
+      30.214439355417436,
+      29.771491736775868,
+      31.198377275575346,
+      30.07523045628874,
+      34.13118295594666,
+      29.170051944688602,
+      36.621585629036474,
+      29.282918891880552,
+      40.3441491478654
+    ],
+    "size_gb": 6.0,
+    "errors": [
+      "reviewer_real/policy_errors_are_400: timed out"
+    ],
+    "evaluated_at": 1794415812.444,
+    "median_s": 12.02,
+    "tokens_per_s": 30.4,
+    "fits_16gb": true
+  },
+  {
+    "model": "deepseek-coder-v2:16b",
+    "roles": {
+      "coder": {
+        "score": 84.8,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.5,
+            "passed": 4,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 1.0,
+            "passed": 11,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 1.0,
+            "passed": 5,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 60.7,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "path_traversal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 77.8,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 0.8333333333333334,
+            "reply": "Reject expired JWTs and issue new access tokens on valid refresh tokens."
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 0.8333333333333334,
+            "reply": "Cached product listings in Redis, invalidated on update, reduced GET /products latency to 120ms"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 0.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      2.979031500000019,
+      4.418526374999601,
+      1.408144166999591,
+      2.3622501660001944,
+      2.8097276250000505,
+      1.9415526669999963,
+      1.8120778330003304,
+      1.433982124999602,
+      1.2485743330007608,
+      2.4058519579994027,
+      1.9329903750003723,
+      0.509890125000311,
+      0.5023394999998345,
+      1.7026620000006005,
+      1.6669693339999867,
+      0.5023360000004686,
+      4.22667199999978,
+      0.5269216659999074,
+      0.4723385409997718,
+      0.5026964160006173,
+      2.55594149999979,
+      0.5023502079993705,
+      0.4847675419996449,
+      0.3912535419995038,
+      0.4349958330003574,
+      0.22805945800064364,
+      0.11755174999962037,
+      0.1089282920002006,
+      0.12533458300003986
+    ],
+    "tps": [
+      103.47875846605778,
+      105.35180548726237,
+      107.98325676928808,
+      105.56879572655917,
+      106.26636495378641,
+      106.04850510392527,
+      105.88313156324894,
+      106.29636163793836,
+      107.4029624137342,
+      101.86931843355163,
+      101.81765195099372,
+      109.92576227767938,
+      110.04975762228695,
+      102.48536670991304,
+      102.18669092576735,
+      108.63452065583566,
+      100.67619754493961,
+      109.38409226781535,
+      109.59267016458463,
+      109.45405376040165,
+      101.46152177727052,
+      109.38126563804585,
+      109.27058768508456,
+      112.57438422796852,
+      110.38963918171325,
+      204.39099302035416,
+      203.54593298942214,
+      204.1580252529186,
+      192.9345812856543
+    ],
+    "size_gb": 11.4,
+    "errors": [],
+    "evaluated_at": 1794355890.48445,
+    "median_s": 1.25,
+    "tokens_per_s": 108.0,
+    "fits_16gb": true
+  },
+  {
+    "model": "phi4:14b",
+    "roles": {
+      "grounded": {
+        "score": 86.7,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "config_default_role",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "reviewer",
+            "quotes": [
+              "default_role: reviewer"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9998976221127227,
+            "logprob_mean": 0.9999482341773356,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_ollama_port",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "11434",
+            "quotes": [
+              "listen: 127.0.0.1:11434"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9744501023180046,
+            "logprob_mean": 0.9872249602401009,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_temperature",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "0",
+            "quotes": [
+              "temperature: 0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999809711162636,
+            "logprob_mean": 0.9999809711162636,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_headroom",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "3",
+            "quotes": [
+              "HEADROOM_GB = 3  # macOS + apps + KV cache"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999413703097405,
+            "logprob_mean": 0.9999413703097405,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_task_complete",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "complete",
+            "quotes": [
+              "task=7 state=complete exit=0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999130549950529,
+            "logprob_mean": 0.9999130549950529,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_denial_reason",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "expired_token",
+            "quotes": [
+              "reason=expired_token"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9708938889280108,
+            "logprob_mean": 0.9846967841819969,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_model_speed",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "18.6 tok/s",
+            "quotes": [
+              "eval_rate=18.6 tok/s"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9557523896998965,
+            "logprob_mean": 0.9889373229915108,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_gate_failure",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "test_denied_action",
+            "quotes": [
+              "failed_test=tests.test_policy.PolicyTests.test_denied_action"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.5867212817983868,
+            "logprob_mean": 0.8958998903115453,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_canonical_suffix",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": ":latest",
+            "quotes": [
+              "return f'{name}:latest'"
+            ],
+            "quote_valid": 0,
+            "quote_invalid": 1,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999983577764466,
+            "logprob_mean": 0.9999983577764466,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_timeout",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "20",
+            "quotes": [
+              "timeout=20"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999982821494744,
+            "logprob_mean": 0.9999982821494744,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_allowed_verdicts",
+            "outcome": "wrong_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "if verdict not in VERDICTS:",
+              "VERDICTS = {'approve', 'request_changes', 'abstain'}"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_sandbox_network",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "none",
+            "quotes": [
+              "--network",
+              "none"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9993083678962134,
+            "logprob_mean": 0.9993083678962134,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_escalation_order",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "role fallback",
+            "quotes": [
+              "On ABSTAIN, try the role fallback once."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.8722607980525787,
+            "logprob_mean": 0.9361115055803437,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_signal_policy",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "telemetry",
+            "quotes": [
+              "Self-confidence and token probabilities remain telemetry until an evaluation shows that they predict errors."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.7442739192581219,
+            "logprob_mean": 0.8721091300603322,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_review_evidence",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "an exact quote from one added, removed, or context line, or from consecutive lines in one hunk",
+            "quotes": [
+              "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.6024083598398094,
+            "logprob_mean": 0.9758749296494464,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_missing_fallback",
+            "outcome": "hallucinated",
+            "status": "ANSWER",
+            "answer": "qwen2.5-coder:7b",
+            "quotes": [
+              "qwen2.5-coder:7b"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.8974747628785996,
+            "logprob_mean": 0.9871815920111494,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_no_tls_cert",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "tls: disabled"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_removed_api_router",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "The standalone API-key router is disabled."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_unknown_queue_limit",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "queue:\n  strategy: fifo\n  retry_limit: 2"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_exit_code",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "2026-11-11T09:00:00Z task=12 state=queued",
+              "2026-11-11T09:00:02Z task=12 state=running"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_contradicted_success",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "pipeline=release-4 result=failed",
+              "summary='unit tests did not start because the sandbox was unavailable'"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_missing_model",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "request=91 role=reviewer status=unroutable\nreason='no eligible node online'"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_duration",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "task=44 created_at=2026-11-11T10:14:00Z",
+              "status=awaiting_approval"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_no_return_value",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "try:\n    post(base, '/api/generate', {'model': model, 'keep_alive': 0})\nexcept OSError:\n    pass"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_missing_hash",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "def save_event(store, event):\n    store.append(json.dumps(event))\n    store.flush()"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_contradicted_async",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "# This client is deliberately synchronous."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_unknown_retry_delay",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "for attempt in range(3):",
+              "result = send(request)",
+              "if result.ok:",
+              "break"
+            ],
+            "quote_valid": 4,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_no_windows_support",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "The onboarding guide in this section covers macOS and Linux nodes only."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_rejected_threshold",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "Fixed confidence thresholds are not adopted. Thresholds must be calibrated separately for each model."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_unknown_owner",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "Node approval is the user's responsibility and is performed from the dashboard."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          }
+        ],
+        "hallucination_rate": 0.0667,
+        "correct_abstain_rate": 0.9333,
+        "quote_validity": 0.9737,
+        "risk_coverage": {
+          "logprob_min": [
+            [
+              0.5867212817983868,
+              1.0,
+              0.2
+            ],
+            [
+              0.6024083598398094,
+              0.9333333333333333,
+              0.14285714285714285
+            ],
+            [
+              0.7442739192581219,
+              0.8666666666666667,
+              0.07692307692307693
+            ],
+            [
+              0.8722607980525787,
+              0.8,
+              0.08333333333333333
+            ],
+            [
+              0.8974747628785996,
+              0.7333333333333333,
+              0.09090909090909091
+            ],
+            [
+              0.9557523896998965,
+              0.6666666666666666,
+              0.0
+            ],
+            [
+              0.9708938889280108,
+              0.6,
+              0.0
+            ],
+            [
+              0.9744501023180046,
+              0.5333333333333333,
+              0.0
+            ],
+            [
+              0.9993083678962134,
+              0.4666666666666667,
+              0.0
+            ],
+            [
+              0.9998976221127227,
+              0.4,
+              0.0
+            ],
+            [
+              0.9999130549950529,
+              0.3333333333333333,
+              0.0
+            ],
+            [
+              0.9999413703097405,
+              0.26666666666666666,
+              0.0
+            ],
+            [
+              0.9999809711162636,
+              0.2,
+              0.0
+            ],
+            [
+              0.9999982821494744,
+              0.13333333333333333,
+              0.0
+            ],
+            [
+              0.9999983577764466,
+              0.06666666666666667,
+              0.0
+            ]
+          ],
+          "logprob_mean": [
+            [
+              0.8721091300603322,
+              1.0,
+              0.2
+            ],
+            [
+              0.8958998903115453,
+              0.9333333333333333,
+              0.21428571428571427
+            ],
+            [
+              0.9361115055803437,
+              0.8666666666666667,
+              0.15384615384615385
+            ],
+            [
+              0.9758749296494464,
+              0.8,
+              0.16666666666666666
+            ],
+            [
+              0.9846967841819969,
+              0.7333333333333333,
+              0.09090909090909091
+            ],
+            [
+              0.9871815920111494,
+              0.6666666666666666,
+              0.1
+            ],
+            [
+              0.9872249602401009,
+              0.6,
+              0.0
+            ],
+            [
+              0.9889373229915108,
+              0.5333333333333333,
+              0.0
+            ],
+            [
+              0.9993083678962134,
+              0.4666666666666667,
+              0.0
+            ],
+            [
+              0.9999130549950529,
+              0.4,
+              0.0
+            ],
+            [
+              0.9999413703097405,
+              0.3333333333333333,
+              0.0
+            ],
+            [
+              0.9999482341773356,
+              0.26666666666666666,
+              0.0
+            ],
+            [
+              0.9999809711162636,
+              0.2,
+              0.0
+            ],
+            [
+              0.9999982821494744,
+              0.13333333333333333,
+              0.0
+            ],
+            [
+              0.9999983577764466,
+              0.06666666666666667,
+              0.0
+            ]
+          ],
+          "confidence": [
+            [
+              1.0,
+              1.0,
+              0.2
+            ]
+          ],
+          "agreement": [
+            [
+              1.0,
+              0.9333333333333333,
+              0.14285714285714285
+            ]
+          ]
+        },
+        "signal_decisions": {
+          "logprob_min": {
+            "decision": "dropped",
+            "threshold": 0.7442739192581219,
+            "coverage": 0.75,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.5,
+            "train_rows": 11,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          },
+          "logprob_mean": {
+            "decision": "dropped",
+            "threshold": 0.9361115055803437,
+            "coverage": 1.0,
+            "error_rate": 0.5,
+            "baseline_error_rate": 0.5,
+            "train_rows": 11,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          },
+          "confidence": {
+            "decision": "dropped",
+            "threshold": 1.0,
+            "coverage": 1.0,
+            "error_rate": 0.5,
+            "baseline_error_rate": 0.5,
+            "train_rows": 11,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          },
+          "agreement": {
+            "decision": "dropped",
+            "threshold": 1.0,
+            "coverage": 0.75,
+            "error_rate": 0.3333333333333333,
+            "baseline_error_rate": 0.5,
+            "train_rows": 11,
+            "held_out_rows": 4,
+            "reason": "held-out rule not met"
+          }
+        },
+        "evaluated_at": 1794384119.31155
+      },
+      "reviewer_real": {
+        "score": 65.6,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "erase_running_install_op",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "ready_before_derived_model",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "check_then_write_race",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "weak_idempotency_key",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "role_routes_base_not_derived",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "cwd_git_dir_unchecked",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_echoed_on_terminal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "model_ref_matches_spec",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "policy_errors_are_400",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "network_deny_wins",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "quiet_hours_wrap_midnight",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "claim_row_before_runner_call",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.8,
+            "precision": 0.6666666666666666,
+            "fp_rate": 0.6666666666666666,
+            "bug_cases": 5,
+            "found": 4,
+            "clean_cases": 3,
+            "alarmed": 2,
+            "serious": 6,
+            "matched": 4,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.6,
+            "precision": 0.6,
+            "fp_rate": 0.3333333333333333,
+            "bug_cases": 5,
+            "found": 3,
+            "clean_cases": 3,
+            "alarmed": 1,
+            "serious": 5,
+            "matched": 3,
+            "unsupported": 2,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.7,
+            "precision": 0.6363636363636364,
+            "fp_rate": 0.5,
+            "bug_cases": 10,
+            "found": 7,
+            "clean_cases": 6,
+            "alarmed": 3,
+            "serious": 11,
+            "matched": 7,
+            "unsupported": 3,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794396395.43577
+      }
+    },
+    "latencies": [
+      23.113451416997123,
+      21.639494417002425,
+      27.175846625003032,
+      31.795568916000775,
+      16.33762183300132,
+      16.933404415998666,
+      13.388582375002443,
+      13.593454875001044,
+      16.851723709005455,
+      35.04949145899445,
+      30.781864707998466,
+      2.8916289170010714,
+      16.1065211669993,
+      22.881254625004658,
+      18.990418082998076,
+      1.9608815419996972
+    ],
+    "tps": [
+      13.03213081528107,
+      11.930769614697308,
+      10.648309606568333,
+      10.245585394526728,
+      12.453630288349904,
+      13.811343016899395,
+      15.265719169425024,
+      15.220090375905928,
+      14.205854512993604,
+      12.251383925406762,
+      11.415625665667296,
+      16.922082122682628,
+      13.149653163055834,
+      12.848457054439402,
+      13.605021040948328,
+      17.64921505448665
+    ],
+    "size_gb": 10.2,
+    "errors": [],
+    "evaluated_at": 1794396085.941344,
+    "median_s": 17.96,
+    "tokens_per_s": 13.1,
+    "fits_16gb": true
+  },
+  {
+    "model": "qwen2.5-coder:14b",
+    "roles": {
+      "grounded": {
+        "score": 96.7,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "config_default_role",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "reviewer",
+            "quotes": [
+              "default_role: reviewer"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999842057269626,
+            "logprob_mean": 0.999988123805888,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_ollama_port",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "11434",
+            "quotes": [
+              "listen: 127.0.0.1:11434"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9972464254926168,
+            "logprob_mean": 0.9994225789631542,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_temperature",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "0",
+            "quotes": [
+              "temperature: 0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9996982318926095,
+            "logprob_mean": 0.9996982318926095,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_headroom",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "3",
+            "quotes": [
+              "HEADROOM_GB = 3  # macOS + apps + KV cache"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9994181763603293,
+            "logprob_mean": 0.9994181763603293,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_task_complete",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "complete",
+            "quotes": [
+              "2026-11-11T08:12:09Z task=7 state=complete exit=0"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9995901840195516,
+            "logprob_mean": 0.9995901840195516,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_denial_reason",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "expired_token",
+            "quotes": [
+              "decision=deny reason=expired_token"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9993071578986364,
+            "logprob_mean": 0.9993083120270911,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_model_speed",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "18.6 tok/s",
+            "quotes": [
+              "eval_rate=18.6 tok/s"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9694711855099234,
+            "logprob_mean": 0.9937657948188683,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "log_gate_failure",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "tests.test_policy.PolicyTests.test_denied_action",
+            "quotes": [
+              "failed_test=tests.test_policy.PolicyTests.test_denied_action"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9839147068329561,
+            "logprob_mean": 0.9983719191008419,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_canonical_suffix",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": ":latest",
+            "quotes": [
+              "return name if ':' in name.split('/')[-1] else f'{name}:latest'"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9999770938270169,
+            "logprob_mean": 0.9999770938270169,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_timeout",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "20",
+            "quotes": [
+              "return proc.communicate(timeout=20)"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9996155718858766,
+            "logprob_mean": 0.9998073735144323,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_allowed_verdicts",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "abstain",
+            "quotes": [
+              "VERDICTS = {'approve', 'request_changes', 'abstain'}"
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9861410032131819,
+            "logprob_mean": 0.9953783256421375,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "code_sandbox_network",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "none",
+            "quotes": [
+              "--network",
+              "none"
+            ],
+            "quote_valid": 2,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.99874074446943,
+            "logprob_mean": 0.99874074446943,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_escalation_order",
+            "outcome": "wrong",
+            "status": "ANSWER",
+            "answer": "ABSTAIN",
+            "quotes": [
+              "On ABSTAIN, try the role fallback once."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.4062556042413723,
+            "logprob_mean": 0.8020390366710961,
+            "agreement": 0.6666666666666666,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_signal_policy",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "telemetry",
+            "quotes": [
+              "Self-confidence and token probabilities remain telemetry until an evaluation shows that they predict errors."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.9127933932997593,
+            "logprob_mean": 0.9559170201474891,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "docs_review_evidence",
+            "outcome": "correct",
+            "status": "ANSWER",
+            "answer": "exact quote",
+            "quotes": [
+              "Evidence must be an exact quote from one added, removed, or context line, or from consecutive lines in one hunk."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "ESTABLISHED"
+            ],
+            "confidence": 1.0,
+            "logprob_min": 0.5280376697290562,
+            "logprob_mean": 0.7617955001481631,
+            "agreement": 1.0,
+            "valid_json": true,
+            "answerable": true
+          },
+          {
+            "id": "config_missing_fallback",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_no_tls_cert",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_removed_api_router",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "config_unknown_queue_limit",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_exit_code",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_contradicted_success",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_missing_model",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "log_no_duration",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_no_return_value",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_missing_hash",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_contradicted_async",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "code_unknown_retry_delay",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_no_windows_support",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_rejected_threshold",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [
+              "Fixed confidence thresholds are not adopted. Thresholds must be calibrated separately for each model."
+            ],
+            "quote_valid": 1,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          },
+          {
+            "id": "docs_unknown_owner",
+            "outcome": "correct_abstain",
+            "status": "ABSTAIN",
+            "answer": "",
+            "quotes": [],
+            "quote_valid": 0,
+            "quote_invalid": 0,
+            "tags": [
+              "UNKNOWN"
+            ],
+            "confidence": 0.0,
+            "logprob_min": null,
+            "logprob_mean": null,
+            "agreement": null,
+            "valid_json": true,
+            "answerable": false
+          }
+        ],
+        "hallucination_rate": 0.0,
+        "correct_abstain_rate": 1.0,
+        "quote_validity": 1.0,
+        "risk_coverage": {
+          "logprob_min": [
+            [
+              0.4062556042413723,
+              1.0,
+              0.06666666666666667
+            ],
+            [
+              0.5280376697290562,
+              0.9333333333333333,
+              0.0
+            ],
+            [
+              0.9127933932997593,
+              0.8666666666666667,
+              0.0
+            ],
+            [
+              0.9694711855099234,
+              0.8,
+              0.0
+            ],
+            [
+              0.9839147068329561,
+              0.7333333333333333,
+              0.0
+            ],
+            [
+              0.9861410032131819,
+              0.6666666666666666,
+              0.0
+            ],
+            [
+              0.9972464254926168,
+              0.6,
+              0.0
+            ],
+            [
+              0.99874074446943,
+              0.5333333333333333,
+              0.0
+            ],
+            [
+              0.9993071578986364,
+              0.4666666666666667,
+              0.0
+            ],
+            [
+              0.9994181763603293,
+              0.4,
+              0.0
+            ],
+            [
+              0.9995901840195516,
+              0.3333333333333333,
+              0.0
+            ],
+            [
+              0.9996155718858766,
+              0.26666666666666666,
+              0.0
+            ],
+            [
+              0.9996982318926095,
+              0.2,
+              0.0
+            ],
+            [
+              0.9999770938270169,
+              0.13333333333333333,
+              0.0
+            ],
+            [
+              0.9999842057269626,
+              0.06666666666666667,
+              0.0
+            ]
+          ],
+          "logprob_mean": [
+            [
+              0.7617955001481631,
+              1.0,
+              0.06666666666666667
+            ],
+            [
+              0.8020390366710961,
+              0.9333333333333333,
+              0.07142857142857142
+            ],
+            [
+              0.9559170201474891,
+              0.8666666666666667,
+              0.0
+            ],
+            [
+              0.9937657948188683,
+              0.8,
+              0.0
+            ],
+            [
+              0.9953783256421375,
+              0.7333333333333333,
+              0.0
+            ],
+            [
+              0.9983719191008419,
+              0.6666666666666666,
+              0.0
+            ],
+            [
+              0.99874074446943,
+              0.6,
+              0.0
+            ],
+            [
+              0.9993083120270911,
+              0.5333333333333333,
+              0.0
+            ],
+            [
+              0.9994181763603293,
+              0.4666666666666667,
+              0.0
+            ],
+            [
+              0.9994225789631542,
+              0.4,
+              0.0
+            ],
+            [
+              0.9995901840195516,
+              0.3333333333333333,
+              0.0
+            ],
+            [
+              0.9996982318926095,
+              0.26666666666666666,
+              0.0
+            ],
+            [
+              0.9998073735144323,
+              0.2,
+              0.0
+            ],
+            [
+              0.9999770938270169,
+              0.13333333333333333,
+              0.0
+            ],
+            [
+              0.999988123805888,
+              0.06666666666666667,
+              0.0
+            ]
+          ],
+          "confidence": [
+            [
+              1.0,
+              1.0,
+              0.06666666666666667
+            ]
+          ],
+          "agreement": [
+            [
+              0.6666666666666666,
+              0.9333333333333333,
+              0.07142857142857142
+            ],
+            [
+              1.0,
+              0.8666666666666667,
+              0.0
+            ]
+          ]
+        },
+        "signal_decisions": {
+          "logprob_min": {
+            "decision": "dropped",
+            "threshold": 0.9127933932997593,
+            "coverage": 0.6666666666666666,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.0,
+            "train_rows": 12,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "logprob_mean": {
+            "decision": "dropped",
+            "threshold": 0.9559170201474891,
+            "coverage": 0.6666666666666666,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.0,
+            "train_rows": 12,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "confidence": {
+            "decision": "dropped",
+            "threshold": 1.0,
+            "coverage": 1.0,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.0,
+            "train_rows": 12,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          },
+          "agreement": {
+            "decision": "dropped",
+            "threshold": 1.0,
+            "coverage": 1.0,
+            "error_rate": 0.0,
+            "baseline_error_rate": 0.0,
+            "train_rows": 12,
+            "held_out_rows": 3,
+            "reason": "held-out rule not met"
+          }
+        },
+        "evaluated_at": 1794383894.251065
+      },
+      "reviewer_real": {
+        "score": 56.2,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "erase_running_install_op",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "ready_before_derived_model",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "check_then_write_race",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "weak_idempotency_key",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "role_routes_base_not_derived",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "cwd_git_dir_unchecked",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_echoed_on_terminal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "model_ref_matches_spec",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "policy_errors_are_400",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "network_deny_wins",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "quiet_hours_wrap_midnight",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "claim_row_before_runner_call",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.4,
+            "precision": 0.4,
+            "fp_rate": 1.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 3,
+            "serious": 5,
+            "matched": 2,
+            "unsupported": 3,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.4,
+            "precision": 0.6666666666666666,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 3,
+            "matched": 2,
+            "unsupported": 3,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.4,
+            "precision": 0.5,
+            "fp_rate": 0.5,
+            "bug_cases": 10,
+            "found": 4,
+            "clean_cases": 6,
+            "alarmed": 3,
+            "serious": 8,
+            "matched": 4,
+            "unsupported": 6,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794396085.939868
+      }
+    },
+    "latencies": [
+      20.178199959002086,
+      16.33702112500032,
+      14.411875582998618,
+      12.21301466699515,
+      11.610886916998425,
+      14.401430625002831,
+      12.965353291998326,
+      10.810523083004227,
+      12.121001708997937,
+      15.479167832992971,
+      2.485966833999555,
+      2.141416874997958,
+      10.80348383400269,
+      11.667569208002533,
+      18.90880599999946,
+      10.805845832997875
+    ],
+    "tps": [
+      21.584917578269216,
+      21.708627038415333,
+      21.773858100287125,
+      21.786898758586975,
+      21.78291944827687,
+      21.603503744725273,
+      21.412762242482515,
+      21.451440100198603,
+      21.185445551796775,
+      21.088303513459508,
+      21.387178403419256,
+      21.45579771199283,
+      20.49241635765962,
+      20.4686794192962,
+      18.79872138959691,
+      17.532985567098223
+    ],
+    "size_gb": 10.1,
+    "errors": [],
+    "evaluated_at": 1794395888.592171,
+    "median_s": 12.17,
+    "tokens_per_s": 21.4,
+    "fits_16gb": true
+  },
+  {
+    "model": "qwen3:14b",
+    "roles": {
+      "coder": {
+        "score": 84.8,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 1.0,
+            "passed": 11,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 1.0,
+            "passed": 5,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ]
+      },
+      "reviewer": {
+        "score": 92.9,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "path_traversal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null
+          }
+        ]
+      },
+      "fast": {
+        "score": 97.2,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Reject expired JWTs, issue new tokens on refresh, add test coverage"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 0.8333333333333334,
+            "reply": "Add Redis caching for product listings with invalidation on update, reducing p95 latency to 120ms"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ]
+      }
+    },
+    "latencies": [
+      175.97077608299878,
+      0,
+      223.97282700000142,
+      182.99710966699786,
+      455.23844254199867,
+      211.3070867919996,
+      277.33420887500324,
+      195.0330672909986,
+      324.9260667919989,
+      36.903908874999615,
+      22.408846875001473,
+      65.38291499999832,
+      25.87880320900149,
+      91.5692475830001,
+      28.61401774999831,
+      80.48036287500145,
+      23.491502500000934,
+      34.73227562500324,
+      31.530010749997018,
+      46.3498989159998,
+      42.416796749999776,
+      25.87745858299968,
+      29.5981037499987,
+      16.03810829199938,
+      23.923373542002082,
+      16.69514149999668,
+      13.745291582999926,
+      14.396071541999845,
+      19.90349349999815
+    ],
+    "tps": [
+      7.872871205089128,
+      6.861686584064203,
+      8.264124910071692,
+      11.208823555603205,
+      12.291271786868997,
+      11.953255451258492,
+      11.95954725059445,
+      12.0808627028337,
+      13.688879646959913,
+      13.767670576009959,
+      13.126415119845026,
+      13.370174403228951,
+      17.53023524255669,
+      14.21783194626047,
+      12.65610424791019,
+      15.189749611256023,
+      18.867034609437358,
+      16.63292489345547,
+      16.453409907503044,
+      15.087466729288103,
+      12.510178218447638,
+      19.335313186906337,
+      12.340905373979206,
+      12.311637192740529,
+      12.44454526048531,
+      12.14904308799083,
+      12.391699131799495,
+      12.333340857124176
+    ],
+    "size_gb": 10.8,
+    "errors": [
+      "coder/parse_duration: timed out"
+    ],
+    "evaluated_at": 1794363778.136263,
+    "median_s": 34.73,
+    "tokens_per_s": 12.5,
+    "fits_16gb": true
+  },
+  {
+    "model": "fleet-glm-4.7-flash-latest",
+    "roles": {
+      "reviewer_real": {
+        "score": 31.2,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "reviewer_repo_in_denied_dir",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "ownership_flips_on_ready",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "token_file_truncate_race",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "policy_errors_are_400",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "hmac_token_compare",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": 0.4,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 2,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 2,
+            "matched": 2,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": 0.2,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 5,
+            "found": 1,
+            "clean_cases": 3,
+            "alarmed": 0,
+            "serious": 1,
+            "matched": 1,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.3,
+            "precision": 1.0,
+            "fp_rate": 0.0,
+            "bug_cases": 10,
+            "found": 3,
+            "clean_cases": 6,
+            "alarmed": 0,
+            "serious": 3,
+            "matched": 3,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        },
+        "evaluated_at": 1794411099.6996632
+      }
+    },
+    "latencies": [
+      358.401590124995,
+      400.6022633329994,
+      166.69637525000144,
+      167.93996320800215,
+      42.67990183400252
+    ],
+    "tps": [
+      19.855227718616806,
+      21.0947518131535,
+      21.61710747455464,
+      23.985075846206467,
+      23.293746585897033
+    ],
+    "size_gb": 19.6,
+    "errors": [
+      "reviewer_real/erase_running_install_op: timed out",
+      "reviewer_real/ready_before_derived_model: timed out",
+      "reviewer_real/check_then_write_race: timed out",
+      "reviewer_real/weak_idempotency_key: timed out",
+      "reviewer_real/role_routes_base_not_derived: timed out",
+      "reviewer_real/cwd_git_dir_unchecked: timed out",
+      "reviewer_real/token_echoed_on_terminal: timed out",
+      "reviewer_real/model_ref_matches_spec: timed out",
+      "reviewer_real/network_deny_wins: timed out",
+      "reviewer_real/quiet_hours_wrap_midnight: timed out",
+      "reviewer_real/claim_row_before_runner_call: timed out"
+    ],
+    "evaluated_at": 1794403362.9890518,
+    "median_s": 167.94,
+    "tokens_per_s": 21.6,
+    "fits_16gb": false
+  }
+]

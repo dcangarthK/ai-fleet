@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 
@@ -38,21 +39,29 @@ def validate(identifier: str, description, agents, risk, body) -> tuple[str, lis
 
 
 def put(identifier: str, description: str, agents: list[str], risk: str, body: str,
-        author: str, *, skip_digest: bool = False, requested_version: int | None = None) -> dict | None:
+        author: str, *, skip_digest: bool = False, requested_version: int | None = None,
+        first_bindings: list[tuple[str, str]] | None = None) -> dict | None:
+    """Add a version. ``first_bindings`` are inserted in the same transaction, and only when no
+    version by ``author`` exists yet, so a skill never commits without its initial bindings."""
     description, agents, risk, body = validate(identifier, description, agents, risk, body)
     checksum = digest(description, agents, risk, body)
     now = time.time()
+    added = []
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
         if skip_digest and c.execute("SELECT 1 FROM skills WHERE id=? AND digest=?", (identifier, checksum)).fetchone():
             return None
+        first = not c.execute("SELECT 1 FROM skills WHERE id=? AND author=?", (identifier, author)).fetchone()
         next_version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM skills WHERE id=?", (identifier,)).fetchone()[0]
         version = max(next_version, requested_version or 1)
         c.execute("INSERT INTO skills VALUES (?,?,?,?,?,?,?,?,?)",
                   (identifier, version, description, json.dumps(agents), risk, body, checksum, author, now))
+        for scope, scope_id in (first_bindings or []) if first else []:
+            c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?,?,?)", (identifier, scope, scope_id))
+            added.append({"skill_id": identifier, "scope": scope, "scope_id": scope_id})
     return {"id": identifier, "version": version, "description": description, "agents": agents,
             "risk": risk, "body": body, "digest": checksum, "author": author, "created_at": now,
-            "bindings": []}
+            "bindings": added}
 
 
 def _view(row, bindings=None) -> dict:
@@ -153,6 +162,22 @@ def _frontmatter(text: str) -> tuple[dict, str]:
     return meta, match.group(2)
 
 
+def _bindings(value) -> list[tuple[str, str]]:
+    """Parse front-matter ``bind:`` ("scope:id" or a list of them) before anything is written."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, list):
+        raise ValueError("bind must be a list of scope:id")
+    parsed = []
+    for item in items:
+        scope, separator, scope_id = str(item).partition(":")
+        if not separator or scope not in SCOPES - {"task"} or not scope_id or (scope == "fleet") != (scope_id == "*"):
+            raise ValueError(f"invalid bind {item!r}")
+        parsed.append((scope, scope_id))
+    return parsed
+
+
 def import_repo(directory: str | Path | None = None) -> list[dict]:
     root = Path(directory or os.environ.get("FLEET_SKILLS_DIR", DEFAULT_DIR)).expanduser()
     imported = []
@@ -164,11 +189,13 @@ def import_repo(directory: str | Path | None = None) -> list[dict]:
             identifier = meta.get("id")
             if identifier != path.parent.name:
                 raise ValueError("front-matter id must match its directory")
+            # Bindings apply only with the first repo version (same transaction), so an operator's unbind sticks.
             result = put(identifier, meta.get("description"), meta.get("agents"), meta.get("risk"), body,
                          "repo", skip_digest=True,
-                         requested_version=meta.get("version") if isinstance(meta.get("version"), int) else None)
+                         requested_version=meta.get("version") if isinstance(meta.get("version"), int) else None,
+                         first_bindings=_bindings(meta.get("bind")))
             if result:
                 imported.append(result)
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
             print(f"skill {path} ignored: {exc}")
     return imported

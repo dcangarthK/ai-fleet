@@ -73,7 +73,8 @@ MIGRATIONS = {
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
-              "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0"},
+              "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0",
+              "approved_tools": "TEXT DEFAULT '[]'"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0"},
 }
 

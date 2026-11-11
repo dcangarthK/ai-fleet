@@ -248,10 +248,43 @@ class ControllerTests(unittest.TestCase):
         FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0,
                                         denials=[{"tool_name": "Bash", "tool_input": {"command": "ls"}}])
         wait_for(lambda: self.state(t["id"]) == "blocked")
-        self.c.post(f"/api/tasks/{t['id']}/approve", headers=W)
+        with db() as c:
+            c.execute("UPDATE tasks SET auto_approvals=2 WHERE id=?", (t["id"],))
+        approved = self.c.post(f"/api/tasks/{t['id']}/approve", headers=W).json()
         path, body = [c for c in FakeRunner.calls if c[0] == f"/jobs/{t['id']}/message"][-1]
         self.assertEqual(body["allowed_tools"], ["Bash"])
+        self.assertEqual(approved["approved_tools"], ["Bash"])
+        self.assertEqual(approved["auto_approvals"], 0)
         self.assertEqual(self.state(t["id"]), "working")
+
+    def test_approved_tools_are_sent_on_later_message(self):
+        t = self.task()
+        FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, denials=[{"tool_name": "Bash"}])
+        wait_for(lambda: self.state(t["id"]) == "blocked")
+        self.c.post(f"/api/tasks/{t['id']}/approve", headers=W)
+
+        FakeRunner.jobs[t["id"]].update(state="exited", exit_code=1, denials=[])
+        wait_for(lambda: self.state(t["id"]) == "failed")
+        resumed = self.c.post(f"/api/tasks/{t['id']}/message", json={"text": "fix review issues"}, headers=W).json()
+        body = [b for path, b in FakeRunner.calls if path == f"/jobs/{t['id']}/message"][-1]
+        self.assertEqual(body["allowed_tools"], ["Bash"])
+        self.assertIsNone(body["mode"])
+        self.assertEqual(resumed["approved_tools"], ["Bash"])
+
+    def test_claude_deny_tools_are_not_approved_or_sent(self):
+        self.c.put("/api/policies/agent/claude",
+                   json={"body": {"tools": {"claude_deny": ["WebFetch"]}}}, headers=W)
+        try:
+            t = self.task()
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0,
+                                            denials=[{"tool_name": "WebFetch"}, {"tool_name": "Bash"}])
+            wait_for(lambda: self.state(t["id"]) == "blocked")
+            approved = self.c.post(f"/api/tasks/{t['id']}/approve", headers=W).json()
+            body = [b for path, b in FakeRunner.calls if path == f"/jobs/{t['id']}/message"][-1]
+            self.assertEqual(approved["approved_tools"], ["Bash"])
+            self.assertEqual(body["allowed_tools"], ["Bash"])
+        finally:
+            self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
 
     def test_reject(self):
         t = self.task(mode="supervised")
@@ -392,6 +425,46 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(msg["allowed_tools"], ["Bash"])
             types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
             self.assertIn("task.auto_approved", types)
+        finally:
+            self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
+
+    def test_auto_approval_cap_resets_after_message(self):
+        self.c.put("/api/policies/agent/claude",
+                   json={"body": {"auto_approve": {"agents": ["claude"], "denied_tools": True}}}, headers=W)
+        try:
+            t = self.task()
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, denials=[{"tool_name": "Bash"}])
+            wait_for(lambda: (current := self.c.get(f"/api/tasks/{t['id']}").json())["auto_approvals"] == 1
+                     and current["state"] == "working")
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=1, denials=[])
+            wait_for(lambda: self.state(t["id"]) == "failed")
+
+            resumed = self.c.post(f"/api/tasks/{t['id']}/message", json={"text": "review feedback"}, headers=W).json()
+            self.assertEqual(resumed["auto_approvals"], 0)
+        finally:
+            self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
+
+    def test_auto_approval_cap_stops_fourth_consecutive_round(self):
+        self.c.put("/api/policies/agent/claude",
+                   json={"body": {"auto_approve": {"agents": ["claude"], "denied_tools": True}}}, headers=W)
+        try:
+            t = self.task()
+            path = f"/jobs/{t['id']}/message"
+            before = len([1 for called, _ in FakeRunner.calls if called == path])
+            for round_number in range(1, tasks.AUTO_APPROVE_ROUNDS + 1):
+                FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0,
+                                                denials=[{"tool_name": f"Tool{round_number}"}])
+                wait_for(lambda n=round_number: (
+                    (current := self.c.get(f"/api/tasks/{t['id']}").json())["auto_approvals"] == n
+                    and current["state"] == "working"))
+
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0, denials=[{"tool_name": "Tool4"}])
+            wait_for(lambda: self.state(t["id"]) == "blocked")
+            task = self.c.get(f"/api/tasks/{t['id']}").json()
+            calls = [body for called, body in FakeRunner.calls if called == path]
+            self.assertEqual(task["auto_approvals"], tasks.AUTO_APPROVE_ROUNDS)
+            self.assertEqual(len(calls) - before, tasks.AUTO_APPROVE_ROUNDS)
+            self.assertNotIn("Tool4", task["approved_tools"])
         finally:
             self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
 

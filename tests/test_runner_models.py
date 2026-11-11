@@ -67,17 +67,29 @@ class FakeOllama(BaseHTTPRequestHandler):
             return
         if self.path == "/api/create":
             s["models"][body["model"]] = s["models"].get(body["from"], 1.0)
+            if body.get("stream") is not False:  # like real Ollama: several JSON lines unless stream is false
+                return self._ndjson([{"status": "using existing layers"}, {"status": "success"}])
             return self._json(200, {"status": "success"})
         if self.path == "/api/chat":
             if body["model"] not in s["models"]:
                 return self._json(404, {"error": "model not found"})
             s["loaded"][body["model"]] = s["models"][body["model"]] * 1.25
-            return self._json(200, {"message": {"role": "assistant", "content": s["reply"]}})
+            return self._json(200, {"message": {"role": "assistant", "content": s["reply"], "thinking": s.get("thinking", "")}})
         if self.path == "/api/generate":
             if body.get("keep_alive") in (0, "0"):
                 s["loaded"].pop(body["model"], None)
+            if body.get("stream") is not False:
+                return self._ndjson([{"response": "", "done": True}, {"done": True}])
             return self._json(200, {"response": ""})
         self._json(404, {"error": "not found"})
+
+    def _ndjson(self, lines):
+        data = "".join(json.dumps(x) + "\n" for x in lines).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_DELETE(self):
         s = FakeOllama.state
@@ -314,6 +326,13 @@ class RunnerModels(unittest.TestCase):
         self.assertEqual("blocked", op["state"])
         self.assertTrue(op["reason"].startswith("engine_upgrade:"), op)
         self.assertIn("0.17.7", op["reason"])
+
+    def test_reasoning_model_that_only_thinks_in_the_smoke_test_is_ready(self):
+        FakeOllama.state["reply"] = ""
+        FakeOllama.state["thinking"] = "The user wants the word ready..."
+        self.start()
+        op = self.wait_op(self.req("POST", "/models/ensure", {"ref": "tiny:1b"})[1]["id"])
+        self.assertEqual("ready", op["state"], op)
 
     def test_failed_smoke_test_is_not_ready(self):
         FakeOllama.state["reply"] = ""

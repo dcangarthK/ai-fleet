@@ -1766,23 +1766,25 @@ class ModelManager:
                 engine_params = {key: value for key, value in operation.get("params", {}).items()
                                  if key in ("num_ctx", "temperature", "top_p", "seed")}
                 self._request("POST", "/api/create", {"model": operation["derived"], "from": operation["ref"],
-                                                        "parameters": engine_params}, timeout=3600)
+                                                        "parameters": engine_params, "stream": False}, timeout=3600)
                 managed = self._managed()
                 managed.add(operation["derived"])
                 self._save_managed(managed)
             self._update(operation, state="verifying")
             params = operation.get("params", {})
             chat = {"model": target, "messages": [{"role": "user", "content": "Reply with the word ready."}],
-                    "stream": False, "options": {"num_predict": 16}}
+                    "stream": False, "options": {"num_predict": 256}}
             if "think" in params:
                 chat["think"] = params["think"]
             reply = self._request("POST", "/api/chat", chat, timeout=900)
-            if not str((reply.get("message") or {}).get("content") or "").strip():
+            message = reply.get("message") or {}
+            # Reasoning models may spend the whole budget thinking; any output proves the model loads and runs.
+            if not str(message.get("content") or message.get("thinking") or "").strip():
                 raise RuntimeError("smoke test returned an empty reply")
             loaded = self._request("GET", "/api/ps").get("models", [])
             loaded_size = next(((item.get("size") or 0) / 1e9 for item in loaded
                                 if isinstance(item, dict) and item.get("name") == target), None)
-            self._request("POST", "/api/generate", {"model": target, "keep_alive": 0})
+            self._request("POST", "/api/generate", {"model": target, "keep_alive": 0, "stream": False})
             self._update(operation, state="ready", loaded_gb=loaded_size,
                          progress={"completed": 1, "total": 1, "status": "ready"})
         except Exception as exc:

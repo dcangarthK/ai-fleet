@@ -74,10 +74,21 @@ def _diff_hunks(diff: str) -> list[list[str]]:
                     new_count -= 1
                 remaining = (old_count, new_count)
         index += 1
-    if not hunks and "@@" not in diff:
-        # A diff fragment without hunk headers (e.g. pasted lines): its content lines form one hunk.
-        fragment = [_normalise(line[1:]) for line in raw_lines
-                    if line.startswith(("+", "-", " ")) and not line.startswith(("+++ ", "--- "))]
+    if not hunks:
+        # No hunk header was parsed (every ``@@`` line opens a hunk), so this is a
+        # fragment such as pasted lines: its content lines form one hunk. Only a
+        # ``--- `` line directly followed by a ``+++ `` line is a file-header pair.
+        fragment: list[str] = []
+        index = 0
+        while index < len(raw_lines):
+            line = raw_lines[index]
+            if (line.startswith("--- ") and index + 1 < len(raw_lines)
+                    and raw_lines[index + 1].startswith("+++ ")):
+                index += 2
+                continue
+            if line.startswith(("+", "-", " ")):
+                fragment.append(_normalise(line[1:]))
+            index += 1
         if fragment:
             hunks.append(fragment)
     return hunks

@@ -223,3 +223,36 @@ class Fragment(unittest.TestCase):
             "problem": "greeting regressed", "evidence": "hello", "expected": "hi", "actual": "hello", "fix": "say hi"}]})
         r = grounding.check_review(raw, "+hello\n")
         self.assertEqual((r["status"], len(r["issues"])), ("valid", 1))
+
+    def _check(self, evidence, diff):
+        return grounding.check_review(review("request_changes", issue(evidence=evidence)), diff)
+
+    def test_fragment_content_containing_at_signs_is_quotable(self):
+        diff = '+token = "@@"\n+danger()\n'
+        for evidence in ('token = "@@"', "danger()", 'token = "@@" danger()'):
+            with self.subTest(evidence=evidence):
+                r = self._check(evidence, diff)
+                self.assertEqual((len(r["issues"]), r["unsupported"]), (1, 0))
+
+    def test_fragment_header_like_content_is_quotable(self):
+        diff = "+++ counter\n+other\n"
+        for evidence in ("++ counter", "++ counter other"):
+            with self.subTest(evidence=evidence):
+                r = self._check(evidence, diff)
+                self.assertEqual((len(r["issues"]), r["unsupported"]), (1, 0))
+
+    def test_fragment_lone_minus_header_like_content_is_quotable(self):
+        diff = "--- counter\n-other\n"
+        r = self._check("-- counter", diff)
+        self.assertEqual((len(r["issues"]), r["unsupported"]), (1, 0))
+
+    def test_fragment_with_real_file_headers_excludes_them(self):
+        diff = "--- a/x\n+++ b/x\n-old\n+new\n"
+        for evidence in ("old new", "new"):
+            with self.subTest(evidence=evidence):
+                r = self._check(evidence, diff)
+                self.assertEqual((len(r["issues"]), r["unsupported"]), (1, 0))
+        for evidence in ("a/x", "b/x", "-- a/x", "++ b/x"):
+            with self.subTest(evidence=evidence):
+                r = self._check(evidence, diff)
+                self.assertEqual((r["issues"], r["unsupported"]), ([], 1))

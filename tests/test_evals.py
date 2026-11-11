@@ -259,8 +259,9 @@ class FastScoring(unittest.TestCase):
 
 class CaseFiles(unittest.TestCase):
     def test_shapes(self):
-        coder, reviewer, reviewer_real, fast = (E.load("coder"), E.load("reviewer"),
-                                                E.load("reviewer_real"), E.load("fast"))
+        coder, reviewer, reviewer_real, fast, grounded = (E.load("coder"), E.load("reviewer"),
+                                                          E.load("reviewer_real"), E.load("fast"),
+                                                          E.load("grounded"))
         self.assertGreaterEqual(len(coder), 8)
         self.assertGreaterEqual(sum(c["expect"] == "request_changes" for c in reviewer), 8)
         self.assertGreaterEqual(sum(c["expect"] == "approve" for c in reviewer), 2)
@@ -269,7 +270,21 @@ class CaseFiles(unittest.TestCase):
             self.assertTrue(c["diff"].startswith("---"), c["id"])
         for c in reviewer_real:
             self.assertTrue(c["diff"].startswith("---"), c["id"])
+        self.assertGreaterEqual(len(grounded), 30)
+        self.assertEqual(sum(c["answerable"] for c in grounded), len(grounded) / 2)
+        expected_keys = {"id", "context", "question", "answerable", "answer", "aliases"}
+        for case in grounded:
+            with self.subTest(case=case["id"]):
+                self.assertEqual(set(case), expected_keys)
+                hits = [value for value in [case["answer"], *case["aliases"]]
+                        if E.grounding.contains_bounded(value, case["context"])]
+                self.assertEqual(bool(hits), case["answerable"], hits)
         json.dumps(fast)
+
+    def test_grounding_answerability_uses_bounded_values(self):
+        self.assertTrue(E.grounding.contains_bounded("20", "timeout=20"))
+        self.assertFalse(E.grounding.contains_bounded("20", "timeout=120"))
+        self.assertFalse(E.grounding.contains_bounded("0", "temperature=0.2"))
 
     def test_reviewer_real_runs_through_reviewer_scoring(self):
         case = E.load("reviewer_real")[0]
@@ -282,6 +297,145 @@ class CaseFiles(unittest.TestCase):
         scored = result["roles"]["reviewer_real"]["cases"][0]
         self.assertTrue(scored["valid_json"])
         self.assertEqual(scored["score"], E.score_review(case, E.parse_review(raw, case["diff"]))["score"])
+
+
+class GroundedRole(unittest.TestCase):
+    @staticmethod
+    def reply(status, answer, quotes, tags, confidence, probability=0.9):
+        text = json.dumps({"status": status, "answer": answer, "quotes": quotes,
+                           "tags": tags, "confidence": confidence}, separators=(",", ":"))
+        return {"text": text, "seconds": 0.1, "tokens_per_s": 12,
+                "logprobs": [{"token": text, "logprob": __import__("math").log(probability)}]}
+
+    def test_chat_requests_json_temperature_and_logprobs(self):
+        captured = {}
+
+        def fake_ollama(base, path, body):
+            captured.update({"base": base, "path": path, "body": body})
+            return {"message": {"content": '{"answer":"ready"}', "logprobs": []}}
+
+        with mock.patch.object(E, "ollama", side_effect=fake_ollama):
+            E.chat("http://unused", "model", "system", "prompt", json_mode=True,
+                   temperature=0.5, logprobs=True, seed=44)
+        self.assertEqual(captured["path"], "/api/chat")
+        self.assertEqual(captured["body"]["format"], "json")
+        self.assertTrue(captured["body"]["logprobs"])
+        self.assertEqual(captured["body"]["options"]["temperature"], 0.5)
+        self.assertEqual(captured["body"]["options"]["seed"], 44)
+
+    def test_grounded_eval_uses_fake_replies_and_computes_metrics(self):
+        cases = [
+            {"id": "known", "context": "status: ready", "question": "What status?",
+             "answerable": True, "answer": "ready", "aliases": []},
+            {"id": "unknown", "context": "status: pending", "question": "Who owns it?",
+             "answerable": False, "answer": "owner", "aliases": []},
+        ]
+        calls = []
+
+        def fake_chat(base, model, system, prompt, **kwargs):
+            calls.append(kwargs)
+            if "status: ready" in prompt:
+                return self.reply("ANSWER", "ready", ["status: ready"], ["ESTABLISHED"], 0.9)
+            return self.reply("ABSTAIN", "", [], ["UNKNOWN"], 0.2)
+
+        with (mock.patch.object(E, "load", return_value=cases),
+              mock.patch.object(E, "chat", side_effect=fake_chat),
+              mock.patch.object(E, "loaded_size_gb", return_value=1.0),
+              mock.patch.object(E, "unload")):
+            result = E.eval_model("http://unused", "model", ["grounded"], 1)
+        role = result["roles"]["grounded"]
+        self.assertEqual((role["score"], role["hallucination_rate"], role["correct_abstain_rate"]),
+                         (100.0, 0.0, 1.0))
+        self.assertEqual(role["quote_validity"], 1.0)
+        self.assertAlmostEqual(role["cases"][0]["logprob_min"], 0.9)
+        self.assertEqual(role["cases"][0]["agreement"], 1.0)
+        self.assertIsNone(role["cases"][1]["agreement"])
+        self.assertEqual(len(calls), 5)  # primary for both cases plus three short-answer samples
+        self.assertEqual([call["temperature"] for call in calls], [0, 0.5, 0.5, 0.5, 0])
+        self.assertTrue(all(call["json_mode"] and call["logprobs"] for call in calls))
+        report = E.grounding_report([result])
+        self.assertIn("model | 100.0% | 0.0% | 100.0%", report)
+        self.assertIn("logprob_min | dropped", report)
+
+    def test_grounded_reply_schema_rejects_malformed_fake_replies(self):
+        invalid = ["not json", "{}", json.dumps({"status": "MAYBE", "answer": "x", "quotes": [],
+                                                   "tags": ["UNKNOWN"], "confidence": 0.2})]
+        for raw in invalid:
+            self.assertEqual(E.parse_grounded_reply(raw)["status"], "INVALID")
+
+        malformed = E.parse_grounded_reply(json.dumps(
+            {"status": "ANSWER", "answer": "x", "quotes": [], "tags": ["CERTAIN"], "confidence": 2}))
+        self.assertEqual(malformed["status"], "ANSWER")
+        self.assertFalse(malformed["valid_json"])
+
+    def test_schema_invalid_abstention_is_still_scored_as_abstention(self):
+        case = {"id": "missing", "context": "status: pending", "question": "Who owns it?",
+                "answerable": False, "answer": "Alice", "aliases": []}
+        row = E.score_grounded(case, {"text": json.dumps({"status": "ABSTAIN", "answer": "",
+                                                            "quotes": []}), "logprobs": []}, [])
+        self.assertEqual(row["outcome"], "correct_abstain")
+        self.assertFalse(row["valid_json"])
+
+    def test_sample_agreement_is_with_primary_reply(self):
+        case = {"id": "known", "context": "value: X", "question": "What value?",
+                "answerable": True, "answer": "X", "aliases": []}
+        primary = self.reply("ANSWER", "X", ["value: X"], ["ESTABLISHED"], 0.9)
+        samples = [self.reply("ANSWER", "Y", [], ["ESTABLISHED"], 0.8) for _ in range(3)]
+        row = E.score_grounded(case, primary, samples)
+        self.assertEqual(row["agreement"], 0.0)
+
+    @staticmethod
+    def calibration_rows(held_out_good=True):
+        train_ids = ["case-0", "case-2", "case-3", "case-7", "case-8",
+                     "case-9", "case-10", "case-11", "case-12", "case-13"]
+        held_ids = ["case-1", "case-4", "case-5", "case-6"]
+        rows = []
+        for index, case_id in enumerate(train_ids):
+            rows.append({"id": case_id, "status": "ANSWER",
+                         "outcome": "correct" if index < 7 else "wrong",
+                         "confidence": 0.9 if index < 7 else 0.1})
+        for index, case_id in enumerate(held_ids):
+            correct = index < 3
+            signal = (0.9 if correct else 0.1) if held_out_good else (0.1 if correct else 0.9)
+            rows.append({"id": case_id, "status": "ANSWER",
+                         "outcome": "correct" if correct else "wrong", "confidence": signal})
+        return rows
+
+    def test_threshold_is_fit_on_training_and_decided_on_held_out_cases(self):
+        passing = E.held_out_signal(self.calibration_rows(), "confidence")
+        failing = E.held_out_signal(self.calibration_rows(held_out_good=False), "confidence")
+        self.assertEqual(passing["threshold"], 0.9)
+        self.assertEqual(failing["threshold"], 0.9)
+        self.assertEqual((passing["decision"], passing["coverage"], passing["error_rate"]),
+                         ("kept", 0.75, 0.0))
+        self.assertEqual(failing["decision"], "dropped")
+        self.assertEqual((passing["train_rows"], passing["held_out_rows"]), (10, 4))
+
+    def test_reports_explicitly_keep_or_drop_every_signal(self):
+        kept = {"decision": "kept", "threshold": 0.7, "coverage": 0.75,
+                "error_rate": 0.1, "baseline_error_rate": 0.3}
+        dropped = {"decision": "dropped", "threshold": 0.5, "coverage": 0.5,
+                   "error_rate": 0.2, "baseline_error_rate": 0.3}
+        role = {"score": 60.0, "hallucination_rate": 0.4, "correct_abstain_rate": 0.6,
+                "quote_validity": 0.9, "cases": [],
+                "signal_decisions": {signal: (kept if signal == "confidence" else dropped)
+                                     for signal in E.GROUNDING_SIGNALS}}
+        result = {"model": "calibrated", "roles": {"grounded": role}, "median_s": 1.0,
+                  "tokens_per_s": 10.0, "size_gb": 2.0, "fits_16gb": True}
+        report = E.grounding_report([result])
+        board = E.leaderboard([result], ["grounded"])
+        for signal in E.GROUNDING_SIGNALS:
+            decision = "kept" if signal == "confidence" else "dropped"
+            self.assertIn(f"| calibrated | {signal} | {decision} |", report)
+            self.assertIn(f"| calibrated | {signal} | {decision} |", board)
+
+    def test_committed_grounding_report_is_generated(self):
+        results = json.loads((E.HERE / "results" / "results.json").read_text())
+        self.assertEqual((E.HERE / "results" / "GROUNDING.md").read_text(),
+                         E.grounding_report(results))
+        leaderboard = (E.HERE / "results" / "LEADERBOARD.md").read_text()
+        for signal in E.GROUNDING_SIGNALS:
+            self.assertIn(f"| — | {signal} | dropped |", leaderboard)
 
 
 if __name__ == "__main__":

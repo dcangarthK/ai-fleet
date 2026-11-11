@@ -2164,9 +2164,11 @@ function Configure-RunnerPolicy($cfg) {
   Set-DefaultProperty $config.gate_profiles "pytest" @("python", "-m", "pytest", "-q")
   Set-DefaultProperty $config.gate_profiles "unittest" @("python", "-m", "unittest", "-q")
   Set-DefaultProperty $config "allow_raw_gates" $false
-  Set-DefaultProperty $config "max_jobs" 2
+  Set-DefaultProperty $config "max_jobs" $(if ((RamGB) -le 16) { 1 } else { 2 })
   Set-DefaultProperty $config "max_job_minutes" 120
   Set-DefaultProperty $config "power" ([PSCustomObject]@{ min_battery_pct = 30 })
+  # Written out so the owner can see the switch; the console may install models only when it is true.
+  Set-DefaultProperty $config "models" ([PSCustomObject]@{ remote_management = $false; max_loaded = 1; disk_reserve_gb = 8; ram_reserve_gb = 4 })
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
 }
 
@@ -2178,7 +2180,10 @@ function Install-Runner($ip) {
     $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
   }
   $runnerPath = Join-Path $FleetDir "runner.py"
-  Write-Utf8File $runnerPath $RunnerSource
+  # Drop build.py's marker lines so the installed file is byte-identical to the master's nodes/runner.py
+  # (the controller compares digests to show "update available").
+  $runnerText = ($RunnerSource -replace '^# >>> runner\.py[^\n]*\r?\n', '') -replace '\r?\n# <<< runner\.py\s*$', ''
+  Write-Utf8File $runnerPath ($runnerText + "`n")
   $cfg = Join-Path $FleetDir "runner.json"
   Configure-RunnerPolicy $cfg
   $cmd = Join-Path $FleetDir "runner.cmd"
@@ -2190,6 +2195,10 @@ chcp 65001 >nul
 set "RUNNER_BIND=${ip}:11436"
 set "FLEET_DIR=$cmdFleetDir"
 set "OLLAMA_URL=http://${ip}:11434"
+set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-fleet"
+set "CODEX_HOME=%USERPROFILE%\.codex-fleet"
+if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"
+if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
 "$cmdPython" "%~dp0runner.py"
 "@
   Write-Utf8File $cmd $cmdSource

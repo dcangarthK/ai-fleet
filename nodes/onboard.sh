@@ -5,33 +5,129 @@
 #   ./onboard.sh --models "qwen3:8b qwen3:4b"   pull these models
 #   ./onboard.sh --allow-root ~/code --allow-root /srv/repos
 #   ./onboard.sh --scan-only      just rescan and republish (runs hourly after onboarding)
-# Run as your normal user; it asks for sudo when it needs it.
+#   ./onboard.sh --enroll --master https://<master>.<tailnet>.ts.net:8443   join: asks for the console code (hidden)
+#   ./onboard.sh --enroll-file PATH --master https://...:8443   join: code read from a 0600 (or 0400) file you own
+#   ./onboard.sh --remote-models  let the console install/remove Ollama models here (off by default)
+# Run as your normal user; it asks for sudo when it needs it. Safe to re-run.
+# To update a node, first copy a fresh onboard.sh to it (e.g. scp from the master; the tailnet policy grants your
+# admin devices tcp:22), then re-run that copy. Re-running the saved ~/.ai-fleet/onboard.sh reinstalls the runner
+# embedded in that old copy, so it does not update the runner.
+# The program runs from main() at the very end, so `curl ... | bash -s -- ...` has read the whole script
+# before anything runs, and prompts read the terminal (/dev/tty), never the piped script.
 set -euo pipefail
 
 FLEET_DIR="${FLEET_DIR:-$HOME/.ai-fleet}"
 INFO_PORT=11435
 SCAN_ONLY=0; YES=0; MODELS=""; ALLOW_ROOTS_SET=0; ALLOW_ROOTS=(); ENROLL=""; MASTER=""; RUNNER_TOKEN_VALUE=""
+REMOTE_MODELS=0; ENROLLED=0; ENROLL_MODE=""; ENROLL_FILE=""  # ENROLL_MODE: prompt | file | argv
+usage() {
+  cat <<'USAGE'
+AI fleet onboarding for macOS and Linux.
+  onboard.sh                  interactive: join fleet, set up Ollama, scan, publish inventory
+  onboard.sh --yes            accept all defaults (installs + recommended models)
+  onboard.sh --models "qwen2.5-coder:14b phi4:14b"   pull these models
+  onboard.sh --allow-root ~/code --allow-root /srv/repos
+  onboard.sh --scan-only      just rescan and republish (runs hourly after onboarding)
+  onboard.sh --enroll --master https://<master>.<tailnet>.ts.net:8443
+                              join with a console code; it asks for the code with input hidden
+  onboard.sh --enroll-file PATH --master https://<master>.<tailnet>.ts.net:8443
+                              join with the code read from PATH (mode 0600 or 0400, owned by you)
+  (--enroll CODE still works but leaves the single-use code in your shell history)
+  onboard.sh --remote-models  let the console install/remove Ollama models on this node
+USAGE
+}
+need_arg() { [ -n "${2:-}" ] || { echo "$1 needs a value"; exit 1; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --scan-only) SCAN_ONLY=1 ;;
     --yes|-y) YES=1 ;;
-    --models) MODELS="$2"; shift ;;
-    --allow-root) ALLOW_ROOTS+=("$2"); ALLOW_ROOTS_SET=1; shift ;;
-    --enroll) ENROLL="$2"; shift ;;
-    --master) MASTER="${2%/}"; shift ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
-    *) echo "unknown option $1"; exit 1 ;;
+    --remote-models) REMOTE_MODELS=1 ;;
+    --models) need_arg "$@"; MODELS="$2"; shift ;;
+    --allow-root) need_arg "$@"; ALLOW_ROOTS+=("$2"); ALLOW_ROOTS_SET=1; shift ;;
+    --enroll)  # no value: ask on the terminal. A value still works, but it lands in shell history and argv.
+      if [ -n "${2:-}" ] && [[ "$2" != -* ]]; then ENROLL="$2"; ENROLL_MODE=argv; shift; else ENROLL_MODE=prompt; fi ;;
+    --enroll-file) need_arg "$@"; ENROLL_FILE="$2"; ENROLL_MODE=file; shift ;;
+    --master) need_arg "$@"; MASTER="${2%/}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option $1 (see --help)"; exit 1 ;;
   esac
   shift
 done
+if [ -n "$ENROLL_MODE" ] && [ -z "$MASTER" ]; then
+  echo "--master is required with --enroll (e.g. --master https://<master>.<tailnet>.ts.net:8443)"; exit 1
+fi
+if [ -n "$MASTER" ] && [[ "$MASTER" != https://* ]]; then
+  echo "--master must be the master's https:// address from tailscale serve, e.g. https://<master>.<tailnet>.ts.net:8443"; exit 1
+fi
+if [ "$ENROLL_MODE" = argv ]; then
+  echo "Warning: '--enroll CODE' leaves the single-use code in your shell history and the process list."
+  echo "         Next time use '--enroll' with no value (it asks, input hidden) or '--enroll-file PATH'."
+fi
+
+# The script file, when run from one (`bash onboard.sh`, or sourced by the tests): bash then sets
+# BASH_SOURCE[0] to $0. Under `curl | bash -s` BASH_SOURCE is empty and $0 is just the shell's name.
+ONBOARD_SELF=""
+[ "${BASH_SOURCE[0]:-}" = "$0" ] && ONBOARD_SELF="$0"
 
 OS="$(uname -s)"
 [ "$OS" = Darwin ] || [ "$OS" = Linux ] || { echo "Unsupported OS $OS (use onboard.ps1 on Windows)"; exit 1; }
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-ask() { [ "$YES" = 1 ] && return 0; read -rp "$1 [Y/n] " a; [[ -z "$a" || "$a" =~ ^[Yy] ]]; }
+# Prompts read the terminal, not stdin: under `curl ... | bash -s` stdin is the script itself.
+TTY="${ONBOARD_TTY:-/dev/tty}"
+tty_read() {  # tty_read VAR "prompt"; returns 1 when there is no terminal to ask
+  local reply=""
+  { exec 3<"$TTY"; } 2>/dev/null || return 1
+  if ! IFS= read -rp "$2" reply <&3; then exec 3<&-; return 1; fi
+  exec 3<&-
+  printf -v "$1" '%s' "$reply"
+}
+tty_read_secret() {  # like tty_read, but the answer is not echoed
+  local reply=""
+  { exec 3<"$TTY"; } 2>/dev/null || return 1
+  if ! IFS= read -rsp "$2" reply <&3; then exec 3<&-; echo; return 1; fi
+  exec 3<&-
+  echo
+  printf -v "$1" '%s' "$reply"
+}
+ask() {
+  [ "$YES" = 1 ] && return 0
+  local a=""
+  tty_read a "$1 [Y/n] " || { echo "$1 -> no terminal to ask: skipped (re-run with --yes to accept defaults)"; return 1; }
+  [[ -z "$a" || "$a" =~ ^[Yy] ]]
+}
 have() { command -v "$1" >/dev/null 2>&1; }
-mkdir -p "$FLEET_DIR/public"
+ensure_fleet_dir() { mkdir -p "$FLEET_DIR/public"; chmod 700 "$FLEET_DIR"; }
+
+# The enrollment code is single use but still a credential for 30 minutes: it never goes in argv (ours or a
+# child's) or on screen. Ask for it hidden on the terminal, or read it from a private file.
+read_enroll_file() {
+  local file="$1" mode
+  [ -f "$file" ] || { echo "--enroll-file $file: no such file."; return 1; }
+  [ -O "$file" ] || { echo "--enroll-file $file must be owned by $(id -un)."; return 1; }
+  mode="$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file" 2>/dev/null || true)"
+  case "$mode" in
+    600|400) ;;
+    *[1-7]?|*?[1-7])
+      echo "--enroll-file $file is accessible by group or others (mode ${mode}): run 'chmod 600 $file' and retry."
+      return 1 ;;
+    *)
+      echo "--enroll-file $file has mode ${mode:-unknown}; it must be 600 or 400: run 'chmod 600 $file' and retry."
+      return 1 ;;
+  esac
+  ENROLL="$(tr -d '[:space:]' < "$file")"
+}
+resolve_enroll_code() {
+  case "$ENROLL_MODE" in
+    prompt)
+      tty_read_secret ENROLL "Enrollment code from the console (input hidden): " || {
+        echo "--enroll without a code needs a terminal to ask for it; use --enroll-file PATH instead."; exit 1; } ;;
+    file) read_enroll_file "$ENROLL_FILE" || exit 1 ;;
+  esac
+  ENROLL="${ENROLL//[[:space:]]/}"
+  if [ -n "$ENROLL_MODE" ] && [ -z "$ENROLL" ]; then echo "No enrollment code given."; exit 1; fi
+  return 0
+}
 
 # BEGIN launchd plist helper
 write_launchd_plist() {
@@ -60,6 +156,24 @@ with open(path, "wb") as stream:
 PY
 }
 # END launchd plist helper
+
+# (Re)load a LaunchAgent. `launchctl bootout` returns before the job is gone, so an immediate bootstrap
+# can fail with "Bootstrap failed: 5: Input/output error" on a re-run; wait for it and retry instead.
+reload_launch_agent() {
+  local plist="$1" label domain="gui/$(id -u)" i
+  label="$(basename "$plist" .plist)"
+  launchctl bootout "$domain" "$plist" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl print "$domain/$label" >/dev/null 2>&1 || break
+    sleep "${RELOAD_WAIT:-0.5}"
+  done
+  for i in 1 2 3 4 5; do
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null && return 0
+    sleep "${RELOAD_WAIT:-1}"
+  done
+  echo "Could not start $label: run 'launchctl bootstrap $domain $plist' to see why, then re-run."
+  return 1
+}
 
 systemd_quote() {
   local mode="$1"; shift
@@ -119,43 +233,67 @@ ensure_basics() {
 
 # ---------- Tailscale ----------
 TS=""
+TAILSCALE_APP="${TAILSCALE_APP:-/Applications/Tailscale.app/Contents/MacOS/Tailscale}"  # tests point it elsewhere
 find_tailscale() {
-  if [ "$OS" = Darwin ] && [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
-    TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+  if [ "$OS" = Darwin ] && [ -x "$TAILSCALE_APP" ]; then
+    TS="$TAILSCALE_APP"
   elif have tailscale; then TS="$(command -v tailscale)"; fi
 }
-ensure_tailscale() {
+install_tailscale() {
   find_tailscale
   if [ -z "$TS" ]; then
     say "Installing Tailscale"
     if [ "$OS" = Darwin ]; then
       brew install --cask tailscale; open -a Tailscale
-      echo "Sign in to Tailscale from the menu bar (same account as the master), then press Enter."; read -r
+      echo "Sign in to Tailscale from the menu bar (same account as the master)."
+      local _enter=""; tty_read _enter "Press Enter once you are signed in. " || true
     else
       curl -fsSL https://tailscale.com/install.sh | sh
     fi
     find_tailscale
+    [ -n "$TS" ] || { echo "Tailscale was installed but its CLI was not found; open the Tailscale app once, then re-run."; exit 1; }
   fi
-  local tags
-  tags="$("$TS" status --json 2>/dev/null | python3 -c 'import sys,json;print(",".join(json.load(sys.stdin).get("Self",{}).get("Tags") or []))' 2>/dev/null || true)"
+  if [ "$OS" = Darwin ] && [ -z "$(tailnet_ip)" ]; then
+    echo "Waiting for Tailscale to sign in (menu bar icon > Log in)..."
+    for _ in $(seq 1 90); do [ -n "$(tailnet_ip)" ] && break; sleep 2; done
+  fi
+}
+tailnet_tags() {
+  "$TS" status --json 2>/dev/null | python3 -c 'import sys,json;print(",".join((json.load(sys.stdin).get("Self") or {}).get("Tags") or []))' 2>/dev/null || true
+}
+tag_tailscale() {
+  local tags; tags="$(tailnet_tags)"
   if [[ "$tags" != *tag:llm-node* ]]; then
     say "Joining the tailnet as tag:llm-node (log in if a URL appears)"
     # No --reset: keep the machine's existing Tailscale settings (routes, DNS, exit node).
     local up=("$TS" up --advertise-tags=tag:llm-node); [ "$OS" = Linux ] && up=($SUDO "${up[@]}")
     if ! "${up[@]}"; then
-      echo "Tailscale wants the machine's existing non-default flags repeated. Run the command it"
-      echo "suggests above, keeping --advertise-tags=tag:llm-node, then re-run this script."; exit 1
+      echo "Could not tag this machine as tag:llm-node. Two usual causes:"
+      echo " - the tailnet policy has no tag:llm-node owner: paste tailscale/policy.hujson into the Tailscale"
+      echo "   admin console (Access controls) and re-run;"
+      echo " - Tailscale wants this machine's existing non-default flags repeated: run the command it suggests"
+      echo "   above, keeping --advertise-tags=tag:llm-node, then re-run this script."; exit 1
     fi
   fi
 }
+ensure_tailscale() { install_tailscale; tag_tailscale; }
 tailnet_ip() { [ -n "$TS" ] && "$TS" ip -4 2>/dev/null | head -1 || true; }
+# The name the controller sees in `tailscale status` (HostName, lowercased); enrollment binds the token to it.
+tailnet_hostname() {
+  local name=""
+  [ -n "$TS" ] && name="$("$TS" status --json 2>/dev/null | python3 -c 'import sys,json;print((json.load(sys.stdin).get("Self") or {}).get("HostName") or "")' 2>/dev/null || true)"
+  [ -n "$name" ] || name="$(hostname -s 2>/dev/null || hostname)"
+  printf '%s\n' "${name%%.*}" | tr '[:upper:]' '[:lower:]'
+}
 
 # ---------- Ollama ----------
 recommended_models() {
   local ram gpu; ram="$(ram_gb)"; gpu="$(gpu_gb)"
   if [ "$gpu" -ge 24 ] || [ "$ram" -ge 48 ]; then echo "qwen3-coder:30b gpt-oss:20b qwen3:8b"
   elif [ "$ram" -ge 32 ]; then echo "qwen3-coder:30b qwen3:14b qwen3:4b"
-  elif [ "$ram" -ge 16 ]; then echo "qwen2.5-coder:14b qwen3:8b qwen3:4b"
+  # 16-31 GB: the fleet's benchmarked 14B models (~9 GB each); Ollama keeps one loaded at a time here.
+  # glm-4.7-flash (19 GB) does not fit.
+  elif [ "$ram" -ge 16 ]; then echo "qwen2.5-coder:14b phi4:14b"
   else echo "qwen3:4b"; fi
 }
 
@@ -182,9 +320,12 @@ run_ollama_mac() {
   mkdir -p "$HOME/Library/LaunchAgents"
   write_launchd_plist "$la" "local.ai-fleet.ollama" 1 1 "" "" "$FLEET_DIR/ollama.log" \
     "$(( ${#env_vars[@]} / 2 ))" "${env_vars[@]}" "$bin" "serve"
-  launchctl bootout "gui/$(id -u)" "$la" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$la"
-  [ -d /Applications/Ollama.app ] && echo "Ollama.app was quit; remove it from Login Items so it doesn't start a second server."
+  reload_launch_agent "$la"
+  # An if, not `[ ] && echo`: as the last command that would fail the function (and, under set -e, the run)
+  # on a Mac without Ollama.app.
+  if [ -d /Applications/Ollama.app ]; then
+    echo "Ollama.app was quit; remove it from Login Items so it doesn't start a second server."
+  fi
 }
 
 configure_ollama() {
@@ -226,7 +367,8 @@ EOF
     want="$(recommended_models)"
     ask "No models yet. Pull recommended models for $(ram_gb)GB RAM ($want)?" || want=""
   fi
-  for m in $want; do OLLAMA_HOST="$ip:11434" ollama pull "$m"; done
+  local ollama_cli; ollama_cli="$(command -v ollama || echo /Applications/Ollama.app/Contents/Resources/ollama)"
+  for m in $want; do OLLAMA_HOST="$ip:11434" "$ollama_cli" pull "$m"; done
 }
 
 # ---------- inventory scan ----------
@@ -404,11 +546,38 @@ PY
 }
 
 # ---------- publish inventory + hourly rescan ----------
+# Keep a copy of this script in $FLEET_DIR for the hourly rescan and later re-runs. Under `curl | bash -s`
+# there is no file to copy ($0 is "bash", and a file of that name in the cwd is not this script), so fetch it
+# from the master; call this before tagging, while this machine can still reach the master's https port.
+# Either way the copy must parse (bash -n) before it replaces the saved one.
+save_self_copy() {
+  local self="$FLEET_DIR/onboard.sh"
+  [ "${SELF_SAVED:-0}" = 1 ] && return 0
+  SELF_SAVED=1
+  if [ -n "$ONBOARD_SELF" ] && [ -f "$ONBOARD_SELF" ] && [ -r "$ONBOARD_SELF" ]; then
+    if [ "$(cd "$(dirname "$ONBOARD_SELF")" && pwd)/$(basename "$ONBOARD_SELF")" != "$self" ]; then
+      if cp "$ONBOARD_SELF" "$self.tmp" && bash -n "$self.tmp"; then
+        mv "$self.tmp" "$self"
+      else
+        rm -f "$self.tmp"
+        echo "Could not save a copy of onboard.sh in $FLEET_DIR (copy failed or does not parse)."
+      fi
+    fi
+  elif [ -n "$MASTER" ] && curl -fsS --max-time 30 "$MASTER/enroll/onboard.sh" -o "$self.tmp" \
+      && bash -n "$self.tmp"; then
+    mv "$self.tmp" "$self"
+  else
+    rm -f "$self.tmp"
+    [ -f "$self" ] || echo "Could not save a copy of onboard.sh in $FLEET_DIR; the hourly rescan needs it. Copy the file there and re-run."
+  fi
+  [ -f "$self" ] && chmod 700 "$self"
+  return 0
+}
+
 install_services() {
   local ip="$1" self="$FLEET_DIR/onboard.sh" py
   py="$(command -v python3)"
-  [ "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")" = "$self" ] || cp "$0" "$self"
-  chmod +x "$self"
+  save_self_copy
   say "Publishing inventory on $ip:$INFO_PORT (tailnet only) and rescanning hourly"
   if [ "$OS" = Darwin ]; then
     local la="$HOME/Library/LaunchAgents"; mkdir -p "$la"
@@ -420,8 +589,7 @@ install_services() {
       FLEET_DIR "$FLEET_DIR" \
       "/bin/bash" "$self" "--scan-only"
     for job in info scan; do
-      launchctl bootout "gui/$(id -u)" "$la/local.ai-fleet.$job.plist" 2>/dev/null || true
-      launchctl bootstrap "gui/$(id -u)" "$la/local.ai-fleet.$job.plist"
+      reload_launch_agent "$la/local.ai-fleet.$job.plist"
     done
   else
     local user info_exec scan_exec scan_fleet_env
@@ -470,7 +638,16 @@ EOF
 # The runner lets the master start Claude Code / Codex / Ollama jobs here (tailnet only, port 11436).
 # Its source is embedded below by nodes/build.py from nodes/runner.py; edit runner.py, then rebuild.
 write_runner() {
-  cat > "$FLEET_DIR/runner.py" <<'RUNNER_PY'
+  # Drop build.py's marker lines so the installed file is byte-identical to the master's nodes/runner.py:
+  # the controller compares their digests to show "update available".
+  python3 -c '
+import sys
+lines = sys.stdin.read().splitlines(keepends=True)
+if lines and lines[0].startswith("# >>> runner.py"):
+    lines = lines[1:]
+if lines and lines[-1].rstrip("\n") == "# <<< runner.py":
+    lines = lines[:-1]
+sys.stdout.write("".join(lines))' > "$FLEET_DIR/runner.py" <<'RUNNER_PY'
 # >>> runner.py (generated by nodes/build.py; do not edit here)
 #!/usr/bin/env python3
 """Small, dependency-free HTTP runner for detached agent jobs.
@@ -2399,19 +2576,20 @@ PY
   if [ "$ALLOW_ROOTS_SET" = 0 ] && [ "$has_roots" = 0 ] && [ "$YES" = 0 ]; then
     echo "Folders agents may work in (enter one absolute path at a time; blank finishes; no default):"
     while true; do
-      read -rp "Allow root: " root || root=""
+      tty_read root "Allow root: " || root=""
       [ -n "$root" ] || break
       ALLOW_ROOTS+=("$root")
     done
     policy_roots_set=1
   fi
   [ "$has_roots" = 0 ] && policy_roots_set=1
-  python3 - "$cfg" "$policy_roots_set" "${ALLOW_ROOTS[@]}" <<'PY'
+  python3 - "$cfg" "$policy_roots_set" "$(ram_gb)" "$REMOTE_MODELS" ${ALLOW_ROOTS[@]+"${ALLOW_ROOTS[@]}"} <<'PY'
 import json
 import os
 import sys
 
-path, roots_set, *roots = sys.argv[1:]
+path, roots_set, ram_gb, remote_models, *roots = sys.argv[1:]
+small = int(ram_gb or 0) <= 16  # 16 GB machines: one job and one loaded model at a time
 try:
     with open(path, encoding="utf-8") as handle:
         config = json.load(handle)
@@ -2429,15 +2607,31 @@ if not isinstance(profiles, dict):
 profiles.setdefault("pytest", ["python3", "-m", "pytest", "-q"])
 profiles.setdefault("unittest", ["python3", "-m", "unittest", "-q"])
 config.setdefault("allow_raw_gates", False)
-config.setdefault("max_jobs", 2)
+config.setdefault("max_jobs", 1 if small else 2)
 config.setdefault("max_job_minutes", 120)
-config.setdefault("power", {"min_battery_pct": 30})
+power = config.setdefault("power", {})
+if not isinstance(power, dict):
+    power = config["power"] = {}
+power.setdefault("min_battery_pct", 30)
+# Written out so the owner can see the switch; the console may install models only when it is true.
+models = config.setdefault("models", {})
+if not isinstance(models, dict):
+    models = config["models"] = {}
+if remote_models == "1":
+    models["remote_management"] = True
+models.setdefault("remote_management", False)
+models.setdefault("max_loaded", 1)
+models.setdefault("disk_reserve_gb", 8)
+models.setdefault("ram_reserve_gb", 4)
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2, sort_keys=True)
     handle.write("\n")
 os.chmod(tmp, 0o600)
 os.replace(tmp, path)
+if not config.get("allowed_roots"):
+    print("Note: allowed_roots is empty, so repo tasks (Claude/Codex) cannot run here; Ollama tasks still can.")
+    print("      Add folders later with --allow-root PATH (re-run) or by editing " + path + ".")
 PY
 }
 
@@ -2447,24 +2641,33 @@ install_runner() {
   configure_runner_policy
   say "Installing the agent runner on $ip:11436 (max mode: $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["max_mode"])' "$FLEET_DIR/runner.json"))"
   local path_dirs="$HOME/.local/bin:$HOME/.claude/local:$HOME/.npm-global/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  # Fleet agents get their own Claude Code and Codex profiles (as on the master), so fleet jobs never share
+  # or disturb this user's own sessions and logins. Sign each in once (printed at the end).
+  local claude_dir="$HOME/.claude-fleet" codex_dir="$HOME/.codex-fleet"
+  mkdir -p "$claude_dir" "$codex_dir" && chmod 700 "$claude_dir" "$codex_dir"
   if [ "$OS" = Darwin ]; then
     local la="$HOME/Library/LaunchAgents/local.ai-fleet.runner.plist"
-    write_launchd_plist "$la" "local.ai-fleet.runner" 1 1 "" "" "$FLEET_DIR/runner.log" 4 \
+    mkdir -p "$HOME/Library/LaunchAgents"
+    write_launchd_plist "$la" "local.ai-fleet.runner" 1 1 "" "" "$FLEET_DIR/runner.log" 6 \
       RUNNER_BIND "$ip:11436" \
       FLEET_DIR "$FLEET_DIR" \
       OLLAMA_URL "http://$ip:11434" \
       PATH "$path_dirs" \
+      CLAUDE_CONFIG_DIR "$claude_dir" \
+      CODEX_HOME "$codex_dir" \
       "$py" "$FLEET_DIR/runner.py"
-    launchctl bootout "gui/$(id -u)" "$la" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$la"
+    reload_launch_agent "$la"
   else
     local user runner_exec runner_bind_env runner_fleet_env runner_ollama_env runner_path_env
+    local runner_claude_env runner_codex_env
     user="$(id -un)"
     runner_exec="$(systemd_quote exec "$py" "$FLEET_DIR/runner.py")"
     runner_bind_env="$(systemd_quote environment "RUNNER_BIND=$ip:11436")"
     runner_fleet_env="$(systemd_quote environment "FLEET_DIR=$FLEET_DIR")"
     runner_ollama_env="$(systemd_quote environment "OLLAMA_URL=http://$ip:11434")"
     runner_path_env="$(systemd_quote environment "PATH=$path_dirs")"
+    runner_claude_env="$(systemd_quote environment "CLAUDE_CONFIG_DIR=$claude_dir")"
+    runner_codex_env="$(systemd_quote environment "CODEX_HOME=$codex_dir")"
     $SUDO tee /etc/systemd/system/ai-fleet-runner.service >/dev/null <<EOF
 [Unit]
 Description=AI fleet agent runner (tailnet only)
@@ -2476,6 +2679,8 @@ Environment=$runner_bind_env
 Environment=$runner_fleet_env
 Environment=$runner_ollama_env
 Environment=$runner_path_env
+Environment=$runner_claude_env
+Environment=$runner_codex_env
 ExecStart=$runner_exec
 Restart=always
 RestartSec=5
@@ -2489,54 +2694,154 @@ EOF
   fi
   echo "Agents run as $(id -un) with this user's logins. To change what they may do, edit $FLEET_DIR/runner.json"
   echo "(allowed_roots, gate_profiles, max_mode and limits) and restart the runner."
-  local token_file="$FLEET_DIR/runner.token" token="" node_name
-  node_name="$(hostname -s 2>/dev/null || hostname)"
+  local token_file="$FLEET_DIR/runner.token" token=""
   for _ in $(seq 1 30); do
     [ -s "$token_file" ] && { token="$(tr -d '\r\n' < "$token_file")"; break; }
     sleep 1
   done
   if [ -n "$token" ]; then
     RUNNER_TOKEN_VALUE="$token"
-    if [ -z "$ENROLL" ]; then
-      echo "Runner token (shown once). On the master run: printf '%s\\n' '$token' | uv run --script master/controller/controller.py runner-token set '$node_name'"
-    fi
+    [ "$ENROLLED" = 1 ] || print_manual_registration
   else
     echo "Runner token was not created yet; check $FLEET_DIR/runner.log and restart the runner."
   fi
 }
 
-# ---------- main ----------
-if [ "$SCAN_ONLY" = 1 ]; then
-  find_tailscale
-  scan "$(tailnet_ip)"
-  exit 0
-fi
-
-say "AI fleet onboarding: $(hostname -s 2>/dev/null || hostname), $OS, $(ram_gb)GB RAM"
-ensure_basics
-ensure_tailscale
-IP="$(tailnet_ip)"
-[ -n "$IP" ] || { echo "No tailnet IP: is Tailscale signed in?"; exit 1; }
-configure_ollama "$IP"
-say "Scanning for LLMs, engines and agents"
-scan "$IP"
-install_services "$IP"
-install_runner "$IP"
-
-if [ -n "$ENROLL" ]; then
-  [ -n "$MASTER" ] || { echo "--master is required with --enroll"; exit 1; }
-  [ -n "$RUNNER_TOKEN_VALUE" ] || { echo "Could not complete enrollment: runner token unavailable."; exit 1; }
-  python3 - "$ENROLL" "$(hostname -s 2>/dev/null || hostname)" "$RUNNER_TOKEN_VALUE" <<'PY' \
-    | curl -fsS -H 'Content-Type: application/json' --data-binary @- "$MASTER/api/enroll/complete" >/dev/null
-import json, sys
-json.dump({"code": sys.argv[1], "hostname": sys.argv[2].lower(), "runner_token": sys.argv[3]}, sys.stdout)
+# The runner reads runner.token at start and only creates one when it is missing, so onboarding can make it
+# first (same format, mode 0600, never overwritten) and enroll before this machine is tagged.
+ensure_runner_token() {
+  python3 - "$FLEET_DIR/runner.token" <<'PY'
+import os, secrets, sys
+path = sys.argv[1]
+try:
+    if open(path, encoding="utf-8").read().strip():
+        os.chmod(path, 0o600)
+        sys.exit(0)
+    os.unlink(path)  # empty file: the runner would refuse to start with it
+except FileNotFoundError:
+    pass
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(secrets.token_urlsafe(32) + "\n")
 PY
-  unset RUNNER_TOKEN_VALUE
-  echo "Enrollment completed; approve this pending node in the console."
-fi
+}
 
-say "Done"
-echo "This node will show as 'pending' in the master dashboard within ~30s. Approve it there, then assign roles."
-[ "$OS" = Darwin ] && [ "$(ram_gb)" -le 16 ] && echo "16GB tip (run yourself, resets on reboot): sudo sysctl iogpu.wired_limit_mb=12288"
-[ "$OS" = Darwin ] && echo "Keep awake on power: System Settings > Battery > Options > Prevent automatic sleeping when the display is off."
-exit 0
+# POST {code, hostname, runner_token} to the master. Neither secret is ever in a process's argv: the code
+# reaches the JSON encoder on its stdin (printf is a builtin), the encoder reads the token from its 0600 file,
+# and curl reads the body from stdin.
+# Must run while this machine can reach the master's https port: the tailnet policy lets your own
+# (untagged) devices reach tag:master:8443, but not tag:llm-node machines.
+ENROLL_BODY_PY='import json, sys
+host, token_file = sys.argv[1:]
+code = sys.stdin.readline().strip()
+with open(token_file, encoding="utf-8") as handle:
+    token = handle.read().strip()
+json.dump({"code": code, "hostname": host, "runner_token": token}, sys.stdout)'
+enroll_complete() {
+  local host body status
+  host="$(tailnet_hostname)"
+  say "Enrolling $host with $MASTER"
+  body="$(mktemp "${TMPDIR:-/tmp}/fleet-enroll.XXXXXX")"
+  if ! printf '%s\n' "$ENROLL" | python3 -c "$ENROLL_BODY_PY" "$host" "$FLEET_DIR/runner.token" \
+      | curl -sS --max-time 20 -o "$body" -w '%{http_code}' -H 'Content-Type: application/json' \
+          --data-binary @- "$MASTER/api/enroll/complete" > "$body.status" 2>"$body.err"; then
+    echo "Could not reach $MASTER ($(tr -d '\n' < "$body.err"))."
+    echo "Check: Tailscale is signed in here as your own user (not yet tagged), the master runs"
+    echo "'tailscale serve --bg --https=8443 http://127.0.0.1:8701', and the --master URL includes :8443."
+    rm -f "$body" "$body.status" "$body.err"; return 1
+  fi
+  status="$(cat "$body.status")"
+  case "$status" in
+    200) ENROLLED=1; echo "Enrolled as '$host'; it will show as pending in the console." ;;
+    403) echo "The master refused the enrollment code (wrong, expired after 30 minutes, or already used). Make a new one in the console (Nodes > Add node)." ;;
+    429) echo "Too many failed enrollment attempts from this machine; wait 10 minutes, then use a new code." ;;
+    *) echo "Enrollment failed with HTTP $status: $(head -c 300 "$body")" ;;
+  esac
+  rm -f "$body" "$body.status" "$body.err"
+  [ "$ENROLLED" = 1 ]
+}
+
+print_manual_registration() {
+  local node; node="$(tailnet_hostname)"
+  echo "Register this runner's token on the master (once this node shows in the console):"
+  echo "  1. here:   cat $FLEET_DIR/runner.token      (secret: copy it, don't paste it into chats or tickets)"
+  echo "  2. master: cd ~/ai-fleet && uv run --script master/controller/controller.py runner-token set '$node'"
+  echo "             (it asks for the token with input hidden)"
+}
+
+# Enrollment did not complete: stop while this machine is still untagged, so it can still reach the master.
+# Tagging it tag:llm-node first would make a retry impossible (the policy blocks tagged nodes from :8443).
+enroll_stop() {
+  echo
+  if [ "${1:-}" = tagged ]; then
+    echo "It is already tagged, so it cannot reach the master to enroll. Either remove tag:llm-node in the"
+    echo "Tailscale admin console (Machines > this machine > Edit ACL tags) and retry with a new code, or"
+    echo "re-run without --enroll and register the runner token by hand:"
+  else
+    echo "Stopped before joining the tailnet as tag:llm-node: this machine is not tagged and no services were"
+    echo "installed (Tailscale, python3 and $FLEET_DIR/runner.token may exist), so you can retry."
+    echo "Retry: make a new code in the console (Nodes > Add node), then run"
+    echo "  bash $FLEET_DIR/onboard.sh --enroll --master $MASTER      (it asks for the code, input hidden)"
+    echo "Or join without enrollment: re-run without --enroll, then register the runner token by hand:"
+  fi
+  print_manual_registration
+  exit 2
+}
+
+# ---------- main ----------
+main() {
+  resolve_enroll_code  # first: a missing terminal or a bad --enroll-file stops before anything changes
+  ensure_fleet_dir
+  if [ "$SCAN_ONLY" = 1 ]; then
+    find_tailscale
+    scan "$(tailnet_ip)"
+    return 0
+  fi
+
+  say "AI fleet onboarding: $(hostname -s 2>/dev/null || hostname), $OS, $(ram_gb)GB RAM"
+  ensure_basics
+  install_tailscale
+  # Steps that talk to the master go first: once tagged tag:llm-node, the tailnet policy no longer lets this
+  # machine reach the master (only the master reaches nodes).
+  save_self_copy
+  if [ -n "$ENROLL" ]; then
+    if [[ "$(tailnet_tags)" == *tag:llm-node* ]]; then
+      echo "This machine is already tagged tag:llm-node, so it cannot reach the master to enroll."
+      enroll_stop tagged
+    elif [ -z "$(tailnet_ip)" ]; then
+      echo "Tailscale is not signed in yet, so enrollment cannot reach the master."
+      enroll_stop
+    fi
+    ensure_runner_token
+    enroll_complete || enroll_stop
+    ENROLL=""  # used; keep it out of the rest of the run
+  fi
+  # Only reached when enrollment succeeded or was not requested.
+  tag_tailscale
+  IP="$(tailnet_ip)"
+  [ -n "$IP" ] || { echo "No tailnet IP: is Tailscale signed in? (menu bar icon, or 'tailscale up')"; exit 1; }
+  configure_ollama "$IP"
+  say "Scanning for LLMs, engines and agents"
+  scan "$IP"
+  install_services "$IP"
+  install_runner "$IP"
+  unset RUNNER_TOKEN_VALUE
+
+  say "Done"
+  echo "This node will show as 'pending' on the console's Nodes page within ~30s. Approve it there, then assign roles."
+  if have claude || have codex || [ -d /Applications/Codex.app ] || [ -d "$HOME/Library/Application Support/Claude/claude-code" ]; then
+    echo "Agent CLIs found. Fleet jobs use their own profiles; sign them in once, as this user:"
+    echo "  CLAUDE_CONFIG_DIR=$HOME/.claude-fleet claude      (then /login)"
+    echo "  CODEX_HOME=$HOME/.codex-fleet codex login"
+  fi
+  if [ "$OS" = Darwin ] && [ "$(ram_gb)" -le 16 ]; then
+    echo "16GB tip (run yourself, resets on reboot): sudo sysctl iogpu.wired_limit_mb=12288"
+  fi
+  if [ "$OS" = Darwin ]; then
+    echo "Keep awake on power: System Settings > Battery > Options > Prevent automatic sleeping when the display is off."
+  fi
+  return 0
+}
+
+# Tests source this file with ONBOARD_SOURCE_ONLY=1 to call single functions.
+[ "${ONBOARD_SOURCE_ONLY:-0}" = 1 ] || main

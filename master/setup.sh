@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Master node (Laptop 1): Tailscale tag, LiteLLM gateway, fleet controller, Claude Code MCP servers.
 # Run once; safe to re-run.
-#   --services-only   (re)install just the controller, runner and Ollama services; skip the Tailscale
-#                     re-tag, the gateway bootstrap and the Claude Code MCP registration.
+#   --services-only     (re)install just the controller, runner and Ollama services; skip the Tailscale
+#                       re-tag, the gateway bootstrap and the Claude Code MCP registration.
+#   --reset-tailscale   allow `tailscale up --reset` if Tailscale refuses to add the tag otherwise. It wipes
+#                       this Mac's other Tailscale settings (exit node, routes, DNS, SSH); never done without it.
 set -euo pipefail
-SERVICES_ONLY=0
-[ "${1:-}" = "--services-only" ] && SERVICES_ONLY=1
+SERVICES_ONLY=0; RESET_TAILSCALE=0
+for arg in "$@"; do
+  case "$arg" in
+    --services-only) SERVICES_ONLY=1 ;;
+    --reset-tailscale) RESET_TAILSCALE=1 ;;
+    *) echo "unknown option $arg (use --services-only and/or --reset-tailscale)"; exit 1 ;;
+  esac
+done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$HERE/.." && pwd)"
 CODEX="$(command -v codex || echo /Applications/Codex.app/Contents/Resources/codex)"
@@ -39,6 +47,64 @@ PY
 }
 # END launchd plist helper
 
+# (Re)load a LaunchAgent. `launchctl bootout` returns before the job is gone, so an immediate bootstrap
+# can fail with "Bootstrap failed: 5: Input/output error" on a re-run; wait for it and retry instead.
+reload_launch_agent() {
+  local plist="$1" label domain="gui/$(id -u)" i
+  label="$(basename "$plist" .plist)"
+  launchctl bootout "$domain" "$plist" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    launchctl print "$domain/$label" >/dev/null 2>&1 || break
+    sleep "${RELOAD_WAIT:-0.5}"
+  done
+  for i in 1 2 3 4 5; do
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null && return 0
+    sleep "${RELOAD_WAIT:-1}"
+  done
+  echo "Could not start $label: run 'launchctl bootstrap $domain $plist' to see why, then re-run."
+  return 1
+}
+
+# The https address nodes and phones use (tailscale serve on 8443 -> 127.0.0.1:8701), e.g.
+# mac.tailnet.ts.net:8443. The controller prints it in enrollment commands and sign-in links.
+# Empty when Tailscale isn't installed or signed in; FLEET_PUBLIC_HOST in master/litellm/.env still wins.
+public_host() {
+  [ -x "$TS" ] || return 0
+  "$TS" status --json 2>/dev/null | python3 -c '
+import json, sys
+name = ((json.load(sys.stdin).get("Self") or {}).get("DNSName") or "").rstrip(".").lower()
+print(name + ":8443" if name else "")' 2>/dev/null || true
+}
+
+# Tag this Mac tag:master without touching its other Tailscale preferences (exit node, routes, DNS, SSH).
+# `tailscale set` changes only the flags given; older CLIs without it get `tailscale up` without --reset, which
+# Tailscale refuses if other non-default flags would be dropped. --reset only with --reset-tailscale.
+tag_master() {
+  local help=""
+  help="$("$TS" set --help 2>&1 || true)"
+  if [[ "$help" == *advertise-tags* ]]; then
+    "$TS" set --advertise-tags=tag:master && return 0
+  else
+    "$TS" up --advertise-tags=tag:master && return 0
+  fi
+  if [ "$RESET_TAILSCALE" = 1 ]; then
+    echo "--reset-tailscale: retrying with 'tailscale up --reset'. This resets this Mac's other Tailscale"
+    echo "settings (exit node, subnet routes, DNS, Tailscale SSH) to defaults."
+    "$TS" up --advertise-tags=tag:master --reset && return 0
+  fi
+  echo "Could not tag this Mac as tag:master. Two usual causes:"
+  echo " - the tailnet policy has no tag:master owner: paste tailscale/policy.hujson into the Tailscale admin"
+  echo "   console (Access controls) first, then re-run setup;"
+  echo " - Tailscale wants this Mac's existing non-default flags repeated (see its message above). Either run"
+  echo "   the command it suggests, keeping --advertise-tags=tag:master, then re-run setup; or re-run"
+  echo "   'bash master/setup.sh --reset-tailscale' to accept resetting this Mac's other Tailscale settings"
+  echo "   (exit node, routes, DNS, SSH)."
+  return 1
+}
+
+# Tests source this file with SETUP_SOURCE_ONLY=1 to call the helpers above.
+[ "${SETUP_SOURCE_ONLY:-0}" = 1 ] && return 0
+
 command -v python3 >/dev/null || brew install python
 command -v uv >/dev/null || brew install uv
 UV="$(command -v uv)"
@@ -46,7 +112,12 @@ UV="$(command -v uv)"
 if [ "$SERVICES_ONLY" = 0 ]; then
 # 1. Tailnet identity: the policy lets only tag:master reach node model ports.
 [ -x "$TS" ] || { brew install --cask tailscale; open -a Tailscale; echo "Sign in to Tailscale, then press Enter."; read -r; }
-"$TS" up --advertise-tags=tag:master --reset
+tag_master || exit 1
+# Token-protected console port for phones and for node enrollment (never point serve at 8700).
+if ! "$TS" serve --bg --https=8443 http://127.0.0.1:8701; then
+  echo "tailscale serve failed: enable HTTPS certificates (admin console > DNS), then run"
+  echo "  $TS serve --bg --https=8443 http://127.0.0.1:8701"
+fi
 
 # 2. Gateway. bootstrap.sh prints a virtual key on success.
 "$HERE/litellm/bootstrap.sh" | tee /dev/stderr | sed -n 's/^Virtual key for Laptop 1: //p' > "$HERE/litellm/.vkey" \
@@ -66,13 +137,15 @@ fi
 # 3. Fleet controller as a login agent (dashboard: http://127.0.0.1:8700).
 mkdir -p "$HOME/Library/LaunchAgents"
 PLIST="$HOME/Library/LaunchAgents/local.ai-fleet.controller.plist"
+CONTROLLER_ENV=(TAILSCALE_BIN "$TS" FLEET_MASTER_MODEL_HOST "host.docker.internal")
+PUBLIC_HOST="$(public_host)"
+[ -n "$PUBLIC_HOST" ] && CONTROLLER_ENV+=(FLEET_PUBLIC_HOST "$PUBLIC_HOST")
 write_launchd_plist "$PLIST" "local.ai-fleet.controller" 1 1 "" \
-  "$HOME/Library/Logs/ai-fleet-controller.log" "$HOME/Library/Logs/ai-fleet-controller.log" 2 \
-  TAILSCALE_BIN "$TS" FLEET_MASTER_MODEL_HOST "host.docker.internal" \
+  "$HOME/Library/Logs/ai-fleet-controller.log" "$HOME/Library/Logs/ai-fleet-controller.log" \
+  "$(( ${#CONTROLLER_ENV[@]} / 2 ))" "${CONTROLLER_ENV[@]}" \
   "/bin/bash" "-c" 'set -a; . "$0/../litellm/.env"; set +a; exec "$1" run --script "$0/controller.py"' \
   "$HERE/controller" "$UV"
-launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+reload_launch_agent "$PLIST"
 
 # 4. The master's own agent runner (localhost only): lets tasks use this Mac's Claude Code, Codex, Ollama.
 mkdir -p "$HOME/.ai-fleet" && chmod 700 "$HOME/.ai-fleet"
@@ -130,8 +203,7 @@ write_launchd_plist "$RPLIST" "local.ai-fleet.runner" 1 1 "" "" \
   OLLAMA_URL "http://127.0.0.1:11434" \
   PATH "$HOME/.local/bin:$HOME/.claude/local:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
   "$(command -v python3)" "$HERE/../nodes/runner.py"
-launchctl bootout "gui/$(id -u)" "$RPLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$RPLIST"
+reload_launch_agent "$RPLIST"
 
 # Store the generated local credential in the controller DB without putting it in argv or logs.
 registered=0

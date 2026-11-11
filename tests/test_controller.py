@@ -1871,7 +1871,10 @@ Imported body.
             enrollment = made.json()
             self.assertEqual(len(enrollment["code"]), 10)
             self.assertEqual(enrollment["expires_at"], clock[0] + 1800)
-            self.assertIn("--enroll " + enrollment["code"], enrollment["command"])
+            # The command asks for the code on the node's terminal; the code is never part of it.
+            self.assertNotIn(enrollment["code"], enrollment["command"])
+            self.assertRegex(enrollment["command"],
+                             r"^curl -fsS (\S+)/enroll/onboard\.sh \| bash -s -- --enroll --master \1$")
 
             wrong = self.c.post("/api/enroll/complete", json={"code": "AAAAAAAAAA", "hostname": "p8-host",
                                                                 "runner_token": "secret-runner-token"})

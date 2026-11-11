@@ -1,12 +1,11 @@
 """Pure build-pipeline state machine and evidence-checked review parsing."""
 import copy
-import json
 import re
 import time
 
+import grounding
 
-VERDICTS = {"approve", "request_changes"}
-SEVERITIES = {"high", "medium", "low"}
+
 TERMINAL = {"ready", "failed", "escalated", "cancelled"}
 
 
@@ -64,38 +63,11 @@ def _normalised(text: str) -> str:
 
 
 def parse_review(raw: str, diff: str) -> dict:
-    """Parse review JSON and discard issues whose quoted evidence is absent from the diff."""
-    if not isinstance(raw, str):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    text = raw.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
-    if fenced:
-        text = fenced.group(1)
-    try:
-        value = json.loads(text)
-    except (ValueError, TypeError):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    if (not isinstance(value, dict) or value.get("verdict") not in VERDICTS
-            or not isinstance(value.get("issues"), list)):
-        return {"status": "abstained", "unsupported": 0, "issues": []}
-    issues = []
-    unsupported = 0
-    normal_diff = _normalised(diff if isinstance(diff, str) else "")
-    for issue in value["issues"]:
-        if (not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES
-                or not isinstance(issue.get("problem"), str) or not issue["problem"].strip()
-                or not isinstance(issue.get("evidence"), str) or not issue["evidence"].strip()):
-            return {"status": "abstained", "unsupported": 0, "issues": []}
-        for optional in ("file", "fix"):
-            if optional in issue and not isinstance(issue[optional], str):
-                return {"status": "abstained", "unsupported": 0, "issues": []}
-        if _normalised(issue["evidence"]) not in normal_diff:
-            unsupported += 1
-            continue
-        issues.append({key: issue[key] for key in ("severity", "file", "problem", "evidence", "fix")
-                       if key in issue})
-    return {"status": "valid", "verdict": value["verdict"], "issues": issues,
-            "unsupported": unsupported}
+    """Apply the shared review contract, retaining the legacy invalid status name."""
+    parsed = grounding.check_review(raw, diff)
+    if parsed["status"] == "invalid":
+        parsed["status"] = "abstained"
+    return parsed
 
 
 def _resolution_text(issues: list[dict]) -> str:
@@ -111,9 +83,15 @@ def _resolution_text(issues: list[dict]) -> str:
 def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     """Apply one event and return the new state plus controller actions."""
     p = copy.deepcopy(pipeline)
+    kind = event.get("type")
+    if kind == "retry" and p.get("state") == "escalated":
+        # A person decided to try the reviews of this round again (e.g. after plugging in or fixing a model).
+        p["state"] = "reviewing"
+        p["reviews"] = {str(i): {"status": "pending"} for i in range(len(p["reviewers"]))}
+        _history(p, "reviewing", note="reviews retried")
+        return p, [{"do": "spawn_review", "reviewer": i} for i in range(len(p["reviewers"]))]
     if p.get("state") in TERMINAL:
         return p, []
-    kind = event.get("type")
     if kind == "cancel":
         p["state"] = "cancelled"
         _history(p, "cancelled", note="cancelled by user")
@@ -140,14 +118,20 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
     parsed = parse_review(event.get("raw", ""), event.get("diff", ""))
     if event.get("task_id"):
         parsed["task_id"] = event["task_id"]
+    if event.get("reason"):
+        parsed["reason"] = str(event["reason"])[:300]
     p["reviews"][key] = parsed
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
-    valid = [review for review in p["reviews"].values() if review.get("status") == "valid"]
+    valid = [review for review in p["reviews"].values()
+             if review.get("status") == "valid" or review.get("verdict") == "abstain"]
     unsupported = sum(review.get("unsupported", 0) for review in p["reviews"].values())
+    identical_fix = sum(review.get("identical_fix", 0) for review in p["reviews"].values())
     if not valid:
         p["state"] = "escalated"
-        _history(p, "escalated", unsupported=unsupported, note="all reviewers abstained")
+        reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
+        _history(p, "escalated", unsupported=unsupported, identical_fix=identical_fix,
+                 note="no usable review" + (f" ({reasons})" if reasons else " (all replies were invalid)"))
         return p, []
     actionable = []
     seen = set()
@@ -161,18 +145,18 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
                 actionable.append(issue)
     if not actionable:
         p["state"] = "ready"
-        _history(p, "ready", issues=0, unsupported=unsupported)
+        _history(p, "ready", issues=0, unsupported=unsupported, identical_fix=identical_fix)
         return p, []
-    _history(p, "resolving", issues=len(actionable), unsupported=unsupported)
+    _history(p, "resolving", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix)
     p["round"] += 1
     if p["round"] > p["max_rounds"]:
         p["round"] = p["max_rounds"]
         p["state"] = "escalated"
-        _history(p, "escalated", issues=len(actionable), unsupported=unsupported,
+        _history(p, "escalated", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
                  note="review rounds exhausted")
         return p, []
     p["state"] = "building"
     p["reviews"] = {}
-    _history(p, "building", issues=len(actionable), unsupported=unsupported,
+    _history(p, "building", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
              note="review issues sent to builder")
     return p, [{"do": "message_build", "text": _resolution_text(actionable)}]

@@ -599,7 +599,8 @@ Imported body.
         FakeRunner.agents["codex"] = "/x/codex"
         self.c.post("/api/refresh", headers=W)
         issue = {"severity": "high", "file": "app.py", "problem": "Greeting regression",
-                 "evidence": "+hello", "fix": "restore the expected greeting"}
+                 "evidence": "hello", "expected": "the expected greeting",
+                 "actual": "the greeting is hello", "fix": "restore the expected greeting"}
         answers = [json.dumps({"verdict": "request_changes", "issues": [issue]}),
                    json.dumps({"verdict": "approve", "issues": []})]
         controller.pipeline_model_call = lambda role, spec, diff: answers.pop(0)
@@ -681,8 +682,50 @@ Imported body.
             self.assertEqual(sent["repo"], "/r/project")
             self.assertEqual(sent["mode"], "read-only")
             self.assertIn("the builder's changes are exactly the diff below", sent["prompt"])
+            self.assertIn('"verdict":"approve|request_changes|abstain"', sent["prompt"])
+            self.assertIn('"expected":"","actual":""', sent["prompt"])
             self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
         finally:
+            FakeRunner.agents["codex"] = None
+            self.c.post("/api/refresh", headers=W)
+
+    def test_role_review_falls_back_and_unusable_reviews_say_why(self):
+        from store import db
+        original = controller.pipeline_model_call
+        with db() as c:
+            c.execute("INSERT OR REPLACE INTO roles (name, fallback, description) VALUES ('slowrole', 'fastrole', NULL)")
+        calls = []
+
+        def fake(role, spec, diff):
+            calls.append(role)
+            if role == "slowrole":
+                raise TimeoutError("took too long")
+            return json.dumps({"verdict": "approve", "issues": []})
+        controller.pipeline_model_call = fake
+        FakeRunner.agents["codex"] = "/x/codex"
+        self.c.post("/api/refresh", headers=W)
+        try:
+            body = {"title": "Fallback review", "spec": "s", "repo": "/repo", "gate": "pytest", "mode": "auto-edit",
+                    "builder": {"agent": "codex"}, "reviewers": [{"kind": "role", "role": "slowrole"}], "max_rounds": 1}
+            p = self.c.post("/api/pipelines", json=body, headers=W).json()
+            FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            done = wait_for(lambda: (lambda x: x if x["state"] == "ready" else None)(
+                self.c.get(f"/api/pipelines/{p['id']}").json()), timeout=20)
+            self.assertEqual(calls, ["slowrole", "fastrole"])
+            self.assertIn("fallback role fastrole", done["reviews"]["0"]["reason"])
+            # Both roles failing: escalated, with the reason, and a retry runs the reviews again.
+            controller.pipeline_model_call = lambda role, spec, diff: (_ for _ in ()).throw(ConnectionError("down"))
+            p2 = self.c.post("/api/pipelines", json=dict(body, title="No reviewer"), headers=W).json()
+            FakeRunner.jobs[p2["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+            esc = wait_for(lambda: (lambda x: x if x["state"] == "escalated" else None)(
+                self.c.get(f"/api/pipelines/{p2['id']}").json()), timeout=20)
+            self.assertIn("ConnectionError", esc["history"][-1]["note"])
+            self.assertEqual(self.c.post(f"/api/pipelines/{p['id']}/retry", headers=W).status_code, 409)
+            controller.pipeline_model_call = lambda role, spec, diff: json.dumps({"verdict": "approve", "issues": []})
+            self.assertEqual(self.c.post(f"/api/pipelines/{p2['id']}/retry", headers=W).status_code, 200)
+            wait_for(lambda: self.c.get(f"/api/pipelines/{p2['id']}").json()["state"] == "ready", timeout=20)
+        finally:
+            controller.pipeline_model_call = original
             FakeRunner.agents["codex"] = None
             self.c.post("/api/refresh", headers=W)
 

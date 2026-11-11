@@ -31,10 +31,13 @@ def review(verdict, *issues):
 
 
 SQLI = {"severity": "high", "file": "app.py", "problem": "SQL injection via f-string",
-        "evidence": "f\"SELECT * FROM users WHERE name = '{name}'\"", "fix": "use a parameter"}
+        "evidence": "f\"SELECT * FROM users WHERE name = '{name}'\"",
+        "expected": "parameterized SQL", "actual": "interpolated SQL", "fix": "use a parameter"}
 INVENTED = {"severity": "high", "file": "app.py", "problem": "missing auth check",
-            "evidence": "if not user.is_admin:", "fix": "add one"}
-NIT = {"severity": "low", "file": "app.py", "problem": "naming", "evidence": "def get_user(db, name):", "fix": "rename"}
+            "evidence": "if not user.is_admin:", "expected": "an auth check", "actual": "none",
+            "fix": "add one"}
+NIT = {"severity": "low", "file": "app.py", "problem": "naming", "evidence": "def get_user(db, name):",
+       "expected": "a clearer name", "actual": "get_user", "fix": "rename"}
 
 
 class ParseReview(unittest.TestCase):
@@ -62,6 +65,10 @@ class ParseReview(unittest.TestCase):
     def test_fenced_json_is_accepted(self):
         raw = "```json\n" + review("approve") + "\n```"
         self.assertEqual(PL.parse_review(raw, DIFF)["status"], "valid")
+
+    def test_explicit_abstain_is_valid(self):
+        r = PL.parse_review(review("abstain"), DIFF)
+        self.assertEqual((r["status"], r["verdict"], r["issues"]), ("abstained", "abstain", []))
 
 
 class Machine(unittest.TestCase):
@@ -124,6 +131,40 @@ class Machine(unittest.TestCase):
         p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "no idea", "diff": DIFF})
         p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
         self.assertEqual(p["state"], "ready")
+
+    def test_explicit_abstentions_are_valid_no_issue_reviews(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("abstain"), "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("abstain"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+
+    def test_reasons_for_unusable_reviews_are_kept(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "", "diff": DIFF, "reason": "model call failed: ReadTimeout"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": "", "diff": DIFF, "reason": "master: on battery (28%)"})
+        self.assertEqual(p["state"], "escalated")
+        self.assertEqual(p["reviews"]["0"]["reason"], "model call failed: ReadTimeout")
+        self.assertIn("on battery (28%)", p["history"][-1]["note"])
+        self.assertIn("ReadTimeout", p["history"][-1]["note"])
+
+    def test_escalated_pipeline_can_retry_its_reviews(self):
+        p, _ = PL.start(PL.new(spec()))
+        p, _ = PL.step(p, {"type": "build", "state": "review"})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": "", "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": "", "diff": DIFF})
+        self.assertEqual(p["state"], "escalated")
+        p, actions = PL.step(p, {"type": "retry"})
+        self.assertEqual(p["state"], "reviewing")
+        self.assertEqual(actions, [{"do": "spawn_review", "reviewer": 0}, {"do": "spawn_review", "reviewer": 1}])
+        self.assertTrue(all(r["status"] == "pending" for r in p["reviews"].values()))
+        p, _ = PL.step(p, {"type": "review", "reviewer": 0, "raw": review("approve"), "diff": DIFF})
+        p, _ = PL.step(p, {"type": "review", "reviewer": 1, "raw": review("approve"), "diff": DIFF})
+        self.assertEqual(p["state"], "ready")
+        # Only an escalated pipeline can be retried.
+        q, actions = PL.step(PL.start(PL.new(spec()))[0], {"type": "retry"})
+        self.assertEqual((q["state"], actions), ("building", []))
 
     def test_build_failures_and_cancel(self):
         p, _ = PL.start(PL.new(spec()))

@@ -291,7 +291,7 @@ export interface Pipeline {
   builder: { agent: string; node?: string | null };
   reviewers: ({ kind: "role"; role: string } | { kind: "agent"; agent: string })[];
   build_task: string | null;
-  reviews: Record<string, { status: "valid" | "abstained" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; task_id?: string }>;
+  reviews: Record<string, { status: "valid" | "abstained" | "invalid" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; identical_fix?: number; task_id?: string; reason?: string }>;
   history: { round: number; state: PipelineState; at: number; issues?: number; unsupported?: number; note?: string }[];
   created_at: number;
   updated_at: number;

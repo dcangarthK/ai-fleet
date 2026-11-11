@@ -86,10 +86,13 @@ function PipelineDetail({ p }: { p: Pipeline }) {
                   <td style={{ width: 160 }}>{reviewerLabel(r)}{rv?.task_id && <div className="sub"><Link to={`/tasks?tab=all&task=${rv.task_id}`}>task</Link></div>}</td>
                   <td>
                     {!rv || rv.status === "pending" ? <span className="quiet">waiting</span>
-                      : rv.status === "abstained" ? <span className="tone-warn">No usable review (the reply wasn't valid review JSON)</span>
+                      : rv.status !== "valid" && rv.verdict !== "abstain" ? <span className="tone-warn">No usable review{rv.reason ? `: ${rv.reason}` : " (the reply wasn't valid review JSON)"}</span>
+                      : rv.verdict === "abstain" ? <span className="quiet">Found nothing it could defend{rv.reason && <> · {rv.reason}</>}</span>
                       : <>
                           <span className={rv.verdict === "approve" ? "tone-ok" : "tone-warn"}>{rv.verdict === "approve" ? "Approved" : "Requested changes"}</span>
                           {!!rv.unsupported && <span className="small quiet"> · {rv.unsupported} claim{rv.unsupported > 1 ? "s" : ""} dropped: the quoted evidence isn't in the diff</span>}
+                          {!!rv.identical_fix && <span className="small quiet"> · {rv.identical_fix} dropped: the "fix" is what the code already says</span>}
+                          {rv.reason && <div className="small quiet">{rv.reason}</div>}
                           {(rv.issues ?? []).map((x, j) => (
                             <div key={j} className="small" style={{ marginTop: 6 }}>
                               <span className={`tone-${x.severity === "high" ? "bad" : x.severity === "medium" ? "warn" : "quiet"}`}>{x.severity}</span>{" "}
@@ -115,6 +118,12 @@ function PipelineDetail({ p }: { p: Pipeline }) {
           <summary className="small">What the builder was asked</summary>
           <pre className="out">{p.spec}</pre>
         </details>
+        {can.operate && p.state === "escalated" && (
+          <div className="row" style={{ marginTop: 10 }}>
+            <button className="primary" disabled={busy} onClick={() => run(() => post(`/api/pipelines/${p.id}/retry`))}>Retry reviews</button>
+            <span className="small quiet">Runs this round's reviews again, for example after plugging in or fixing a reviewer.</span>
+          </div>
+        )}
         {active && (
           <div className="row" style={{ marginTop: 10 }}>
             <button className="danger" disabled={busy} onClick={() => confirm("Cancel this pipeline? Its tasks are cancelled; branches are kept.") && run(() => post(`/api/pipelines/${p.id}/cancel`))}>Cancel pipeline</button>

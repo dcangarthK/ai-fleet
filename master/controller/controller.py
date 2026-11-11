@@ -26,7 +26,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -345,6 +345,27 @@ async def refresh() -> dict:
 @app.get("/", response_class=HTMLResponse)
 def dashboard() -> str:
     return Path(__file__).with_name("dashboard.html").read_text()
+
+
+UI_DIST = Path(__file__).with_name("ui") / "dist"
+
+
+@app.get("/app", include_in_schema=False)
+@app.get("/app/{path:path}", include_in_schema=False)
+def console(path: str = "") -> FileResponse:
+    """The React console, built into ui/dist. Other paths fall back to index.html for its client-side routes."""
+    root = UI_DIST.resolve()
+    if path:
+        f = (root / path).resolve()
+        if f.is_file() and root in f.parents:
+            return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"}
+                                if path.startswith("assets/") else None)
+        if path.startswith("assets/") or "." in path.rsplit("/", 1)[-1]:
+            raise HTTPException(404, "not found")
+    index = root / "index.html"
+    if not index.is_file():
+        raise HTTPException(503, "console not built: cd master/controller/ui && npm ci && npm run build")
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/login")

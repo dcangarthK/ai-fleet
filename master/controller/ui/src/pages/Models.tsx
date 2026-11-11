@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "rea
 import { Link } from "react-router-dom";
 import { post, put, type CatalogModel, type FleetNode, type ModelParams, type NodeModelState } from "../lib/api";
 import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
-import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction } from "../lib/format";
+import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
@@ -60,6 +60,16 @@ export function ModelsPage() {
                   <b>{m.display_name || m.reference}</b>
                   <div className="sub mono">{m.reference}</div>
                   {roleTags(assignments.filter((a) => a.model === m.reference).map((a) => a.role))}
+                  {m.trusted_reviewer && <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span>}
+                  {m.derived_trusted_reviewer && (
+                    <span className="tag tone-ok" tabIndex={0}
+                          title={`With custom settings this model is served as ${m.derived_model}, which is benchmarked separately. ${TRUSTED_RULE}`}>
+                      Trusted with settings
+                    </span>
+                  )}
+                  {m.trusted_reviewer && !m.derived_trusted_reviewer && m.derived_model && (
+                    <div className="sub">With custom settings, {m.derived_model} is judged on its own benchmark.</div>
+                  )}
                 </td>
                 <td className="num hide-sm">{m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—"}</td>
                 <td className="hide-sm small">{scores(m.evals)}</td>

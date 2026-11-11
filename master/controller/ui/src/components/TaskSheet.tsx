@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { get, post, type Task } from "../lib/api";
 import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
-import { Diff, ErrorBanner, StateLabel } from "./bits";
+import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
+import { displayOf } from "../lib/lineage";
 
 /** Task detail as a side sheet over the task list. Closes on Escape. */
 export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) {
@@ -25,7 +27,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
   useEffect(() => setDiff(null), [id]);
 
   const nodes = fleet.data?.nodes ?? [];
-  const act = (action: string) => run(() => taskAction(id, action));
+  const act = (action: string, body?: unknown) => run(() => (body === undefined ? taskAction(id, action) : post<Task>(`/api/tasks/${id}/${action}`, body)));
 
   async function send(e: FormEvent) {
     e.preventDefault();
@@ -42,6 +44,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
             {task && (
               <div className="row small quiet" style={{ marginTop: 4 }}>
                 <StateLabel state={task.state} />
+                {task.display && <StatusPill display={task.display} />}
                 <span>{task.agent}{task.model ? ` (${task.model})` : ""} on {nodeName(nodes, task.node_id)}</span>
                 <span>{task.mode}</span>
                 <span>updated {ago(task.updated_at)}</span>
@@ -73,13 +76,13 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
 function TaskBody({ task, busy, act, diff, loadDiff }: {
   task: Task;
   busy: boolean;
-  act: (a: string) => void;
+  act: (a: string, body?: unknown) => void;
   diff: { stat: string; diff: string } | null;
   loadDiff: () => void;
 }) {
   const scope = useCan();
   const all = taskActions(task);
-  const can = { ...all, approve: all.approve && scope.admin, reject: all.reject && scope.admin,
+  const can = { ...all, approve: all.approve && scope.admin, reject: all.reject && scope.admin, resolve: all.resolve && scope.admin,
     cancel: all.cancel && scope.operate, complete: all.complete && scope.operate, cleanup: all.cleanup && scope.operate };
   const gate = task.gate_result;
   return (
@@ -89,6 +92,15 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
         {can.reject && <button className="danger" disabled={busy} onClick={() => act("reject")}>Reject</button>}
         {can.cancel && <button className="danger" disabled={busy} onClick={() => act("cancel")}>Cancel task</button>}
         {can.complete && <button disabled={busy} onClick={() => act("complete")}>Mark done</button>}
+        {can.resolve && (
+          <button disabled={busy} onClick={() => {
+            const by = prompt("Who finished this? (for example: Sonnet 5.5 (orchestrator session))");
+            if (!by?.trim()) return;
+            const commit = prompt("Commit that has the work (7 to 40 hex characters, or leave empty)") ?? "";
+            act("resolve", { kind: "done_elsewhere", by: by.trim(), ...(commit.trim() ? { commit: commit.trim() } : {}) });
+          }}>Mark done elsewhere…</button>
+        )}
+        {can.resolve && <button disabled={busy} onClick={() => act("resolve", { kind: "dismissed" })}>Dismiss</button>}
         {can.diff && <button disabled={busy} onClick={loadDiff}>Show changes</button>}
         {can.cleanup && (
           <button disabled={busy} onClick={() => confirm("Remove this task's worktree? Its branch is kept.") && act("cleanup")}>
@@ -98,6 +110,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
       </div>
 
       {task.error && <div className="banner error">{task.error}</div>}
+      <Lineage task={task} />
       {task.state === "blocked" && (
         <div className="banner note">
           The agent was denied: {denialTools(task).map((t) => <span className="tag" key={t}>{t}</span>)} Approve to rerun it with those tools allowed.
@@ -129,6 +142,30 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
       {task.result && (<><h3>Result</h3><pre className="out">{task.result}</pre></>)}
       {gate?.output_tail && (<><h3>Gate output</h3><pre className="out">{gate.output_tail}</pre></>)}
       {diff && (<><h3>Changes</h3><pre className="out">{diff.stat}</pre><Diff text={diff.diff} /></>)}
+    </>
+  );
+}
+
+/** Why the task ended as it did, when a limit lifts, and how it was dealt with. */
+function Lineage({ task }: { task: Task }) {
+  const r = task.resolution;
+  const display = displayOf(task);
+  return (
+    <>
+      {task.failure_reason && (
+        <p className="small">
+          <b>Reason</b> <span className="mono">{task.failure_reason}</span>
+          {task.resets_at && <> · limit resets {new Date(task.resets_at * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}</>}
+        </p>
+      )}
+      {r && (
+        <p className="small">
+          <b>Resolution</b> <span className="quiet">{display.label}</span>
+          {r.kind === "resolved_by" && r.task_id && <> · <Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(r.task_id)}`}>open that task</Link></>}
+          {r.note && <span className="quiet"> · {r.note}</span>}
+        </p>
+      )}
+      {task.outcome && <p className="small"><b>Outcome</b> {task.outcome.kind}{task.outcome.commit && <span className="mono"> {task.outcome.commit}</span>}</p>}
     </>
   );
 }

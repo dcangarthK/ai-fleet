@@ -74,7 +74,10 @@ MIGRATIONS = {
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
               "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0",
-              "approved_tools": "TEXT DEFAULT '[]'"},
+              "approved_tools": "TEXT DEFAULT '[]'",
+              # task lineage (docs/SPEC-task-lineage.md): all nullable, nothing is rewritten
+              "link": "TEXT", "failure_reason": "TEXT", "resets_at": "REAL", "resolution": "TEXT",
+              "outcome": "TEXT", "hidden": "INTEGER DEFAULT 0"},
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0"},
 }
@@ -100,6 +103,8 @@ def init_db() -> None:
             for name, decl in cols.items():
                 if name not in have:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        c.execute("CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS events_type_task ON events(type, task_id)")
         _seed_models(c)
         _seed_notify_rules(c)
 
@@ -147,3 +152,16 @@ def _seed_models(c: sqlite3.Connection) -> None:
             "VALUES (?,?, 'ollama', ?,NULL,NULL,NULL,'{}',?,?, 'evals',?)",
             (model_id, reference, reference, json.dumps(sorted(scores)), json.dumps(scores), time.time()),
         )
+
+
+def task_root(c: sqlite3.Connection, task_id: str) -> str:
+    """The root of a task's lineage: follow parent_id until there is none (or it points at nothing)."""
+    seen = {task_id}
+    current = task_id
+    while True:
+        row = c.execute("SELECT parent_id FROM tasks WHERE id=?", (current,)).fetchone()
+        parent = row["parent_id"] if row else None
+        if not parent or parent in seen or not c.execute("SELECT 1 FROM tasks WHERE id=?", (parent,)).fetchone():
+            return current
+        seen.add(parent)
+        current = parent

@@ -8,7 +8,7 @@ import fnmatch
 import os
 from pathlib import Path
 
-from store import db
+from store import db, task_root
 
 # FLEET_PLUGINS_DIR lets tests (and anyone) point plugins elsewhere; FLEET_PLUGINS=off disables them.
 PLUGIN_DIR = Path(os.environ.get("FLEET_PLUGINS_DIR") or Path(__file__).resolve().parent.parent / "plugins")
@@ -99,6 +99,7 @@ PLUGINS = load_plugins()
 
 
 _recent: dict[tuple, float] = {}
+_once: set[str] = set()
 DEDUPE_SECONDS = 60
 
 
@@ -110,12 +111,14 @@ def _task(task_id: str | None) -> dict:
             row = c.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             in_pipeline = c.execute(
                 "SELECT 1 FROM pipelines WHERE build_task=? OR reviews LIKE ?", (task_id, f'%"{task_id}"%')).fetchone()
+            root_id = task_root(c, task_id) if row else task_id
     except Exception:
         return {}
     if not row:
         return {}
     task = dict(row)
     task["in_pipeline"] = bool(in_pipeline)
+    task["root_id"] = root_id
     try:
         task["denials"] = json.loads(task.get("denials") or "[]")
     except ValueError:
@@ -125,6 +128,13 @@ def _task(task_id: str | None) -> dict:
 
 def _agent(name: str | None) -> str:
     return {"claude": "Claude", "codex": "Codex", "ollama": "A local model"}.get(name or "", name or "An agent")
+
+
+def _clock(ts: float | None) -> str:
+    if not ts:
+        return ""
+    moment = time.localtime(ts)
+    return f"{moment.tm_hour % 12 or 12}:{moment.tm_min:02d} {'AM' if moment.tm_hour < 12 else 'PM'}"
 
 
 def describe(event: dict) -> dict | None:
@@ -151,6 +161,14 @@ def describe(event: dict) -> dict | None:
             return None  # the pipeline reports its own outcome once
         if kind == "task.review":
             return {"title": "Ready for review", "subtitle": name, "message": f"{agent} finished and its checks passed."}
+        if kind in ("task.resolved", "task.outcome", "task.resumed"):
+            return None  # bookkeeping about work already reported; never notifies
+        if kind in ("task.failed", "task.interrupted") and task.get("failure_reason") == "limit":
+            when = _clock(task.get("resets_at"))
+            return {"title": "Paused: usage limit", "subtitle": name,
+                    "message": f"{agent} hit its usage limit; resets {when}." if when else
+                               f"{agent} hit its usage limit and stopped until it resets.",
+                    "once": f"paused:{task.get('root_id')}:{task.get('resets_at')}"}  # one notice per work item
         if kind in ("task.failed", "task.interrupted"):
             what = "stopped unexpectedly" if kind == "task.interrupted" else "failed"
             detail = (task.get("error") or "").strip()
@@ -186,6 +204,13 @@ def run_plugins(event: dict) -> None:
     note = describe(event)
     if not note:
         return
+    once = note.pop("once", None)
+    if once:
+        if once in _once:
+            return
+        if len(_once) > 1000:
+            _once.clear()
+        _once.add(once)
     key = (event.get("type"), event.get("task_id"), note["subtitle"])
     now = time.time()
     if now - _recent.get(key, 0) < DEDUPE_SECONDS:

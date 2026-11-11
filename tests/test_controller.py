@@ -184,6 +184,25 @@ def wait_for(fn, timeout=5):
     raise AssertionError("condition not met in time")
 
 
+def settle_pipeline(client, pipeline_id, ready, timeout=15):
+    """Drive a pipeline by hand instead of waiting on the background loop: poll its real tasks and run a
+    pipeline poll on the app's loop until `ready(pipeline)` returns something truthy."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = client.get(f"/api/pipelines/{pipeline_id}").json()
+        found = ready(current)
+        if found:
+            return found
+        ids = [current.get("build_task")] + [r.get("task_id") for r in current["reviews"].values()]
+        for task_id in filter(None, ids):
+            client.portal.call(controller.tasks.poll_task, task_id)
+        client.portal.call(controller.poll_pipeline, pipeline_id)
+        client.portal.call(asyncio.sleep, 0.01)
+    build = client.get(f"/api/tasks/{current['build_task']}").json() if current.get("build_task") else None
+    raise AssertionError(f"pipeline did not reach the expected state: {current['state']} {current['history'][-2:]} "
+                         f"build={build and (build['state'], build['error'], build['updated_at'])} job={FakeRunner.jobs.get(current.get('build_task'))}")
+
+
 class ControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -945,21 +964,8 @@ Imported body.
         controller.pipeline_model_call = lambda role, spec, diff: answers.pop(0)
 
         def settle(pipeline_id, ready):
-            # Drive the pipeline ourselves: poll the real tasks (the builder's gate result still comes
-            # through tasks.poll_task) and run a pipeline poll on the app's loop, instead of waiting for
-            # the background pollers to be scheduled.
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                current = self.c.get(f"/api/pipelines/{pipeline_id}").json()
-                found = ready(current)
-                if found:
-                    return found
-                ids = [current.get("build_task")] + [r.get("task_id") for r in current["reviews"].values()]
-                for task_id in filter(None, ids):
-                    self.c.portal.call(controller.tasks.poll_task, task_id)
-                self.c.portal.call(controller.poll_pipeline, pipeline_id)
-                self.c.portal.call(asyncio.sleep, 0.01)
-            raise AssertionError("pipeline did not reach the expected state")
+            # Drive the pipeline ourselves (see settle_pipeline) instead of waiting for the background pollers.
+            return settle_pipeline(self.c, pipeline_id, ready)
         try:
             body = {"title": "Phase 7 pipeline", "spec": "Keep the greeting correct", "repo": "/repo",
                     "gate": "pytest", "mode": "auto-edit", "builder": {"agent": "claude"},
@@ -980,6 +986,9 @@ Imported body.
             FakeRunner.jobs[review_id].update(state="exited", exit_code=0,
                                               result=json.dumps({"verdict": "request_changes", "issues": [issue]}))
             building = settle(pipeline_id, lambda p: p if p["state"] == "building" and p["round"] == 2 else None)
+            # The state is saved before the controller sends the builder its message; wait for the message so it
+            # can't land after (and undo) the job update below.
+            wait_for(lambda: any(path == f"/jobs/{build_id}/message" for path, _ in FakeRunner.calls))
             messages = [sent["text"] for path, sent in FakeRunner.calls if path == f"/jobs/{build_id}/message"]
             self.assertEqual(messages[-1].count("Greeting regression"), 1)
 
@@ -1317,9 +1326,12 @@ Imported body.
 
         def run_pipeline(title):
             p = self.c.post("/api/pipelines", json=dict(body, title=title), headers=W).json()
-            FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
-            return wait_for(lambda: (lambda x: x if x["state"] in ("ready", "escalated") else None)(
-                self.c.get(f"/api/pipelines/{p['id']}").json()), timeout=20)
+            def ready(x):
+                # Re-apply the builder's exit until the pipeline moves on, so no earlier write can undo it.
+                if x["state"] == "building":
+                    FakeRunner.jobs[p["build_task"]].update(state="exited", exit_code=0, gate={"state": "passed", "exit_code": 0})
+                return x if x["state"] in ("ready", "escalated") else None
+            return settle_pipeline(self.c, p["id"], ready)
         try:
             models = self.models()
             self.assertTrue(models["g2-good-1b"]["trusted_reviewer"])

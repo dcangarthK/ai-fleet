@@ -69,7 +69,7 @@ def required_scope(request: Request) -> str:
         return "operate"
     if path.startswith("/api/nodes/"):
         return "admin"
-    if path.startswith(ADMIN_PATHS) or (path.startswith("/api/tasks/") and path.endswith(("/approve", "/reject"))):
+    if path.startswith(ADMIN_PATHS) or (path.startswith("/api/tasks/") and path.endswith(("/approve", "/reject", "/resolve", "/outcome"))):
         return "admin"
     return "operate"
 

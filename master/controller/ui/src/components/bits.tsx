@@ -42,7 +42,7 @@ export function ErrorBanner({ error, onDismiss }: { error: string | null | undef
     <div className="banner error row" role="alert" style={{ justifyContent: "space-between" }}>
       <span>{error}</span>
       {onDismiss && (
-        <button className="ghost" onClick={onDismiss} aria-label="Dismiss error">
+        <button type="button" className="ghost" onClick={onDismiss} aria-label="Dismiss error">
           Dismiss
         </button>
       )}

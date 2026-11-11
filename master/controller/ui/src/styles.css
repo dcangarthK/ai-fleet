@@ -237,13 +237,13 @@ button.small { padding: 2px 8px; font-size: 12.5px; }
 .ops .op .bar { width: 90px; margin: 0; }
 
 /* ---------- side sheet & dialog ---------- */
-.sheet-backdrop { position: fixed; inset: 0; background: rgba(10, 15, 13, 0.35); z-index: 20; }
-.sheet {
-  position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 100vw); z-index: 21;
-  background: var(--surface); border-left: 1px solid var(--line); display: flex; flex-direction: column;
+dialog.sheet {
+  position: fixed; inset: 0 0 0 auto; margin: 0; height: 100vh; max-height: 100vh; width: min(760px, 100vw);
+  padding: 0; border: 0; border-left: 1px solid var(--line); background: var(--surface); color: var(--ink);
   box-shadow: -12px 0 32px rgba(10, 15, 13, 0.16);
-  animation: sheet-in 160ms ease-out;
 }
+dialog.sheet[open] { display: flex; flex-direction: column; animation: sheet-in 160ms ease-out; }
+dialog.sheet::backdrop { background: rgba(10, 15, 13, 0.35); }
 @keyframes sheet-in { from { transform: translateX(24px); opacity: 0.6; } to { transform: none; opacity: 1; } }
 .sheet-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
 .sheet-head h2 { margin: 0; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }

@@ -86,6 +86,7 @@ export function NodeDetailPage() {
   const a = useNodeActions();
   const node = fleet.data?.nodes.find((n) => n.id === id);
   if (fleet.isLoading) return <p className="quiet">Loading…</p>;
+  if (fleet.error) return <><PageHead title="Node" /><LoadError error={fleet.error} /></>;
   if (!node) return <><PageHead title="Node not found" /><p>This node isn't in the fleet any more. <Link to="/nodes">Back to nodes</Link></p></>;
 
   const hw = node.inventory?.hardware ?? {};

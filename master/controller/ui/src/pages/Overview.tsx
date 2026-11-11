@@ -70,7 +70,7 @@ export function OverviewPage() {
             <tbody>
               {[...working, ...problems.slice(0, 5)].map((t) => (
                 <tr key={t.id} className="click" onClick={() => open(t.id)}>
-                  <td><b>{t.title}</b><div className="sub">{t.agent}{t.model && ` (${t.model})`}</div></td>
+                  <td><Link to={`/tasks?tab=all&task=${encodeURIComponent(t.id)}`} onClick={(e) => e.stopPropagation()}><b>{t.title}</b></Link><div className="sub">{t.agent}{t.model && ` (${t.model})`}</div></td>
                   <td><StateLabel state={t.state} /></td>
                   <td className="hide-sm">{nodeName(nodes, t.node_id)}</td>
                   <td className="quiet small">{ago(t.started_at ?? t.created_at)}</td>
@@ -89,7 +89,7 @@ export function OverviewPage() {
             <tbody>
               {nodes.map((n) => (
                 <tr key={n.id} className="click" onClick={() => nav(`/nodes/${encodeURIComponent(n.id)}`)}>
-                  <td><span className="row" style={{ gap: 8 }}><NodeLight node={n} /><b>{n.name}</b></span><div className="sub">seen {ago(n.last_seen)}</div></td>
+                  <td><Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: 8 }} onClick={(e) => e.stopPropagation()}><NodeLight node={n} /><b>{n.name}</b></Link><div className="sub">seen {ago(n.last_seen)}</div></td>
                   <td className="hide-sm small">{n.inventory?.hardware?.ram_gb ? `${n.inventory.hardware.ram_gb} GB RAM` : "—"}<div className="sub">{n.inventory?.hardware?.cpu || n.os}</div></td>
                   <td className="small">{Object.entries(n.runner?.agents ?? {}).filter(([, v]) => v).map(([k]) => k).join(", ") || <span className="quiet">no runner</span>}</td>
                   <td className="num">{n.models.length}</td>

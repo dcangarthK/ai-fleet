@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { get, post, type Task } from "../lib/api";
 import { taskAction, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
@@ -13,11 +13,14 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
   const [diff, setDiff] = useState<{ stat: string; diff: string } | null>(null);
   const [message, setMessage] = useState("");
 
+  const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    // A native modal dialog gives focus containment, an inert background and Escape-to-close.
+    const d = ref.current;
+    const opener = document.activeElement as HTMLElement | null;
+    if (d && !d.open) d.showModal();
+    return () => opener?.focus?.();
+  }, []);
   useEffect(() => setDiff(null), [id]);
 
   const nodes = fleet.data?.nodes ?? [];
@@ -30,9 +33,8 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
   }
 
   return (
-    <>
-      <div className="sheet-backdrop" onClick={onClose} />
-      <aside className="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <dialog ref={ref} className="sheet" aria-labelledby="sheet-title" onClose={onClose}
+            onClick={(e) => e.target === e.currentTarget && onClose()}>
         <div className="sheet-head">
           <div style={{ minWidth: 0 }}>
             <h2 id="sheet-title">{task?.title ?? "Loading task…"}</h2>
@@ -45,7 +47,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
               </div>
             )}
           </div>
-          <button onClick={onClose} aria-label="Close task details">Close</button>
+          <button type="button" onClick={onClose} autoFocus aria-label="Close task details">Close</button>
         </div>
         <div className="sheet-body">
           <ErrorBanner error={error instanceof Error ? error.message : null} />
@@ -63,8 +65,7 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
           <h3>Agent activity</h3>
           <pre className="out" aria-live="polite">{log || "No output yet."}</pre>
         </div>
-      </aside>
-    </>
+    </dialog>
   );
 }
 

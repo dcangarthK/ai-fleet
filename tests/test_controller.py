@@ -90,6 +90,9 @@ class FakeRunner(BaseHTTPRequestHandler):
     # Account pools (docs/SPEC-limit-handoff.md): None = an older runner that reports no profiles.
     profiles = None
     checkpoint_error = None  # (status, detail) to make the checkpoint fail
+    # Live (docs/SPEC-live-monitor.md): extra /health fields (metrics), and the node id the controller told us
+    health_extra: dict = {}
+    node_ids: list = []
 
     def log_message(self, *a):
         pass
@@ -123,7 +126,8 @@ class FakeRunner(BaseHTTPRequestHandler):
                         FakeRunner.models.pop(op["derived"], None)
             return self._send(200, {k: v for k, v in op.items() if k != "script"})
         if self.path == "/health":
-            return self._send(200, {"ok": True, "version": "2", "digest": FakeRunner.digest,
+            FakeRunner.node_ids.append(self.headers.get("X-Fleet-Node-Id"))
+            return self._send(200, {**FakeRunner.health_extra, "ok": True, "version": "2", "digest": FakeRunner.digest,
                                     "max_mode": FakeRunner.max_mode, "running": 0,
                                     "gate_profiles": ["pytest"], "allow_raw_gates": False,
                                     "models": {"remote_management": True, "disk_reserve_gb": 8},

@@ -601,6 +601,7 @@ class LineageApiTests(unittest.TestCase):
         # Starts run in the background and bump updated_at: let the review's start land before the other item's
         # activity, then settle the other item so it is unambiguously the newest (was flaky 1 in 4).
         wait_for(lambda: self.get(review["id"])["state"] == "working")
+        self.succeed(review["id"])  # nothing in this item stays active (a running task's polls bump updated_at)
         time.sleep(0.02)
         other = self.task(title="Separate item")
         self.succeed(other["id"])

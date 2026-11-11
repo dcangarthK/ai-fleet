@@ -12,6 +12,7 @@ import {
   type Savings,
 } from "../lib/budget";
 import { canMarkSignedIn, slotName, slotPill, type ResourceSlot } from "../lib/handoff";
+import { accountTone, type Live } from "../lib/live";
 
 const FLEET_ONLY = "Fleet tasks only: your own interactive use draws on the same limits, so real headroom is lower.";
 // Categorical slots 1-3 of the validated reference palette (dataviz skill); everything else folds into Other.
@@ -37,6 +38,7 @@ export function BudgetPage() {
       <LoadError error={status.error} />
       <StatusStrip status={status.data} loading={status.isLoading} />
       <ResourcesSection />
+      <AccountsSection />
       <UsageSection />
       <SavingsSection />
       <RulesSection />
@@ -402,6 +404,45 @@ function RulesSection() {
 }
 
 /** Resources board (docs/SPEC-limit-handoff.md 5): one row per slot. Labels only; directories are never sent. */
+/** Per account: its live limit state, and the owner's "Limit reset by owner" (admin; docs/SPEC-live-monitor.md 13 b). */
+function AccountsSection() {
+  const live = useQuery({ queryKey: ["live"], queryFn: () => get<Live>("/api/live"), refetchInterval: 30_000 });
+  const accounts = live.data?.accounts ?? [];
+  const admin = useCan().admin;
+  const { run, busy, error, clearError } = useRun();
+  return (
+    <Section title="Accounts" aside="limit state per account, from real task output">
+      <LoadError error={live.error} />
+      <ErrorBanner error={error} onDismiss={clearError} />
+      <div className="panel">
+        <table>
+          <thead><tr><th>Account</th><th>Status</th><th>Last limit</th><th className="num">Running</th><th /></tr></thead>
+          <tbody>
+            {accounts.map((a) => (
+              <tr key={a.account}>
+                <td>{a.agent} · {a.label ?? <span className="mono">{a.account}</span>}</td>
+                <td><span className={`state tone-${accountTone(a)}`}>{a.status}</span></td>
+                <td className="small">{a.last_limit ? `${clockTime(a.last_limit.at)}${a.last_limit.resets_at ? `, resets ${clockTime(a.last_limit.resets_at)}` : ""}` : "—"}</td>
+                <td className="num">{a.running}</td>
+                <td>
+                  {admin && (a.limited_until || a.status.startsWith("limit hit")) && (
+                    <button className="small" disabled={busy}
+                            onClick={() => confirm(`Did you reset the usage limit of ${a.label ?? a.account} yourself? The fleet will treat its limits up to now as cleared.`)
+                              && run(() => post("/api/budget/accounts/reset", { account: a.account }))}>
+                      Limit reset by owner
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!live.isLoading && accounts.length === 0 && <p className="empty">No paid accounts yet.</p>}
+      </div>
+    </Section>
+  );
+}
+
 function ResourcesSection() {
   const slots = useQuery({ queryKey: ["budget", "resources"], queryFn: () => get<ResourceSlot[]>("/api/resources"),
     refetchInterval: 30_000 });

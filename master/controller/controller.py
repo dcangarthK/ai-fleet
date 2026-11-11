@@ -42,6 +42,7 @@ import events  # noqa: E402
 import evaluations  # noqa: E402
 import grounding  # noqa: E402
 import handoff  # noqa: E402
+import live  # noqa: E402
 import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
@@ -144,8 +145,9 @@ async def refresh_master(client: httpx.AsyncClient) -> None:
         c.execute("INSERT OR IGNORE INTO nodes (id, name, ip, os, status) VALUES (?, 'master', '127.0.0.1', ?, 'approved')",
                   (tasks.MASTER_ID, sys.platform))
         if health:
-            c.execute("UPDATE nodes SET runner=?, runner_fails=0, last_seen=? WHERE id=?",
-                      (json.dumps(health), time.time(), tasks.MASTER_ID))
+            # A good poll: the only thing that resets runner_fails (heartbeats never do; live monitor 12.1).
+            c.execute("UPDATE nodes SET runner=?, runner_fails=0, last_seen=?, polled_at=?, runner_age_s=? WHERE id=?",
+                      (json.dumps(health), time.time(), time.time(), tasks.health_age(health), tasks.MASTER_ID))
         else:
             c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (tasks.MASTER_ID,))
         # Same health bookkeeping as other nodes, so a stopped master Ollama drops out of its roles.
@@ -221,7 +223,8 @@ async def refresh_nodes() -> None:
             if inventory.get(n["id"]):
                 c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory[n["id"]]), n["id"]))
             if runner.get(n["id"]):
-                c.execute("UPDATE nodes SET runner=?, runner_fails=0 WHERE id=?", (json.dumps(runner[n["id"]]), n["id"]))
+                c.execute("UPDATE nodes SET runner=?, runner_fails=0, polled_at=?, runner_age_s=? WHERE id=?",
+                          (json.dumps(runner[n["id"]]), time.time(), tasks.health_age(runner[n["id"]]), n["id"]))
             else:
                 c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (n["id"],))
             found = merge_probe_models(probed.get(n["id"]), model_report.get(n["id"]))
@@ -486,7 +489,8 @@ async def lifespan(_: FastAPI):
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
-                  asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop())]
+                  asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop()),
+                  asyncio.create_task(live.sweep_loop())]
     yield
     for t in background:
         t.cancel()
@@ -496,6 +500,8 @@ app = FastAPI(title="fleet", lifespan=lifespan)
 app.middleware("http")(auth.access_control)
 app.include_router(tasks.router)
 app.include_router(handoff.router)
+app.include_router(live.router)
+auth.presence_hook = live.note_presence
 
 
 class Assignment(BaseModel):
@@ -1084,6 +1090,8 @@ async def retention_once() -> dict:
         cleaned += 1
     with db() as c:
         pruned = c.execute("DELETE FROM events WHERE ts<?", (now() - 90 * 86400,)).rowcount
+        # self-reported activity is kept 30 days (docs/SPEC-live-monitor.md 2.3)
+        c.execute("DELETE FROM activity WHERE COALESCE(updated_at, ts)<?", (now() - 30 * 86400,))
         idle_cutoff = now() - 14 * 86400
         idle = c.execute(
             "UPDATE node_models SET state='idle',reason='unused for 14 days',updated_at=? "
@@ -1719,7 +1727,7 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
             title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"), worktree=False,
             node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
             origin_kind=origin_kind if kind == "re_review" else None,
-        ), forbidden=forbidden)
+        ), forbidden=forbidden, pipeline=True)
         # The round is spent only once the review task was admitted (a refused one costs nothing), and it is
         # counted against the agent the task was really admitted on, after any fallback.
         if p["round"] not in paid_rounds:
@@ -2246,7 +2254,7 @@ def fleet_state() -> dict:
     for n in nodes:
         n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
-        n["runner_ok"] = bool(n["runner"]) and (n.get("runner_fails") or 0) < MAX_FAILS
+        n["runner_ok"] = tasks.runner_offline(n) is None  # the one liveness rule (live monitor 12.2)
         n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
         n["update_available"] = bool(n["runner"] and runner_digest
                                      and n["runner"].get("digest") != runner_digest)

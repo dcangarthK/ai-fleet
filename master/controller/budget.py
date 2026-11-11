@@ -13,8 +13,9 @@ import time
 
 from store import db
 
+# "test" (docs/SPEC-live-monitor.md 6): a test pass on someone else's build; never seeded for Fable (CLAUDE.md rule 0)
 KINDS = ("build", "fix", "review", "re_review", "final_review", "security_review", "merge", "benchmark", "check",
-         "draft")
+         "draft", "test")
 REVIEW_KINDS = {"review", "re_review", "final_review", "security_review"}
 EFFORTS = ("low", "medium", "high")
 TIERS = ("cheap", "standard", "premium", "scarce")
@@ -31,7 +32,7 @@ DEFAULT_RULES = {
                   "default_effort": {"final_review": "high", "security_review": "high", "build": "high", "*": "medium"},
                   "daily_tokens_soft": 2000000, "daily_tokens_hard": None},
         "claude:claude-opus-*": {"tier": "premium", "max_concurrent": 1,
-                                 "kinds": ["build", "final_review", "security_review", "review"]},
+                                 "kinds": ["build", "final_review", "security_review", "review", "test"]},
         "claude:claude-fable-*": {"tier": "premium", "max_concurrent": 2,
                                   "kinds": ["review", "re_review", "final_review", "security_review"]},
         "claude:claude-sonnet-*": {"tier": "standard", "max_concurrent": 2, "kinds": ["*"]},
@@ -624,7 +625,14 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     args: tuple = ()
     if account:
         query += " AND (account IS NULL OR account=?)"
-        args = (account,)
+        # The owner's reset (docs/SPEC-live-monitor.md 13 b): limits on this account up to it no longer count, for
+        # every identity, including older rows that hold every account. A newer limit counts again.
+        query += (" AND NOT (outcome='limit' AND ts <= COALESCE((SELECT MAX(at) FROM limit_resets "
+                  "WHERE limit_resets.account=?), 0))")
+        args = (account, account)
+    else:
+        query += (" AND NOT (outcome='limit' AND account IS NOT NULL AND ts <= COALESCE((SELECT MAX(at) FROM "
+                  "limit_resets WHERE limit_resets.account=agent_usage.account), 0))")
     with db() as c:
         rows = [dict(r) | ({"state": "failed", "failure_reason": "limit"} if r["outcome"] == "limit"
                            else {"state": "review", "failure_reason": None})

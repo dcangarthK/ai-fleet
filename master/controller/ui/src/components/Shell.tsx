@@ -5,6 +5,7 @@ import { INSTALL_LABEL, needsYou, nodeSignal, progressFraction, SIGNAL_LABEL } f
 import { NodeLight } from "./bits";
 
 const NAV: { to: string; label: string; later?: string }[] = [
+  { to: "/live", label: "Live" },
   { to: "/", label: "Overview" },
   { to: "/budget", label: "Budget" },
   { to: "/tasks", label: "Tasks" },

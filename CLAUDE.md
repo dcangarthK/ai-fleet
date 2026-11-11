@@ -25,18 +25,27 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
 - `blocked` / `awaiting_approval` = the user must act in the dashboard. Tell them; never try to approve.
 - After merging a branch: `complete_task`, then `cleanup_task`.
 - Default mode `auto-edit`. Ask for `supervised` on unfamiliar repos; `full` only when the user says so.
+- **All work through the fleet** (docs/SPEC-live-monitor.md 2.2): every build, fix, review, test, merge or benchmark
+  is a fleet task, with a `kind`, a `profile` where the account matters (e.g. `spare`), `parent_id`/`link` into
+  its work item, and a `stage` for Live. Describe an ad-hoc chain once with `set_chain`.
+- In-session subagents only for reading and planning that changes nothing; post them with `report_activity` so
+  they show on Live as "self-reported".
+- A review or test on a model that built the work is refused unless spawned with `independence="waived"` and a
+  reason; waivers show on Live and go in the merge summary.
 
 ## Pipeline (every feature or fix)
 1. **Spec.** Write acceptance criteria and test cases. Get the user's OK before building.
 2. **Tests first.** Write failing tests from the spec.
 3. **Build.** One writer per git worktree. Give the implementer the spec + only the files it needs.
 4. **Gate.** Tests, lint and typecheck must pass. Failing gate goes back to the builder, max 3 rounds, then escalate to the user.
-5. **Cross-review.** Reviewer must differ from the builder:
+5. **Cross-review.** Claude's own reviews run as fleet tasks on a Claude profile, or are self-reported
+   (`report_activity`) when they can't be. Reviewer must differ from the builder:
    Codex built → Claude (Fable/Sonnet); Claude/local built → a different Claude model, or Codex for
    security-sensitive work. One paid reviewer per round (see Paid-model budget).
    Reviewers see the diff read-only and never edit.
 6. **Resolve.** Fix high/medium issues, re-run the gate. Disagreements: tests decide; otherwise Claude decides and notes why.
-7. **Final.** Claude reviews the whole diff, then summarizes: what changed, who built, who reviewed, open risks.
+7. **Final.** Claude reviews the whole diff (as a fleet task, or self-reported), then summarizes: what changed,
+   who built, who reviewed, waivers, open risks.
 
 ## Paid-model budget (Codex, Claude Opus/Fable, Sonnet)
 Paid models share account limits with the owner's own use. Spend them where they change the outcome.
@@ -44,8 +53,10 @@ Paid models share account limits with the owner's own use. Spend them where they
 **Source of truth: the console's Budget page** (`/app/budget`, rules versioned in `fleet.db`). The controller enforces
 those rules on every task (kind allowed per model, limits, concurrency, prompt size); the table below is the intent.
 Name `kind` on every `spawn_task` (build, fix, review, re_review, final_review, security_review, merge, benchmark,
-check, draft). `budget_override` is the owner's (admin) decision; the orchestrator's operate scope can't use it.
+check, draft, test). `budget_override` is the owner's (admin) decision; the orchestrator's operate scope can't use it.
 `fleet_status` returns each paid model's budget status (OK, limited until, at soft budget).
+**Watch it live on the console's Live page** (`/app/live`): who runs what on which account, queue, chains, accounts,
+machines and alerts.
 
 **Who does what (cheapest capable first):**
 | Work | Default | Escalate to |

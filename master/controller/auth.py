@@ -27,8 +27,24 @@ ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies"
                "/api/skills", "/api/enroll", "/api/notify-rules", "/api/export", "/api/import",
                "/api/tasks/approve", "/api/tasks/reject", "/api/budget/rules",
                # clearing a "not signed in" slot (docs/SPEC-limit-handoff.md 3.1); reading resources is view scope
-               "/api/resources")
-PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete"}
+               "/api/resources",
+               # the owner's limit reset (docs/SPEC-live-monitor.md 13 b): the full path, nothing else under it
+               "/api/budget/accounts/reset")
+HEARTBEAT_PATH = "/api/nodes/heartbeat"
+# Paths whose handler does all of the auth itself: enrollment, and runner heartbeats signed with the node's runner
+# token (docs/SPEC-live-monitor.md 12.1). Neither gets an API scope.
+PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete", HEARTBEAT_PATH}
+
+# Set by the controller: called with every request that passed auth, for orchestrator presence (live monitor 2.4).
+presence_hook = None
+
+
+def _presence(request: Request) -> None:
+    if presence_hook is not None:
+        try:
+            presence_hook(request)
+        except Exception as exc:  # presence is informational: it never fails a request
+            print(f"presence hook failed: {exc!r}")
 
 
 def _hash(token: str) -> str:
@@ -53,6 +69,12 @@ def token_identity(token: str | None) -> tuple[str, str] | None:
         if row:
             c.execute("UPDATE tokens SET last_used=? WHERE id=?", (time.time(), row["id"]))
     return (row["scope"], row["label"]) if row else None
+
+
+def token_id(token: str) -> str:
+    with db() as c:
+        row = c.execute("SELECT id FROM tokens WHERE hash=?", (_hash(token),)).fetchone()
+    return row["id"] if row else "?"
 
 
 def token_scope(token: str | None) -> str | None:
@@ -99,11 +121,13 @@ async def access_control(request: Request, call_next):
             if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
                 return _deny(f"needs {required_scope(request)} access; this request asked for {scope}")
         request.state.scope = scope
-        request.state.actor = "local"
+        request.state.actor = request.state.actor_id = "local"
+        if not public_enrollment:
+            _presence(request)
         return await call_next(request)
     if request.url.path == "/login" or public_enrollment:
         request.state.scope = "view"
-        request.state.actor = "enrollment"
+        request.state.actor = "node" if request.url.path == HEARTBEAT_PATH else "enrollment"
         return await call_next(request)
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else request.cookies.get(COOKIE)
@@ -114,5 +138,7 @@ async def access_control(request: Request, call_next):
     if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
         return _deny(f"needs {required_scope(request)} access; this token is {scope}")
     request.state.scope = scope
-    request.state.actor = label
+    request.state.actor = label  # for display and audit
+    request.state.actor_id = "token:" + token_id(token)  # unique: for rate limits and ownership
+    _presence(request)
     return await call_next(request)

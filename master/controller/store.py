@@ -76,12 +76,20 @@ CREATE TABLE IF NOT EXISTS resume_schedule (
     run INTEGER);
 CREATE TABLE IF NOT EXISTS slot_flags (
     node TEXT, agent TEXT, profile TEXT, state TEXT, reason TEXT, at REAL, PRIMARY KEY (node, agent, profile));
+CREATE TABLE IF NOT EXISTS activity (
+    id TEXT PRIMARY KEY, ts REAL, updated_at REAL, ended_at REAL, actor TEXT, session TEXT, title TEXT, kind TEXT,
+    account_label TEXT, model TEXT, work_item TEXT, status TEXT, tokens TEXT, note TEXT);
+CREATE TABLE IF NOT EXISTS limit_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, at REAL, actor TEXT);
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.
 MIGRATIONS = {
     "nodes": {"inventory": "TEXT", "ceiling": "TEXT DEFAULT 'auto-edit'", "runner": "TEXT",
-              "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT"},
+              "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT",
+              # heartbeats and liveness (docs/SPEC-live-monitor.md 12): accepted push, its signed ts, last good poll,
+              # and the runner's own age of the metrics it reported
+              "heartbeat_at": "REAL", "heartbeat_ts": "REAL", "polled_at": "REAL", "runner_age_s": "REAL"},
     "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'",
                     "routed": "INTEGER", "route_reason": "TEXT"},
     "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
@@ -103,11 +111,14 @@ MIGRATIONS = {
               # which agent profile and account ran it (docs/SPEC-limit-handoff.md 3.2)
               "profile": "TEXT DEFAULT 'fleet'", "account_label": "TEXT",
               # the account (budget.account_key) the controller placed it on; limits and concurrency key on it
-              "account": "TEXT"},
+              "account": "TEXT",
+              # Live (docs/SPEC-live-monitor.md): display-only stage, a work item's descriptive chain (root only),
+              # an advisory independence waiver, and how to place the task again on failover (12.6)
+              "stage": "TEXT", "chain": "TEXT", "independence": "TEXT", "placement": "TEXT"},
     # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
     # later cancelling, completing or resuming of the task cannot erase; `account` is whose limit it was
     # (null on older rows, which then hold every account of the agent)
-    "agent_usage": {"resets_at": "REAL", "identity": "TEXT", "account": "TEXT"},
+    "agent_usage": {"resets_at": "REAL", "identity": "TEXT", "account": "TEXT", "account_label": "TEXT"},
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
                   "budget": "TEXT DEFAULT '{}'"},

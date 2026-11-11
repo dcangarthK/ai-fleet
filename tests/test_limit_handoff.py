@@ -681,6 +681,68 @@ class ContinuationTests(HandoffBase):
         finally:
             tasks.local_minute = original
 
+    # Fable final review of Part C (t-4ab249b4), low findings 1, 3, 4.
+
+    def test_a_handoff_waits_for_an_in_flight_resume_and_then_leaves_the_task_alone(self):
+        src = self.build()
+        self.fail_in_db(src["id"])
+
+        async def race():
+            async with tasks._locks[src["id"]]:  # a /message or approve holds the task lock while it resumes
+                trigger = asyncio.ensure_future(handoff.handle_limit(src["id"]))
+                await asyncio.sleep(0.05)
+                with db() as c:  # ...and the resume lands: the task is working again
+                    c.execute("UPDATE tasks SET state='working', failure_reason=NULL WHERE id=?", (src["id"],))
+            return await trigger
+
+        result = self.c.portal.call(race)
+        self.assertEqual(result["action"], "none", result)
+        self.assertFalse(self.posts(src["id"], "checkpoint"))
+        self.assertIsNone(self.get(src["id"])["resolution"])
+        self.assertEqual(self.children(src["id"]), [])
+
+    def test_a_briefly_offline_node_defers_a_continuation_instead_of_refusing_it(self):
+        t = self.review()
+        with db() as c:
+            c.execute("UPDATE tasks SET state='review' WHERE id=?", (t["id"],))
+        original = tasks.node_of
+
+        def offline(task):
+            node = original(task)
+            return dict(node, runner_fails=3)
+
+        tasks.node_of = offline
+        try:
+            verdict = tasks.continuation(tasks.get_task(t["id"]))
+        finally:
+            tasks.node_of = original
+        self.assertEqual((verdict["outcome"], verdict["wait"]), ("defer", "node"), verdict)
+        self.assertIn("runner offline", verdict["reason"])
+        self.assertGreater(verdict["until"], time.time())
+
+    def test_two_concurrent_resumes_never_exceed_the_nodes_concurrency(self):
+        first = self.review()
+        second = self.review(model=SONNET)  # a different model: the account's limits don't decide this one
+        with db() as c:  # both settled on the same node, whose policy allows one running task
+            for t in (first, second):
+                policy = json.loads(c.execute("SELECT policy FROM tasks WHERE id=?", (t["id"],)).fetchone()[0] or "{}")
+                policy["limits"] = dict(policy.get("limits") or {}, max_concurrent=1)
+                c.execute("UPDATE tasks SET state='review', policy=? WHERE id=?", (json.dumps(policy), t["id"]))
+        for t in (first, second):
+            FakeRunner.jobs[t["id"]].update(state="exited", exit_code=0)
+
+        async def both():
+            return await asyncio.gather(
+                tasks.message(first["id"], tasks.MessageIn(text="go on")),
+                tasks.message(second["id"], tasks.MessageIn(text="go on")), return_exceptions=True)
+
+        results = self.c.portal.call(both)
+        refused = [r for r in results if isinstance(r, tasks.HTTPException)]
+        self.assertEqual(len(refused), 1, results)
+        self.assertIn("max concurrent tasks reached", refused[0].detail)
+        self.assertEqual(len(self.posts(first["id"], "message")) + len(self.posts(second["id"], "message")), 1)
+        self.assertEqual(budget.RESERVED, {})
+
 
 class RecoveryTests(HandoffBase):
     def test_a_crash_between_claim_and_insert_is_recovered(self):
@@ -874,6 +936,22 @@ class PipelineTests(HandoffBase):
         self.assertEqual((review["agent"], review["model"]), ("codex", "gpt-5"))
         self.assertEqual(current["budget"]["codex_rounds"], [1])  # the configured reviewer was Claude
         self.assertEqual(current["budget"]["paid_rounds"], [1])
+
+    def test_a_limited_fallback_codex_review_gives_its_codex_round_back(self):
+        body = rules()
+        body["models"]["codex"]["kinds"] = ["*"]
+        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-fable-*": ["codex:gpt-5"]})
+        self.put_rules(body)
+        p = self.start()  # Fable is the configured reviewer
+        self.limit_everywhere(FABLE)
+        current = self.pass_build(p)
+        review = current["reviews"]["0"]["task_id"]
+        self.assertEqual(self.get(review)["agent"], "codex")
+        self.limit(review, text="You've hit your usage limit. Try again at 7:30 PM.")
+        self.poll(p)
+        current = self.pipeline(p)
+        self.assertEqual(current["state"], "review_waiting")
+        self.assertEqual(current["budget"]["codex_rounds"], [])  # an unfinished review spends no Codex round
 
     def test_a_fix_round_at_node_capacity_is_deferred(self):
         p = self.start()

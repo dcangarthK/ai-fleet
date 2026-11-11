@@ -1917,7 +1917,8 @@ async def poll_pipeline(pipeline_id: str) -> None:
                     p = await _pipeline_step_unlocked(p, {
                         "type": "review_limited", "reviewer": index, "task_id": limited[0]["id"],
                         "resets_at": max(part["resets_at"] for part in limited),
-                        "codex": reviewer.get("agent") == "codex"})
+                        # the agent the review was admitted on (a fallback may differ from the configured one)
+                        "codex": limited[0]["agent"] == "codex"})
                     return
                 reason = None
                 unfinished = [part for part in parts if part["state"] != "review"]

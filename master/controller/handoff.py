@@ -487,13 +487,40 @@ async def handle_limit(task_id: str, *, now: float | None = None, slot: dict | N
         if not choices:
             return schedule_wait(task, "no eligible slot", now)
         result = await _handoff(task, choices[0], rules, now)
+        if result.get("moved_on"):  # resumed (or resolved) while we waited for the task lock: nothing to wait for
+            return result
         if result["action"] != "handoff":
             return schedule_wait(task, result.get("reason") or "handoff refused", now)
         return result
 
 
 async def _handoff(task: dict, slot: dict, rules: dict, now: float) -> dict:
-    """Claim, checkpoint, admit, create (4.3). The caller holds the work-item lock. Any failure undoes the claim."""
+    """Claim, checkpoint, admit, create (4.3). The caller holds the work-item lock; this takes the task lock from
+    the claim to the insert (lock order: work item, then task), so a resume in flight (which holds the task lock)
+    finishes first and can never erase the claim. Any failure undoes the claim."""
+    async with tasks._locks[task["id"]]:
+        current = tasks.get_task(task["id"])
+        if current["state"] not in ("failed", "interrupted") or current.get("resolution"):
+            return {"action": "none", "moved_on": True, "reason": f"task is {current['state']}"
+                    + (" and resolved" if current.get("resolution") else "")}
+        done = await _claim_to_insert(current, slot, rules, now)
+    if done.get("action") == "none":
+        return done
+    new_id, checkpoint = done["task_id"], done["checkpoint"]
+    new = tasks.get_task(new_id)
+    emit(task["id"], "handoff.done", {"title": task["title"], "to": new_id, "model": slot.get("model"),
+                                      "label": slot.get("label") or slot.get("profile"),
+                                      "excluded": checkpoint.get("excluded") or []})
+    emit(new_id, f"task.{new['state']}", {"title": new["title"], "node": new["node_id"], "agent": new["agent"],
+                                          "mode": new["mode"]})
+    if new["state"] == "queued":
+        async with tasks._locks[new_id]:
+            await tasks.try_start(tasks.get_task(new_id))
+    return {"action": "handoff", "task_id": new_id}
+
+
+async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float) -> dict:
+    """The claimed part of a handoff, under the task lock: {"action": "none", "reason"} or {"task_id", "checkpoint"}."""
     blob = claim(task["id"])
     if blob is None:
         return {"action": "none", "reason": "already claimed"}
@@ -539,16 +566,7 @@ async def _handoff(task: dict, slot: dict, rules: dict, now: float) -> dict:
     except Exception:
         unclaim(task["id"], blob)
         raise
-    new = tasks.get_task(new_id)
-    emit(task["id"], "handoff.done", {"title": task["title"], "to": new_id, "model": slot.get("model"),
-                                      "label": slot.get("label") or slot.get("profile"),
-                                      "excluded": checkpoint.get("excluded") or []})
-    emit(new_id, f"task.{new['state']}", {"title": new["title"], "node": new["node_id"], "agent": new["agent"],
-                                          "mode": new["mode"]})
-    if new["state"] == "queued":
-        async with tasks._locks[new_id]:
-            await tasks.try_start(tasks.get_task(new_id))
-    return {"action": "handoff", "task_id": new_id}
+    return {"task_id": new_id, "checkpoint": checkpoint}
 
 
 def _insert(task: dict, slot: dict, decision: dict, prompt: str, brief_id: str, checkpoint: dict, blob: str,

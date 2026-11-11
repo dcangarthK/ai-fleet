@@ -670,10 +670,11 @@ def today_tokens(rules: dict, key: str, now: float | None = None) -> int:
     return sum(r["tokens"] for r in rows if match_key(rules, r["agent"], r["model"]) == key)
 
 
-# Continuations (resumes) admitted but not yet acknowledged by the runner: task id -> (rules key, account). They
-# hold their slot from admission until the task is working (or the runner call failed), so two resumes admitted
-# at once can't both take an account's last slot (docs/SPEC-limit-handoff.md 4.5).
-RESERVED: dict[str, tuple[str | None, str]] = {}
+# Continuations (resumes) admitted but not yet acknowledged by the runner: task id -> (rules key, account, node).
+# They hold their slot from admission until the task is working (or the runner call failed), so two resumes
+# admitted at once can't both take an account's last slot, nor a node's (docs/SPEC-limit-handoff.md 4.5). Unpaid
+# tasks are reserved too (key None), for the node's count only.
+RESERVED: dict[str, tuple[str | None, str | None, str | None]] = {}
 
 
 def running_count(key: str, exclude: str | None = None, account: str | None = None) -> int:
@@ -686,7 +687,7 @@ def running_count(key: str, exclude: str | None = None, account: str | None = No
         args += (account,)
     with db() as c:
         running = {r[0] for r in c.execute(query, args)}
-    reserved = {task_id for task_id, (r_key, r_account) in RESERVED.items()
+    reserved = {task_id for task_id, (r_key, r_account, _node) in RESERVED.items()
                 if r_key == key and task_id != exclude and (not account or r_account == account)}
     return len(running | reserved)
 

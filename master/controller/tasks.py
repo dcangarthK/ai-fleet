@@ -150,6 +150,8 @@ def node_rows() -> list[dict]:
         rows = [dict(r) for r in c.execute("SELECT * FROM nodes")]
         running = dict(c.execute(
             "SELECT node_id, COUNT(*) FROM tasks WHERE state IN ('starting','working') GROUP BY node_id").fetchall())
+    for _key, _account, node_id in budget.RESERVED.values():  # admitted continuations hold the node's slot too
+        running[node_id] = running.get(node_id, 0) + 1
     for n in rows:
         n.pop("runner_token", None)
         n["runner"] = json.loads(n["runner"]) if n.get("runner") else None
@@ -1094,6 +1096,8 @@ def refuse_if_moved(task: dict) -> None:
 
 
 CONTINUE_RETRY = 60  # a continuation held by the node's policy (quiet hours, its concurrency) is retried after this
+# eligible() reasons that pass on their own (the rest, e.g. mode ceiling or a missing agent, need the owner)
+TRANSIENT_INELIGIBLE = ("runner offline", "on battery")
 
 
 def node_hold(node: dict, agent: str, model: str | None, mode: str, gate: str | None, policy: dict,
@@ -1103,6 +1107,9 @@ def node_hold(node: dict, agent: str, model: str | None, mode: str, gate: str | 
     (quiet hours, its concurrency, its daily agent minutes). None when the node admits it."""
     now = time.time() if now is None else now
     why = eligible(node, agent, model, mode, gate, policy)
+    if why and why.startswith(TRANSIENT_INELIGIBLE):
+        # The node is briefly unreachable or on battery: retry shortly, as a queued new task would keep waiting.
+        return {"outcome": "defer", "until": now + CONTINUE_RETRY, "reason": why, "wait": "node"}
     if why:
         return {"outcome": "refuse", "until": None, "reason": why, "wait": None}
     why = temporary_reason(node, policy)
@@ -1145,9 +1152,10 @@ async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_
     if verdict["outcome"] != "admit":
         raise NotAdmitted(verdict)
     # Admission and the reservation happen with no await between them, so no other coroutine can be admitted to
-    # the same last slot in between.
-    if task["agent"] in budget.PAID_AGENTS and task.get("budget_key"):
-        budget.RESERVED[task["id"]] = (task["budget_key"], budget.task_account(task))
+    # the same last slot (the account's or the node's) in between.
+    paid = task["agent"] in budget.PAID_AGENTS and task.get("budget_key")
+    budget.RESERVED[task["id"]] = (task["budget_key"] if paid else None,
+                                   budget.task_account(task) if paid else None, task.get("node_id"))
     try:
         await _send_resume(task, text, allowed_tools, reset_auto_approvals=reset_auto_approvals, effort=effort)
     finally:

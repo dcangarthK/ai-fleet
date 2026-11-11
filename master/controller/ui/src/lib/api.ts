@@ -310,7 +310,7 @@ export interface Pipeline {
   gate: string | null;
   mode: Mode;
   builder: { agent: string; node?: string | null };
-  reviewers: ({ kind: "role"; role: string } | { kind: "agent"; agent: string })[];
+  reviewers: ({ kind: "role"; role: string } | { kind: "agent"; agent: string; model?: string })[];
   build_task: string | null;
   reviews: Record<string, { status: "valid" | "abstained" | "invalid" | "pending"; verdict?: string; issues?: ReviewIssue[]; unsupported?: number; identical_fix?: number; trusted?: boolean; trusted_by?: string; fallback?: boolean; task_id?: string; reason?: string }>;
   history: { round: number; state: PipelineState; at: number; issues?: number; unsupported?: number; identical_fix?: number; note?: string }[];

@@ -567,9 +567,19 @@ class GroundedRole(unittest.TestCase):
         results = json.loads((E.HERE / "results" / "results.json").read_text())
         self.assertEqual((E.HERE / "results" / "GROUNDING.md").read_text(),
                          E.grounding_report(results))
+        # The placeholder is only for a results.json without grounded rows.
+        grounded = [r for r in results if "grounded" in r.get("roles", {})]
+        if not grounded:
+            self.assertIn("No grounded evaluations have been recorded", E.grounding_report(results))
+        # LEADERBOARD.md carries a timestamp, so check its grounding table rather than the whole file.
         leaderboard = (E.HERE / "results" / "LEADERBOARD.md").read_text()
-        for signal in E.GROUNDING_SIGNALS:
-            self.assertIn(f"| — | {signal} | dropped |", leaderboard)
+        for result in grounded:
+            decisions = E.signal_decisions(result["roles"]["grounded"])
+            for signal in E.GROUNDING_SIGNALS:
+                self.assertIn(f"| {result['model']} | {signal} | {decisions[signal]['decision']} |", leaderboard)
+        if not grounded:
+            for signal in E.GROUNDING_SIGNALS:
+                self.assertIn(f"| — | {signal} | dropped |", leaderboard)
 
 
 if __name__ == "__main__":

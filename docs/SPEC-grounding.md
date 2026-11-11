@@ -49,10 +49,10 @@ becomes a fleet client (then it points at the LiteLLM roles). Model names `gemma
 ### G1. One reviewer contract
 Schema used by `review_diff` (MCP), pipeline reviews and the reviewer eval:
 `{"verdict": "approve|request_changes|abstain", "issues": [{"severity", "file", "problem", "evidence",
-"expected", "actual", "fix"}]}`. Checks, in `master/controller/grounding.py` (shared): evidence must appear
-verbatim (whitespace-normalised) in the diff's added/removed/context lines; drop issues whose `fix` equals the
-`evidence` (or the unchanged line); `abstain` is valid and counts as no issues. The reviewer eval prompt and scoring
-use the same schema and checks.
+"expected", "actual", "fix"}]}`. Checks, in `master/controller/grounding.py` (shared): evidence must be a verbatim
+quote from one added/removed/context line, or span consecutive lines within one hunk, after whitespace
+normalisation; drop issues whose `fix` equals the `evidence` (or the unchanged line); `abstain` is valid and counts
+as no issues. The reviewer eval prompt and scoring use the same schema and checks.
 **Done when:** malformed, unquoted and identical-fix issues are rejected in all three places (tests); planted-bug
 recall on `evals/cases/reviewer.json` doesn't regress for any installed model.
 

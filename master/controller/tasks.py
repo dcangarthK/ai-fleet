@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import json
 import os
+import re
 import secrets
 import time
 from collections import defaultdict
@@ -23,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from events import changed, emit, events_after, last_event_id, snapshot
+import policy as fleet_policy
 from store import db
 
 RUNNER_PORT = 11436
@@ -36,6 +38,7 @@ MODES = ["read-only", "supervised", "auto-edit", "full"]
 DEFAULT_MODE = "auto-edit"
 NEEDS_APPROVAL = {"supervised", "full"}
 AGENTS = {"claude", "codex", "ollama"}
+ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 ACTIVE = {"queued", "awaiting_approval", "starting", "working"}
 SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled"}
 RESUMABLE = {"review", "failed", "blocked", "interrupted"}
@@ -46,6 +49,36 @@ _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def rank(mode: str) -> int:
     return MODES.index(mode)
+
+
+def local_minute() -> int:
+    """Master-local minute of day; kept injectable for scheduler tests."""
+    current = datetime.datetime.now().astimezone()
+    return current.hour * 60 + current.minute
+
+
+def effective_policy(node: str, role: str | None, agent: str, task_policy: dict | None = None) -> dict:
+    """Load the newest applicable layers and compute the immutable task snapshot."""
+    wanted = [("fleet", "*", "fleet"), ("node", node, f"node:{node}")]
+    if role:
+        wanted.append(("role", role, f"role:{role}"))
+    wanted.append(("agent", agent, f"agent:{agent}"))
+    layers = []
+    with db() as c:
+        for scope, scope_id, label in wanted:
+            instruction = c.execute(
+                "SELECT text FROM instructions WHERE scope=? AND scope_id=? ORDER BY version DESC LIMIT 1",
+                (scope, scope_id)).fetchone()
+            policy = c.execute(
+                "SELECT body FROM policies WHERE scope=? AND scope_id=? ORDER BY version DESC LIMIT 1",
+                (scope, scope_id)).fetchone()
+            if instruction or policy:
+                layers.append({"layer": label, "instructions": instruction["text"] if instruction else None,
+                               "policy": json.loads(policy["body"]) if policy else {}})
+    if task_policy is not None:
+        fleet_policy.validate(task_policy)
+        layers.append({"layer": "task", "instructions": None, "policy": task_policy})
+    return fleet_policy.merge(layers)
 
 
 # ---------- runner client ----------
@@ -124,7 +157,8 @@ def ceiling(node: dict) -> str:
     return min(mine, runner_max if runner_max in MODES else "read-only", key=rank)
 
 
-def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | None = None) -> str | None:
+def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | None = None,
+             policy: dict | None = None) -> str | None:
     """None if the node can take the task, else the reason it can't."""
     if node["status"] != "approved":
         return "not approved"
@@ -140,6 +174,9 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
         return f"gate profile {gate} not on this node"
     if rank(mode) > rank(ceiling(node)):
         return f"mode {mode} is above this node's ceiling ({ceiling(node)})"
+    policy_ceiling = (policy or {}).get("mode_ceiling")
+    if policy_ceiling and rank(mode) > rank(policy_ceiling):
+        return f"mode {mode} is above the effective policy ceiling ({policy_ceiling})"
     return None
 
 
@@ -147,7 +184,27 @@ def ram(node: dict) -> int:
     return ((node["inventory"] or {}).get("hardware") or {}).get("ram_gb") or 0
 
 
-def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None) -> dict:
+def temporary_reason(node: dict, policy: dict) -> str | None:
+    """Why a hard-eligible node cannot start this snapshot right now."""
+    limits = policy.get("limits") or {}
+    maximum = limits.get("max_concurrent")
+    if maximum is not None and node["running_tasks"] >= maximum:
+        return "max concurrent tasks reached"
+    budget = limits.get("agent_minutes_per_day")
+    if budget is not None:
+        with db() as c:
+            used = c.execute(
+                "SELECT COALESCE(SUM(agent_seconds),0) FROM tasks WHERE node_id=? AND created_at>=?",
+                (node["id"], time.time() - 86400)).fetchone()[0]
+        if used >= budget * 60:
+            return "daily agent budget used"
+    if fleet_policy.in_quiet_hours(limits.get("quiet_hours") or [], local_minute()):
+        return "quiet hours"
+    return None
+
+
+def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
+              role: str | None = None, task_policy: dict | None = None) -> tuple[dict, dict, str | None]:
     nodes = node_rows()
     if wanted:
         match = [n for n in nodes if n["id"] == wanted] or [n for n in nodes if n["name"] == wanted]
@@ -155,16 +212,23 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
             raise HTTPException(404, f"unknown node {wanted}")
         if len(match) > 1:
             raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
-        why = eligible(match[0], agent, model, mode, gate)
+        snapshot = effective_policy(match[0]["id"], role, agent, task_policy)
+        why = eligible(match[0], agent, model, mode, gate, snapshot["policy"])
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
-        return match[0]
-    ok = [n for n in nodes if not eligible(n, agent, model, mode, gate)]
+        return match[0], snapshot, temporary_reason(match[0], snapshot["policy"])
+    candidates = [(n, effective_policy(n["id"], role, agent, task_policy)) for n in nodes]
+    ok = [(n, snapshot) for n, snapshot in candidates
+          if not eligible(n, agent, model, mode, gate, snapshot["policy"])]
     if not ok:
-        reasons = {n["name"]: eligible(n, agent, model, mode, gate) for n in nodes}
+        reasons = {n["name"]: eligible(n, agent, model, mode, gate, snapshot["policy"])
+                   for n, snapshot in candidates}
         raise HTTPException(409, f"no node can run {agent} in {mode} mode: {reasons}")
-    # Least busy first, then the bigger machine.
-    return sorted(ok, key=lambda n: (n["running_tasks"], -ram(n)))[0]
+    # Prefer a node that can start now, then least busy, then the bigger machine.
+    node, snapshot = sorted(ok, key=lambda item: (
+        temporary_reason(item[0], item[1]["policy"]) is not None,
+        item[0]["running_tasks"], -ram(item[0])))[0]
+    return node, snapshot, temporary_reason(node, snapshot["policy"])
 
 
 # ---------- task helpers ----------
@@ -181,6 +245,7 @@ def task_view(row) -> dict:
     t = dict(row)
     t["denials"] = json.loads(t["denials"] or "[]")
     t["gate_result"] = json.loads(t["gate_result"]) if t["gate_result"] else None
+    t["policy"] = json.loads(t.get("policy") or "{}")
     return t
 
 
@@ -244,9 +309,14 @@ def job_fields(job: dict) -> dict:
 async def start(task: dict) -> None:
     """Start (or adopt) the runner job. Caller holds the task lock and has moved it to 'starting'."""
     node = node_of(task)
+    policy = task["policy"]
+    runner_policy = {name: policy[name] for name in ("filesystem", "tools", "network") if name in policy}
+    if "task_minutes" in (policy.get("limits") or {}):
+        runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
-            "gate": task["gate"], "allowed_tools": [], "resume_session": None}
+            "gate": task["gate"], "allowed_tools": [], "resume_session": None,
+            "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     try:
         job = await runner_call(node, "POST", "/jobs", body)
     except RunnerError as e:
@@ -262,6 +332,23 @@ async def start(task: dict) -> None:
                **job_fields(job))
 
 
+async def try_start(task: dict) -> bool:
+    """Start one queued task if its stored snapshot currently admits it."""
+    if task["state"] != "queued":
+        return False
+    node = node_of(task)
+    why = eligible(node, task["agent"], task["model"], task["mode"], task["gate"], task["policy"])
+    why = why or temporary_reason(node, task["policy"])
+    if why:
+        if task.get("error") != why:
+            update(task["id"], error=why)
+        return False
+    if not transition(task, {"queued"}, "starting", error=None):
+        return False
+    await start(get_task(task["id"]))
+    return True
+
+
 async def recover() -> None:
     """After a controller restart: finish starting tasks that were mid-start or never started."""
     with db() as c:
@@ -270,7 +357,8 @@ async def recover() -> None:
     async def one(task_id: str) -> None:
         async with _locks[task_id]:
             task = get_task(task_id)
-            if task["state"] == "queued" and not transition(task, {"queued"}, "starting"):
+            if task["state"] == "queued":
+                await try_start(task)
                 return
             if get_task(task_id)["state"] == "starting":
                 await start(get_task(task_id))
@@ -355,6 +443,8 @@ class TaskIn(BaseModel):
     gate: str | None = None
     node: str | None = None
     parent_id: str | None = None
+    role: str | None = None
+    policy: dict | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -397,22 +487,29 @@ async def create_task(t: TaskIn) -> dict:
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.parent_id:
         get_task(t.parent_id)
-    node = pick_node(t.agent, t.model, t.mode, t.node, t.gate)
+    if t.role is not None and not ROLE_RE.fullmatch(t.role):
+        raise HTTPException(400, "role must be lowercase letters, digits, dashes")
+    try:
+        if t.policy is not None:
+            fleet_policy.validate(t.policy)
+        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     task_id = "t-" + secrets.token_hex(4)
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     state = "awaiting_approval" if t.mode in NEEDS_APPROVAL else "queued"
     with db() as c:
         c.execute("""INSERT INTO tasks (id, parent_id, title, agent, model, prompt, mode, repo, worktree, gate,
-                     node_id, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (task_id, t.parent_id, title, t.agent, t.model, t.prompt, t.mode, t.repo, int(t.worktree),
-                   t.gate, node["id"], state, now, now))
+                   t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
+                   effective["hash"], t.role, queued_reason if state == "queued" else None))
     emit(task_id, f"task.{state}", {"title": title, "node": node["id"], "agent": t.agent, "mode": t.mode})
     if state == "queued":
         async with _locks[task_id]:
-            task = get_task(task_id)
-            if transition(task, {"queued"}, "starting"):
-                await start(get_task(task_id))
+            await try_start(get_task(task_id))
     return get_task(task_id)
 
 
@@ -477,9 +574,9 @@ async def approve(task_id: str) -> dict:
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] == "awaiting_approval":
-            if transition(task, {"awaiting_approval"}, "starting"):
+            if transition(task, {"awaiting_approval"}, "queued", ended_at=None):
                 emit(task_id, "task.approved", {"title": task["title"]})
-                await start(get_task(task_id))
+                await try_start(get_task(task_id))
         elif task["state"] == "blocked":
             tools = sorted({d.get("tool_name") or d.get("tool") for d in task["denials"]} - {None, ""})
             emit(task_id, "task.approved", {"title": task["title"], "tools": tools})

@@ -41,10 +41,11 @@ GATE_ARG = re.compile(r"^[A-Za-z0-9_./:=@+,-]{1,200}$")
 MODEL_REF = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
 DERIVED_MODEL = re.compile(r"^fleet-[a-z0-9][a-z0-9.-]{0,60}$")
 KEEP_ALIVE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
+TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
     "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
-    "allowed_tools", "resume_session",
+    "allowed_tools", "resume_session", "instructions", "policy", "policy_hash",
 }
 BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
@@ -52,8 +53,47 @@ BUILTIN_DENIED = (
 PUBLIC_JOB_KEYS = (
     "id", "agent", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
-    "gate", "runs",
+    "gate", "runs", "instructions", "policy_hash",
 )
+
+
+def validate_job_policy(value):
+    if not isinstance(value, dict):
+        raise HttpError(400, "policy must be an object")
+    allowed = {"filesystem", "tools", "network", "limits"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise HttpError(400, "unknown policy field: " + unknown[0])
+    nested = {"filesystem": {"allowed_roots", "denied"},
+              "tools": {"claude_allow", "claude_deny"}, "network": {"agents"},
+              "limits": {"task_minutes"}}
+    for section, keys in nested.items():
+        if section not in value:
+            continue
+        body = value[section]
+        if not isinstance(body, dict):
+            raise HttpError(400, section + " policy must be an object")
+        extra = sorted(set(body) - keys)
+        if extra:
+            raise HttpError(400, "unknown %s policy field: %s" % (section, extra[0]))
+    for field in ("allowed_roots", "denied"):
+        paths = value.get("filesystem", {}).get(field)
+        if paths is not None and (not isinstance(paths, list) or any(
+                not isinstance(path, str) or not (path.startswith("~/") or os.path.isabs(path)) for path in paths)):
+            raise HttpError(400, "filesystem.%s must be an absolute path list" % field)
+    for field in ("claude_allow", "claude_deny"):
+        tools = value.get("tools", {}).get(field)
+        if tools is not None and (not isinstance(tools, list) or any(
+                not isinstance(tool, str) or not TOOL_NAME.fullmatch(tool) for tool in tools)):
+            raise HttpError(400, "tools.%s is invalid" % field)
+    network = value.get("network", {}).get("agents")
+    if network is not None and network not in ("allow", "deny"):
+        raise HttpError(400, "network.agents must be allow or deny")
+    minutes = value.get("limits", {}).get("task_minutes")
+    if minutes is not None and (not isinstance(minutes, (int, float)) or isinstance(minutes, bool)
+                                or not math.isfinite(minutes) or minutes <= 0):
+        raise HttpError(400, "limits.task_minutes must be a positive number")
+    return value
 
 
 def now():
@@ -207,6 +247,8 @@ class JobManager:
         self.max_job_minutes = (float(max_minutes)
                                 if isinstance(max_minutes, (int, float)) and not isinstance(max_minutes, bool)
                                 and math.isfinite(max_minutes) and max_minutes > 0 else 120.0)
+        network = config.get("network") if isinstance(config.get("network"), dict) else {}
+        self.network = {"agents": "allow" if network.get("agents") == "allow" else "deny"}
         models = config.get("models") if isinstance(config.get("models"), dict) else {}
         remote = models.get("remote_management", False)
         disk = models.get("disk_reserve_gb", 8)
@@ -258,7 +300,7 @@ class JobManager:
             except OSError:
                 pass
 
-    def check_path(self, value):
+    def check_path(self, value, policy=None):
         expanded = os.path.expanduser(value) if isinstance(value, str) else ""
         if not expanded or not os.path.isabs(expanded):
             raise HttpError(400, "path must be absolute")
@@ -267,12 +309,19 @@ class JobManager:
             raise HttpError(400, "path does not exist or is not a directory")
         allowed = any(self._within(resolved, root) for root in self.allowed_roots)
         denied = any(self._within(resolved, path) or self._within(path, resolved) for path in self.denied_paths)
+        filesystem = (policy or {}).get("filesystem") or {}
+        policy_roots = filesystem.get("allowed_roots")
+        if policy_roots is not None:
+            allowed = allowed and any(self._within(resolved, root) for root in policy_roots)
+        policy_denied = filesystem.get("denied") or []
+        denied = denied or any(self._within(resolved, path) or self._within(path, resolved)
+                               for path in policy_denied)
         if not allowed or denied:
             self.audit("path_denied", "requested path was outside node policy")
             raise HttpError(403, "path not allowed by this node's runner policy")
         return resolved
 
-    def _check_git_common_dir(self, repo):
+    def _check_git_common_dir(self, repo, policy=None):
         found = subprocess.run(
             ["git", "-C", repo, "rev-parse", "--git-common-dir"], capture_output=True,
             text=True, timeout=15,
@@ -281,7 +330,7 @@ class JobManager:
             common = found.stdout.strip()
             if not os.path.isabs(common):
                 common = os.path.join(repo, common)
-            self.check_path(common)
+            self.check_path(common, policy)
 
     def _gate(self, value, args):
         if not value:
@@ -440,7 +489,8 @@ class JobManager:
 
     def _start_monitor(self, job, process=None):
         def monitor():
-            deadline = (started_epoch(job) or time.time()) + self.max_job_minutes * 60
+            timeout_minutes = min(self.max_job_minutes, job.get("timeout_minutes", self.max_job_minutes))
+            deadline = (started_epoch(job) or time.time()) + timeout_minutes * 60
             def alive():
                 return process.poll() is None if process is not None else process_alive(job.get("pid"))
 
@@ -479,7 +529,7 @@ class JobManager:
             except (OSError, subprocess.SubprocessError):
                 pass
             self._parse_events(job)
-            message = "Job timed out after %s minutes" % self.max_job_minutes
+            message = "Job timed out after %s minutes" % job.get("timeout_minutes", self.max_job_minutes)
             job.update({"state": "exited", "exit_code": 124, "ended_at": now(),
                         "result": trim(((job.get("result") or "") + "\n" + message).strip())})
             if job.get("gate"):
@@ -525,9 +575,9 @@ class JobManager:
         self._save(job)
         threading.Thread(target=self._gate_worker, args=(job,), name="gate-" + job["id"], daemon=True).start()
 
-    def _make_worktree(self, job_id, repo):
-        repo = self.check_path(repo)
-        self._check_git_common_dir(repo)
+    def _make_worktree(self, job_id, repo, policy=None):
+        repo = self.check_path(repo, policy)
+        self._check_git_common_dir(repo, policy)
         base = subprocess.run(
             ["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True,
             text=True, timeout=15,
@@ -563,6 +613,13 @@ class JobManager:
             raise HttpError(403, "requested mode exceeds runner max_mode")
         if not isinstance(body.get("prompt"), str):
             raise HttpError(400, "prompt is required")
+        instructions = body.get("instructions", "")
+        if not isinstance(instructions, str) or len(instructions.encode("utf-8")) > 32 * 1024:
+            raise HttpError(400, "instructions must be a string no larger than 32 KB")
+        policy = validate_job_policy(body.get("policy", {}))
+        policy_hash = body.get("policy_hash")
+        if policy_hash is not None and (not isinstance(policy_hash, str) or len(policy_hash) > 128):
+            raise HttpError(400, "invalid policy_hash")
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
@@ -571,12 +628,12 @@ class JobManager:
         if not self.agents.get(agent):
             raise HttpError(400, "%s agent is unavailable" % agent)
         gate = self._gate(body.get("gate"), body.get("gate_args"))
-        repo = self.check_path(body["repo"]) if body.get("repo") else None
+        repo = self.check_path(body["repo"], policy) if body.get("repo") else None
         if repo:
-            self._check_git_common_dir(repo)
-        requested_cwd = self.check_path(body["cwd"]) if body.get("cwd") else None
+            self._check_git_common_dir(repo, policy)
+        requested_cwd = self.check_path(body["cwd"], policy) if body.get("cwd") else None
         if requested_cwd:
-            self._check_git_common_dir(requested_cwd)
+            self._check_git_common_dir(requested_cwd, policy)
         with self.lock:
             for current in self.jobs.values():
                 self.refresh(current)
@@ -593,7 +650,7 @@ class JobManager:
             base = None
             if use_worktree:
                 try:
-                    repo, cwd, branch, base = self._make_worktree(job_id, repo)
+                    repo, cwd, branch, base = self._make_worktree(job_id, repo, policy)
                 except Exception:
                     shutil.rmtree(job_dir, ignore_errors=True)
                     raise
@@ -619,6 +676,9 @@ class JobManager:
                 "runs": 1, "repo": repo, "base": base, "model": body.get("model"),
                 "allowed_tools": body.get("allowed_tools") or [], "pid": None,
                 "exit_file": "exit_code.1",
+                "instructions": instructions, "policy": policy, "policy_hash": policy_hash,
+                "timeout_minutes": min(self.max_job_minutes,
+                                       policy.get("limits", {}).get("task_minutes", self.max_job_minutes)),
             }
             job["run_started_at"] = job["started_at"]
             self.jobs[job_id] = job
@@ -634,6 +694,7 @@ class JobManager:
     def _command(self, job, prompt, allowed_tools, resume):
         agent = job["agent"]
         mode = job["mode"]
+        policy = job.get("policy") or {}
         if agent == "claude":
             cmd = [self.agents[agent], "-p", "--output-format", "stream-json", "--verbose"]
             if resume:
@@ -644,13 +705,26 @@ class JobManager:
                 cmd += ["--permission-mode", "acceptEdits"]
             elif mode == "full":
                 cmd += ["--dangerously-skip-permissions"]
-            if allowed_tools:
-                cmd += ["--allowedTools", ",".join(str(item) for item in allowed_tools)]
+            policy_tools = policy.get("tools") or {}
+            requested = [str(item) for item in (allowed_tools or [])]
+            if "claude_allow" in policy_tools:
+                permitted = policy_tools["claude_allow"]
+                requested = ([item for item in requested if item in permitted] if requested else list(permitted))
+            if requested:
+                cmd += ["--allowedTools", ",".join(requested)]
+            denied = list(policy_tools.get("claude_deny") or [])
+            if (policy.get("network") or {}).get("agents") == "deny":
+                denied += ["WebFetch", "WebSearch"]
+            denied = list(dict.fromkeys(denied))
+            if denied:
+                cmd += ["--disallowedTools", ",".join(denied)]
             if job.get("model"):
                 cmd += ["--model", job["model"]]
             return cmd  # prompt arrives on stdin
         if agent == "codex":
             sandbox = "read-only" if mode in ("read-only", "supervised") else "workspace-write"
+            network_flag = (((policy.get("network") or {}).get("agents") == "allow")
+                            and self.network.get("agents") == "allow")
             if resume:
                 cmd = [self.agents[agent], "exec", "resume", "--json"]
                 if mode == "full":
@@ -659,6 +733,8 @@ class JobManager:
                     cmd += ["-c", 'sandbox_mode="%s"' % sandbox]
                 if job.get("model"):
                     cmd += ["--model", job["model"]]
+                if network_flag:
+                    cmd += ["-c", "sandbox_workspace_write.network_access=true"]
                 cmd += [job["session_id"], "-"]  # "-": prompt from stdin
             else:
                 cmd = [self.agents[agent], "exec", "--json"]
@@ -668,22 +744,29 @@ class JobManager:
                     cmd += ["-s", sandbox]
                 if job.get("model"):
                     cmd += ["--model", job["model"]]
+                if network_flag:
+                    cmd += ["-c", "sandbox_workspace_write.network_access=true"]
                 cmd.append("-")  # "-": prompt from stdin
             return cmd
         request_path = self._job_dir(job) / ("ollama-request.%d.json" % job["runs"])
         atomic_json(request_path, {
             "url": self.ollama_url, "model": job["model"], "prompt": prompt,
+            "instructions": job.get("instructions") or "",
         }, 0o600)
         return [sys.executable, str(Path(__file__).resolve()), "--ollama-worker", str(request_path)]
 
     def _launch(self, job, prompt, allowed_tools, resume):
-        cmd = self._command(job, prompt, allowed_tools, resume)
+        delivered = prompt
+        if job["agent"] != "ollama" and job.get("instructions"):
+            delivered = ("<fleet-instructions>\n" + job["instructions"]
+                         + "\n</fleet-instructions>\n\n" + prompt)
+        cmd = self._command(job, delivered, allowed_tools, resume)
         job_dir = self._job_dir(job)
         exit_path = job_dir / job["exit_file"]
         prompt_path = job_dir / ("prompt.%d.txt" % job["runs"])
         fd = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(prompt)
+            handle.write(delivered)
         prompt_in = open(prompt_path, "rb")
         raw = open(job_dir / "events.jsonl", "ab", buffering=0)
         env = os.environ.copy()
@@ -1301,7 +1384,8 @@ class Handler(BaseHTTPRequestHandler):
                     "allow_raw_gates": self.manager.allow_raw_gates,
                     "allowed_roots": self.manager.allowed_roots,
                     "max_jobs": self.manager.max_jobs,
-                    "models": self.manager.models_config}
+                    "models": self.manager.models_config,
+                    "policy": True, "network": self.manager.network}
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:
@@ -1369,9 +1453,13 @@ class RunnerServer(ThreadingHTTPServer):
 
 def ollama_worker(request_path):
     request_data = read_json(request_path, {})
+    messages = []
+    if request_data.get("instructions"):
+        messages.append({"role": "system", "content": request_data["instructions"]})
+    messages.append({"role": "user", "content": request_data.get("prompt", "")})
     payload = json.dumps({
         "model": request_data.get("model"),
-        "messages": [{"role": "user", "content": request_data.get("prompt", "")}],
+        "messages": messages,
         "stream": False,
     }).encode("utf-8")
     request = urllib.request.Request(

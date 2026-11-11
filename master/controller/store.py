@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     session_id TEXT, result TEXT, denials TEXT DEFAULT '[]', gate_result TEXT,
     exit_code INTEGER, branch TEXT, cwd TEXT, runs INTEGER DEFAULT 0, error TEXT,
     pending_message TEXT, agent_seconds REAL DEFAULT 0, run_started_at REAL);
+CREATE TABLE IF NOT EXISTS instructions (
+    scope TEXT, scope_id TEXT, version INTEGER, text TEXT, author TEXT, created_at REAL,
+    PRIMARY KEY (scope, scope_id, version));
+CREATE TABLE IF NOT EXISTS policies (
+    scope TEXT, scope_id TEXT, version INTEGER, body TEXT, author TEXT, created_at REAL,
+    PRIMARY KEY (scope, scope_id, version));
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, type TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS tokens (
@@ -39,7 +45,9 @@ CREATE TABLE IF NOT EXISTS tokens (
 MIGRATIONS = {
     "nodes": {"inventory": "TEXT", "ceiling": "TEXT DEFAULT 'auto-edit'", "runner": "TEXT",
               "runner_fails": "INTEGER DEFAULT 0", "runner_token": "TEXT"},
-    "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL"},
+    "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
+              "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
+              "policy_hash": "TEXT", "role": "TEXT"},
     "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'"},
 }
 

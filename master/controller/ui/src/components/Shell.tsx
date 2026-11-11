@@ -6,6 +6,7 @@ import { NodeLight } from "./bits";
 
 const NAV: { to: string; label: string; later?: string }[] = [
   { to: "/", label: "Overview" },
+  { to: "/budget", label: "Budget" },
   { to: "/tasks", label: "Tasks" },
   { to: "/pipelines", label: "Pipelines" },
   { to: "/models", label: "Models" },

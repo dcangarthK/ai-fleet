@@ -76,7 +76,7 @@ def new(spec: dict) -> dict:
         "repo": spec.get("repo"), "gate": spec.get("gate"), "mode": mode,
         "require_trusted": require_trusted, "bypass": bypass, "trusted_roles": list(dict.fromkeys(trusted_roles)),
         "builder": builder, "reviewers": clean_reviewers,
-        "build_task": None, "reviews": {}, "history": [],
+        "build_task": None, "reviews": {}, "history": [], "budget": {},
     }
 
 
@@ -101,14 +101,114 @@ def parse_review(raw: str, diff: str) -> dict:
     return parsed
 
 
-def _resolution_text(issues: list[dict]) -> str:
-    lines = ["Resolve these independently reviewed issues, keep the existing task context, and rerun the gate:"]
+def resolution_text(issues: list[dict]) -> str:
+    """The fix-round message. The runner runs the gate after the builder finishes, so it never asks for that.
+    A build whose gate failed fails the pipeline, so a fix round never carries gate output (the gate-output
+    part of AC17 doesn't apply)."""
+    lines = ["Resolve these independently reviewed issues and keep the existing task context. "
+             "You don't need to run the gate: the runner runs the gate after you finish."]
     for issue in issues:
         where = f" ({issue['file']})" if issue.get("file") else ""
         lines.append(f"- [{issue['severity']}] {issue['problem']}{where}")
         if issue.get("fix"):
             lines.append(f"  Suggested fix: {issue['fix']}")
     return "\n".join(lines)
+
+
+_resolution_text = resolution_text  # older name
+
+
+def _actionable(reviews) -> list[dict]:
+    actionable, seen = [], set()
+    for review in reviews:
+        for issue in review.get("issues", []):
+            if issue["severity"] not in ("high", "medium"):
+                continue
+            identity = (issue.get("file", ""), _normalised(issue["problem"]).lower())
+            if identity not in seen:
+                seen.add(identity)
+                actionable.append(issue)
+    return actionable
+
+
+def _send_back(p: dict, actionable: list[dict], note: str, trusted: list[dict] | None = None,
+               **counts) -> tuple[dict, list[dict]]:
+    """Another build round with these issues, or escalate when the rounds are used up."""
+    _history(p, "resolving", issues=len(actionable), **counts)
+    p["round"] += 1
+    if p["round"] > p["max_rounds"]:
+        p["round"] = p["max_rounds"]
+        p["state"] = "escalated"
+        _history(p, "escalated", issues=len(actionable), note="review rounds exhausted", **counts)
+        return p, []
+    p["state"] = "building"
+    p["reviews"] = {}
+    # Only trusted findings are remembered for the next round's paid re-review prompt (AC19). With none, round 2
+    # gets a full-diff review rather than a delta re-review of nothing.
+    remembered = actionable if trusted is None else trusted
+    p.setdefault("budget", {})["last_findings"] = remembered or None
+    _history(p, "building", issues=len(actionable), note=note, **counts)
+    return p, [{"do": "message_build", "text": resolution_text(actionable)}]
+
+
+def _parsed_review(p: dict, index: int | None, role: str | None, event: dict) -> dict:
+    """Apply the review contract to one reply and decide whether it is trusted."""
+    parsed = parse_review(event.get("raw", ""), event.get("diff", ""))
+    if event.get("task_id"):
+        parsed["task_id"] = event["task_id"]
+    if event.get("reason"):
+        parsed["reason"] = str(event["reason"])[:300]
+    fallback = event.get("fallback") is True
+    reviewer = p["reviewers"][index] if index is not None else {"kind": "role", "role": role}
+    usable = parsed.get("status") == "valid" or parsed.get("verdict") == "abstain"
+    parsed["fallback"] = fallback
+    # Roles are trusted when the pipeline names them, or when the controller reports (from benchmark data, at
+    # review time) that every model holding the role is a trusted reviewer.
+    auto_trusted = event.get("trusted_roles") if isinstance(event.get("trusted_roles"), list) else []
+    role_trusted = reviewer["kind"] == "role" and (reviewer.get("role") in p.get("trusted_roles", [])
+                                                   or reviewer.get("role") in auto_trusted)
+    parsed["trusted"] = bool(usable and not fallback and (
+        (reviewer["kind"] == "agent" and reviewer.get("agent") in {"claude", "codex"}) or role_trusted
+    ))
+    if parsed["trusted"] and reviewer["kind"] == "role" and reviewer.get("role") not in p.get("trusted_roles", []):
+        parsed["trusted_by"] = "benchmark"
+    return parsed
+
+
+def _local_review(p: dict, event: dict) -> tuple[dict, list[dict]]:
+    """Stage 1 (docs/SPEC-paid-budget.md 4.1): a free local review before any paid one.
+
+    Trusted and asking for high/medium changes: back to the builder before a paid round. Trusted approval of a diff
+    the opt-in skip rule covers: ready without a paid review. Otherwise the paid reviewers run; only trusted findings
+    become hints for them. An untrusted local reviewer never blocks or skips anything.
+    """
+    index = event.get("reviewer_index") if isinstance(event.get("reviewer_index"), int) else None
+    parsed = _parsed_review(p, index, event.get("role"), event)
+    trusted = parsed["trusted"]
+    budget = p.setdefault("budget", {})
+    findings = parsed.get("issues", []) if parsed.get("status") == "valid" else []
+    budget["stage1"] = {"round": p["round"], "role": event.get("role"), "model": event.get("model"),
+                        "trusted": trusted, "verdict": parsed.get("verdict"), "findings": findings,
+                        "hints": findings if trusted else [], "reason": parsed.get("reason")}
+    budget["local_reviews"] = budget.get("local_reviews", 0) + 1
+    actionable = _actionable([parsed]) if parsed.get("status") == "valid" else []
+    if trusted and parsed.get("verdict") == "request_changes" and actionable:
+        budget["paid_rounds_avoided"] = budget.get("paid_rounds_avoided", 0) + 1
+        return _send_back(p, actionable, "local reviewer sent fixes back before paid review")
+    if trusted and parsed.get("verdict") == "approve" and event.get("skip_paid") is True:
+        budget["paid_reviews_skipped"] = budget.get("paid_reviews_skipped", 0) + 1
+        p["state"] = "ready"
+        _history(p, "ready", issues=0, note="paid review skipped by budget rule")
+        return p, []
+    actions = []
+    for i in range(len(p["reviewers"])):
+        if i == index:
+            p["reviews"][str(i)] = parsed  # the pipeline's own role reviewer already answered as stage 1
+        elif p["reviews"].get(str(i), {}).get("status") == "pending":
+            actions.append({"do": "spawn_review", "reviewer": i, "after_local": True})
+    if not actions:
+        return _finish_round(p)
+    return p, actions
 
 
 def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
@@ -140,48 +240,27 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
             p["state"] = "failed"
             _history(p, "failed", note=f"builder task {state}")
         return p, []
+    if kind == "local_review" and p.get("state") == "reviewing":
+        return _local_review(p, event)
     if kind != "review" or p.get("state") != "reviewing":
         return p, []
     index = event.get("reviewer")
     key = str(index)
     if not isinstance(index, int) or key not in p["reviews"] or p["reviews"][key].get("status") != "pending":
         return p, []
-    parsed = parse_review(event.get("raw", ""), event.get("diff", ""))
-    if event.get("task_id"):
-        parsed["task_id"] = event["task_id"]
-    if event.get("reason"):
-        parsed["reason"] = str(event["reason"])[:300]
-    fallback = event.get("fallback") is True
-    reviewer = p["reviewers"][index]
-    usable = parsed.get("status") == "valid" or parsed.get("verdict") == "abstain"
-    parsed["fallback"] = fallback
-    # Roles are trusted when the pipeline names them, or when the controller reports (from benchmark data, at
-    # review time) that every model holding the role is a trusted reviewer.
-    auto_trusted = event.get("trusted_roles") if isinstance(event.get("trusted_roles"), list) else []
-    role_trusted = reviewer["kind"] == "role" and (reviewer.get("role") in p.get("trusted_roles", [])
-                                                   or reviewer.get("role") in auto_trusted)
-    parsed["trusted"] = bool(usable and not fallback and (
-        (reviewer["kind"] == "agent" and reviewer.get("agent") in {"claude", "codex"}) or role_trusted
-    ))
-    if parsed["trusted"] and reviewer["kind"] == "role" and reviewer.get("role") not in p.get("trusted_roles", []):
-        parsed["trusted_by"] = "benchmark"
-    p["reviews"][key] = parsed
+    p["reviews"][key] = _parsed_review(p, index, None, event)
     if any(review.get("status") == "pending" for review in p["reviews"].values()):
         return p, []
+    return _finish_round(p)
+
+
+def _finish_round(p: dict) -> tuple[dict, list[dict]]:
+    """Every reviewer of this round has answered: ready, escalate, or send the issues back."""
     valid = [review for review in p["reviews"].values()
              if review.get("status") == "valid" or review.get("verdict") == "abstain"]
     unsupported = sum(review.get("unsupported", 0) for review in p["reviews"].values())
     identical_fix = sum(review.get("identical_fix", 0) for review in p["reviews"].values())
-    actionable = []
-    seen = set()
-    for review in valid:
-        for issue in review.get("issues", []):
-            if issue["severity"] not in ("high", "medium"):
-                continue
-            identity = (issue.get("file", ""), _normalised(issue["problem"]).lower())
-            if identity not in seen:
-                seen.add(identity)
-                actionable.append(issue)
+    actionable = _actionable(valid)
     if p.get("require_trusted", True) and not any(review.get("trusted") for review in p["reviews"].values()):
         p["state"] = "escalated"
         reasons = "; ".join(f"reviewer {k}: {r['reason']}" for k, r in sorted(p["reviews"].items()) if r.get("reason"))
@@ -198,16 +277,6 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         p["state"] = "ready"
         _history(p, "ready", issues=0, unsupported=unsupported, identical_fix=identical_fix)
         return p, []
-    _history(p, "resolving", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix)
-    p["round"] += 1
-    if p["round"] > p["max_rounds"]:
-        p["round"] = p["max_rounds"]
-        p["state"] = "escalated"
-        _history(p, "escalated", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
-                 note="review rounds exhausted")
-        return p, []
-    p["state"] = "building"
-    p["reviews"] = {}
-    _history(p, "building", issues=len(actionable), unsupported=unsupported, identical_fix=identical_fix,
-             note="review issues sent to builder")
-    return p, [{"do": "message_build", "text": _resolution_text(actionable)}]
+    return _send_back(p, actionable, "review issues sent to builder",
+                      trusted=_actionable([review for review in valid if review.get("trusted")]),
+                      unsupported=unsupported, identical_fix=identical_fix)

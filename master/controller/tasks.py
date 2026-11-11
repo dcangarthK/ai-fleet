@@ -24,11 +24,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from events import changed, emit, events_after, last_event_id, snapshot
+import budget
 import policy as fleet_policy
 import skills as fleet_skills
 from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
     CHAIN_LINKS, FAILURE_STATES, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status, failure_reason,
-    parse_reset, resolution_targets, tail, valid_commit,
+    parse_reset, provider_limit, resolution_targets, tail, valid_commit,
 )
 from store import db, task_root
 
@@ -288,6 +289,11 @@ def task_view(row) -> dict:
     t["resolution"] = json.loads(t["resolution"]) if t.get("resolution") else None
     t["outcome"] = json.loads(t["outcome"]) if t.get("outcome") else None
     t["hidden"] = bool(t.get("hidden"))
+    for field, fallback in (("usage", None), ("prompt_omitted", []), ("launch_extra", {}), ("limits_applied", None)):
+        try:
+            t[field] = json.loads(t[field]) if t.get(field) else fallback
+        except (TypeError, ValueError):
+            t[field] = fallback
     derive_reason(t)
     t["display"] = display_status(t)
     return t
@@ -416,10 +422,28 @@ def iso_epoch(value) -> float | None:
 
 
 def job_fields(job: dict) -> dict:
-    return {"session_id": job.get("session_id"), "result": job.get("result"),
+    # The runner's own error line (a Codex usage-limit message, say) is kept for a run that has ended, so the
+    # failure reason and reset time can be read from it; a run in progress has none.
+    error = job.get("error") if isinstance(job.get("error"), str) and job.get("state") != "running" else None
+    fields = {"session_id": job.get("session_id"), "result": job.get("result"),
             "denials": json.dumps(job.get("denials") or []), "exit_code": job.get("exit_code"),
             "gate_result": json.dumps(job["gate"]) if job.get("gate") else None,
-            "branch": job.get("branch"), "cwd": job.get("cwd"), "error": None}
+            "branch": job.get("branch"), "cwd": job.get("cwd"), "error": error or None,
+            # what the agent CLI reported for this run (runner 2.1); null when it reported nothing
+            "usage": json.dumps(job["usage"]) if isinstance(job.get("usage"), dict) else None,
+            "num_turns": job.get("num_turns") if isinstance(job.get("num_turns"), int) else None,
+            "limits_applied": json.dumps(job["limits_applied"]) if isinstance(job.get("limits_applied"), dict) else None}
+    # Which profile and account ran it, when the runner says (otherwise the stored default stays).
+    if isinstance(job.get("profile"), str) and job["profile"]:
+        fields["profile"] = job["profile"][:64]
+    if isinstance(job.get("account_label"), str) and job["account_label"]:
+        fields["account_label"] = job["account_label"][:64]
+    return fields
+
+
+def budget_support(node: dict) -> bool:
+    """Runners that understand effort/tools/max_turns and reviewing a build worktree read-only."""
+    return bool((node.get("runner") or {}).get("budget"))
 
 
 async def start(task: dict) -> None:
@@ -431,8 +455,22 @@ async def start(task: dict) -> None:
         runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
-            "gate": task["gate"], "allowed_tools": [], "resume_session": None,
+            "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
+    support = budget_support(node)
+    if support:
+        extra = task.get("launch_extra") or {}
+        if task.get("effort"):
+            body["effort"] = task["effort"]
+        if isinstance(extra.get("tools"), list):  # an empty list is "no tools", not "unrestricted"
+            body["tools"] = extra["tools"]
+        if extra.get("max_turns"):
+            body["max_turns"] = extra["max_turns"]
+        if task.get("review_of"):
+            # Review the build's worktree itself (read-only), so any file the reviewer opens is current.
+            source = get_task(task["review_of"])
+            if source.get("cwd"):
+                body.update(repo=None, cwd=source["cwd"], worktree=False)
     try:
         job = await runner_call(node, "POST", "/jobs", body)
     except RunnerError as e:
@@ -444,8 +482,13 @@ async def start(task: dict) -> None:
         else:
             transition(task, {"starting"}, "failed", error=f"could not start: {e.detail}")
             return
+    applied = {}
+    if not support:
+        applied["effort"] = None  # this runner can't pass effort to the CLI: record that, never fake it
+    elif isinstance(job.get("limits_applied"), dict):
+        applied["effort"] = job["limits_applied"].get("effort")
     transition(task, {"starting"}, "working", started_at=time.time(), runs=max(task["runs"] or 0, 1),
-               **job_fields(job))
+               **job_fields(job), **applied)
 
 
 async def try_start(task: dict) -> bool:
@@ -455,11 +498,19 @@ async def try_start(task: dict) -> bool:
     node = node_of(task)
     why = eligible(node, task["agent"], task["model"], task["mode"], task["gate"], task["policy"])
     why = why or temporary_reason(node, task["policy"])
+    wait = None
+    if not why:
+        wait, why = budget.start_wait(task)
     if why:
+        fields = {}
         if task.get("error") != why:
-            update(task["id"], error=why)
+            fields["error"] = why
+        if task.get("budget_wait") != wait:  # only a task waiting on the budget holds a place in its FIFO
+            fields["budget_wait"] = wait
+        if fields:
+            update(task["id"], **fields)
         return False
-    if not transition(task, {"queued"}, "starting", error=None):
+    if not transition(task, {"queued"}, "starting", error=None, budget_wait=None):
         return False
     await start(get_task(task["id"]))
     return True
@@ -524,8 +575,59 @@ async def poll_task(task_id: str) -> None:
             fields.update(close_run(task, agent_end))  # the gate's run time isn't agent time
         if new == "working":
             update(task_id, **fields)
-        elif transition(task, {"working"}, new, **fields) and new == "blocked":
-            await auto_approve_denials(get_task(task_id))
+        elif transition(task, {"working"}, new, **fields):
+            record_usage(task_id)
+            if new == "blocked":
+                await auto_approve_denials(get_task(task_id))
+
+
+def record_usage(task_id: str) -> None:
+    """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none)."""
+    t = get_task(task_id)
+    if not t.get("started_at"):
+        return  # never ran
+    usage = t.get("usage") or {}
+    if t["state"] in ("review", "done"):
+        outcome_name = "ok"
+    elif t.get("failure_reason") == "limit" and provider_limit(t):
+        outcome_name = "limit"  # only the provider's own message counts, never a report that discusses limits
+    elif t["state"] == "cancelled":
+        outcome_name = "cancelled"
+    else:
+        outcome_name = "error"
+    run = t.get("runs") or 1
+    prompt_bytes = t.get("prompt_bytes") if run <= 1 else t.get("run_prompt_bytes")
+    row = {"ts": time.time(), "task_id": task_id, "run": run, "agent": t["agent"],
+           "model": usage.get("model") or t.get("model"), "kind": t.get("kind"), "input": usage.get("input"),
+           "output": usage.get("output"), "cached": usage.get("cached"), "cost_usd": usage.get("cost_usd"),
+           "prompt_bytes": prompt_bytes, "effort": t.get("effort"), "outcome": outcome_name,
+           "num_turns": t.get("num_turns"), "identity": t.get("budget_identity") or budget.identity(t["agent"], t.get("model")),
+           "resets_at": t.get("resets_at") if outcome_name == "limit" else None}
+    with db() as c:
+        inserted = c.execute(f"INSERT OR IGNORE INTO agent_usage ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                             tuple(row.values())).rowcount
+    if inserted and t.get("failure_reason") == "limit" and outcome_name != "limit":
+        # Shown as a limit but not the provider's own message: say so once per run, so a new wording can be added.
+        text = f"{tail(t.get('result'))}\n{tail(t.get('error'))}".strip()
+        emit(task_id, "budget.limit_unrecognised", {"agent": t["agent"], "model": row["model"], "run": run,
+                                                    "text": redact_secrets(text)[:200]})
+
+
+_SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|pk|rk|ghp|gho|ghs|xox[a-z])[-_][A-Za-z0-9_-]{12,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd|authorization)(\s*[=:]\s*)\S+"),
+    re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Text with anything key-like replaced (the runner's error_line patterns), whitespace collapsed."""
+    text = " ".join(str(text or "").split())
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(lambda m: (m.group(1) + m.group(2) + "[redacted]") if m.lastindex == 2 else "[redacted]",
+                           text)
+    return text
 
 
 AUTO_APPROVE_ROUNDS = 3
@@ -585,6 +687,12 @@ class TaskIn(BaseModel):
     skills: list[str] = Field(default_factory=list)
     escalation: bool = False  # grounded-ask escalation: node selection also requires escalation.agents to allow it
     trusted_bypass: bool = False  # Claude/Codex: run in full mode without permission prompts
+    # Paid-model budget (docs/SPEC-paid-budget.md 3.1): what the task is for, and how hard the agent should think.
+    kind: str | None = None  # default: build with a gate, otherwise draft
+    effort: str | None = None  # low, medium or high; default from the budget rules
+    budget_override: str | None = None  # admin only: why the kind check is bypassed (recorded)
+    review_of: str | None = None  # read-only review run inside that task's worktree
+    origin_kind: str | None = None  # a re_review's originating review kind (review, final_review, security_review)
 
     @field_validator("prompt")
     @classmethod
@@ -627,8 +735,40 @@ def root_in(parents: dict, task_id: str) -> str:
     return task_id
 
 
+def gate_failures(parent_id: str | None) -> int:
+    """Gate rounds failed so far in the work item `parent_id` belongs to (failed attempts and resumed runs)."""
+    if not parent_id:
+        return 0
+    with db() as c:
+        ids = list(lineage_rows(c, task_root(c, parent_id)))
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        failed = c.execute(f"SELECT COUNT(*) FROM tasks WHERE id IN ({marks}) AND failure_reason='gate_failed'",
+                           ids).fetchone()[0]
+        resumed = c.execute(f"SELECT data FROM events WHERE type='task.resumed' AND task_id IN ({marks})", ids).fetchall()
+    return failed + sum(1 for r in resumed if (json.loads(r["data"] or "{}") or {}).get("failure_reason") == "gate_failed")
+
+
+def launch_tools(agent: str, policy: dict, mode: str | None = None) -> list[str]:
+    """Tools a stored policy pre-approves, granted at launch instead of after a denial (SPEC-paid-budget 3.8).
+    Only when the policy would auto-approve denied tools for this agent anyway; claude_deny still wins.
+    A read-only task never had them, so it gets none."""
+    if mode == "read-only":
+        return []
+    auto = policy.get("auto_approve") or {}
+    if agent not in (auto.get("agents") or []) or auto.get("denied_tools") is not True:
+        return []
+    return approvable_tools({"policy": policy}, auto.get("tools") or [])
+
+
 @router.post("/api/tasks")
-async def create_task(t: TaskIn) -> dict:
+async def create_task_route(t: TaskIn, request: Request) -> dict:
+    return await create_task(t, scope=getattr(request.state, "scope", "admin"))
+
+
+async def create_task(t: TaskIn, scope: str = "admin") -> dict:
+    """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller."""
     if t.agent not in AGENTS:
         raise HTTPException(400, f"agent must be one of {sorted(AGENTS)}")
     if t.mode not in MODES:
@@ -654,42 +794,129 @@ async def create_task(t: TaskIn) -> dict:
     if t.policy is not None and "auto_approve" in t.policy:
         # Approval authority comes only from the stored (admin-only) policy layers, never from the request.
         raise HTTPException(403, "a task can't grant itself auto-approval; set it on the Policies page")
+    # ---- budget (docs/SPEC-paid-budget.md 3.1-3.4): only ever queues, reroutes or refuses ----
+    kind = t.kind or ("build" if t.gate else "draft")
+    if kind not in budget.KINDS:
+        raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
+    if t.effort is not None and t.effort not in budget.EFFORTS:
+        raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
+    if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
+        raise HTTPException(400, f"origin_kind is only for a re_review, and must be one of {list(budget.ORIGIN_KINDS)}")
+    override = (t.budget_override or "").strip()[:300] or None
+    if override and scope != "admin":
+        raise HTTPException(403, "budget_override is the owner's decision: it needs admin access")
+    if t.review_of:
+        with db() as c:
+            source = c.execute("SELECT node_id, cwd FROM tasks WHERE id=?", (t.review_of,)).fetchone()
+        if not source:
+            raise HTTPException(400, f"unknown task {t.review_of} to review")
+        if t.mode != "read-only" or t.worktree:
+            raise HTTPException(400, "reviewing another task's worktree is read-only and uses no worktree of its own")
+        t.node = source["node_id"]
+    rules = budget.current_rules()
+    clean = budget.strip_prompt(t.prompt, rules["prompt"])
+    prompt = clean["text"]
+    max_bytes = int(rules["prompt"]["max_kb"] * 1024)
+    hard_bytes = int(rules["prompt"]["hard_max_kb"] * 1024)
+    parts, large = [prompt], False
+    if len(prompt.encode()) > max_bytes:
+        if budget.has_diff(prompt):
+            parts = budget.split_prompt(prompt, max_bytes)  # one task per file chunk
+        else:
+            large = True
+        biggest = max(len(part.encode()) for part in parts)
+        if biggest > hard_bytes:
+            raise HTTPException(400, f"prompt is {biggest // 1024} KB after removing generated files; the limit is "
+                                     f"{rules['prompt']['hard_max_kb']} KB (prompt.hard_max_kb on the Budget page)")
+    failures = gate_failures(t.parent_id) if kind in (rules.get("effort_ladder") or {}) else 0
     try:
-        if t.policy is not None:
-            fleet_policy.validate(t.policy)
-        node, effective, queued_reason = pick_node(t.agent, t.model, t.mode, t.node, t.gate, t.role, t.policy,
+        decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
+                                failures=failures, node_id=t.node, origin_kind=t.origin_kind)
+    except budget.Refusal as refusal:
+        budget.log_decision("refused", refusal.detail, agent=t.agent, model=t.model, kind=kind,
+                            title=(t.title or t.prompt.strip().splitlines()[0])[:80])
+        raise HTTPException(refusal.status, refusal.detail)
+    agent, model = decision["agent"], decision["model"]
+    task_policy = t.policy
+    review_exec = decision.get("review_exec") or {}
+    if review_exec.get("task_minutes"):
+        # The review time limit narrows the task layer like any task policy (the smaller value wins).
+        task_policy = dict(t.policy or {})
+        limits = dict(task_policy.get("limits") or {})
+        limits["task_minutes"] = min(limits.get("task_minutes", review_exec["task_minutes"]), review_exec["task_minutes"])
+        task_policy["limits"] = limits
+    try:
+        if task_policy is not None:
+            fleet_policy.validate(task_policy)
+        node, effective, queued_reason = pick_node(agent, model, t.mode, t.node, t.gate, t.role, task_policy,
                                                    t.skills, t.escalation)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    task_id = "t-" + secrets.token_hex(4)
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
-    pre_approved = t.agent in (auto.get("agents") or []) and bool(auto.get("full_mode"))
+    pre_approved = agent in (auto.get("agents") or []) and bool(auto.get("full_mode"))
     if t.trusted_bypass and not pre_approved:
-        raise HTTPException(403, f"policy doesn't let {t.agent} skip permission prompts here; turn on auto-approval "
+        raise HTTPException(403, f"policy doesn't let {agent} skip permission prompts here; turn on auto-approval "
                                  "for it on the Policies page (and the node must allow full mode)")
     state = "awaiting_approval" if t.mode in NEEDS_APPROVAL and not pre_approved else "queued"
-    with db() as c:
-        c.execute("""INSERT INTO tasks (id, parent_id, title, agent, model, prompt, mode, repo, worktree, gate,
-                     node_id, state, created_at, updated_at, instructions, policy, policy_hash, role, error, skills,
-                     trusted_bypass, link, hidden)
-                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (task_id, t.parent_id, title, t.agent, t.model, t.prompt, t.mode, t.repo, int(t.worktree),
-                   t.gate, node["id"], state, now, now, effective["instructions"], json.dumps(effective["policy"]),
-                   effective["hash"], t.role, queued_reason if state == "queued" else None,
-                   json.dumps(effective["skills"]), int(t.trusted_bypass), t.link, int(t.link == "check")))
-        if t.model:
-            c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
-                      "(SELECT id FROM model_catalog WHERE reference=?)",
-                      (now, node["id"], t.model))
-        for skill_id in dict.fromkeys(t.skills):
-            c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?, 'task', ?)", (skill_id, task_id))
-    emit(task_id, f"task.{state}", {"title": title, "node": node["id"], "agent": t.agent, "mode": t.mode})
-    if state == "queued":
-        async with _locks[task_id]:
-            await try_start(get_task(task_id))
-    return with_root(get_task(task_id))
+    waiting = decision["reason"] if decision["wait"] else queued_reason
+    tools_at_launch = launch_tools(agent, effective["policy"], t.mode)
+    extra = ({"tools": review_exec.get("tools"), "max_turns": review_exec.get("max_turns")} if review_exec else {})
+    ids: list[str] = []
+    for index, part in enumerate(parts):
+        task_id = "t-" + secrets.token_hex(4)
+        # Chunks of one split prompt share the given parent (a pipeline's build task); without one, the first
+        # chunk is the parent of the rest.
+        if index == 0:
+            parent_id, link = t.parent_id, (t.link or "review") if t.parent_id and len(parts) > 1 else t.link
+        else:
+            parent_id, link = (t.parent_id, t.link or "review") if t.parent_id else (ids[0], "review")
+        part_title = title if len(parts) == 1 else f"{title[:68]} (part {index + 1}/{len(parts)})"
+        row = {
+            "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": model,
+            "prompt": part, "mode": t.mode, "repo": t.repo, "worktree": int(t.worktree), "gate": t.gate,
+            "node_id": node["id"], "state": state, "created_at": now, "updated_at": now,
+            "instructions": effective["instructions"], "policy": json.dumps(effective["policy"]),
+            "policy_hash": effective["hash"], "role": t.role, "error": waiting if state == "queued" else None,
+            "skills": json.dumps(effective["skills"]), "trusted_bypass": int(t.trusted_bypass), "link": link,
+            "hidden": int(link == "check"), "kind": kind, "effort": decision["effort"], "budget_override": override,
+            "routed_from": decision["routed_from"], "budget_key": decision["key"],
+            "budget_identity": decision["identity"], "prompt_bytes": len(part.encode()),
+            "prompt_stripped_bytes": clean["stripped_bytes"] if index == 0 else 0,
+            "prompt_omitted": (json.dumps(clean["omitted"] + [f"long lines: {p}" for p in clean["long_lines"]])
+                               if index == 0 else None),
+            "review_of": t.review_of, "launch_extra": json.dumps(extra) if extra else None,
+            "budget_wait": decision["wait"] if state == "queued" else None,
+            "approved_tools": json.dumps(tools_at_launch),
+        }
+        with db() as c:
+            c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+            if model:
+                c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
+                          "(SELECT id FROM model_catalog WHERE reference=?)",
+                          (now, node["id"], model))
+            for skill_id in dict.fromkeys(t.skills):
+                c.execute("INSERT OR IGNORE INTO skill_bindings VALUES (?, 'task', ?)", (skill_id, task_id))
+        ids.append(task_id)
+        emit(task_id, f"task.{state}", {"title": part_title, "node": node["id"], "agent": agent, "mode": t.mode})
+        if index == 0:
+            if decision["routed_from"]:
+                budget.log_decision("rerouted", f"{decision['routed_from']} is limited; sent to {decision['identity']}",
+                                    task_id=task_id, title=part_title, routed_from=decision["routed_from"],
+                                    to=decision["identity"], kind=kind)
+            if decision["wait"]:
+                budget.log_decision("queued", decision["reason"], task_id=task_id, title=part_title,
+                                    wait=decision["wait"], kind=kind, key=decision["key"])
+            if large:
+                emit(task_id, "budget.large_prompt", {"title": part_title, "bytes": len(part.encode()),
+                                                      "max_kb": rules["prompt"]["max_kb"]})
+        if state == "queued":
+            async with _locks[task_id]:
+                await try_start(get_task(task_id))
+    view = with_root(get_task(ids[0]))
+    view["split"] = ids if len(ids) > 1 else []
+    return view
 
 
 @router.get("/api/tasks/wait")
@@ -730,15 +957,22 @@ async def task_diff(task_id: str) -> dict:
     return await runner_call(node_of(task), "GET", f"/jobs/{task_id}/diff")
 
 
-async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool = False) -> None:
-    """Caller holds the task lock."""
+async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool = False,
+                 effort: str | None = None) -> None:
+    """Caller holds the task lock. `effort` (pipelines' fix rounds) is sent only to runners that understand it."""
     tools = approvable_tools(task, [*(task.get("approved_tools") or []), *allowed_tools])
     if tools != task.get("approved_tools"):
         update(task["id"], approved_tools=json.dumps(tools))
-    await runner_call(node_of(task), "POST", f"/jobs/{task['id']}/message",
-                      {"text": text, "allowed_tools": tools, "mode": None})
+    node = node_of(task)
+    message_body = {"text": text, "allowed_tools": tools, "mode": None}
+    if effort and budget_support(node):
+        message_body["effort"] = effort
+    await runner_call(node, "POST", f"/jobs/{task['id']}/message", message_body)
     fields = {"runs": (task["runs"] or 0) + 1, "ended_at": None, "denials": "[]", "error": None,
-              "failure_reason": None, "resets_at": None, "resolution": None}
+              "failure_reason": None, "resets_at": None, "resolution": None,
+              "run_prompt_bytes": len(text.encode()), "usage": None, "num_turns": None}
+    if effort and budget_support(node):
+        fields["effort"] = effort
     if reset_auto_approvals:
         fields["auto_approvals"] = 0
     if transition(task, RESUMABLE, "working", **fields):
@@ -792,13 +1026,18 @@ async def cancel(task_id: str) -> dict:
         task = get_task(task_id)
         if task["state"] in ("done", "cancelled"):
             return task
-        if task["state"] in ("starting", "working"):
+        fields = {}
+        was_running = task["state"] in ("starting", "working")
+        if was_running:
             try:
-                await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cancel")
+                job = await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cancel")
+                if isinstance(job.get("usage"), dict):
+                    fields["usage"] = json.dumps(job["usage"])
             except HTTPException as e:
                 if e.status_code != 404:
                     raise
-        transition(task, ACTIVE | RESUMABLE, "cancelled")
+        if transition(task, ACTIVE | RESUMABLE, "cancelled", **fields) and was_running:
+            record_usage(task_id)
     return get_task(task_id)
 
 

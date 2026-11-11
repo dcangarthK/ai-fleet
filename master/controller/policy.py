@@ -72,9 +72,11 @@ def validate(body: dict) -> dict:
         value = body["auto_approve"]
         if not isinstance(value, dict):
             raise ValueError("auto_approve must be an object")
-        _unknown(value, {"agents", "full_mode", "denied_tools"}, "auto_approve")
+        _unknown(value, {"agents", "full_mode", "denied_tools", "tools"}, "auto_approve")
         if "agents" in value:
             _string_list(value["agents"], "auto_approve.agents", lambda a: a in AUTO_APPROVE_AGENTS)
+        if "tools" in value:  # granted at launch when denied tools are auto-approved anyway (SPEC-paid-budget 3.8)
+            _string_list(value["tools"], "auto_approve.tools", TOOL_RE.fullmatch)
         for flag in ("full_mode", "denied_tools"):
             if flag in value and not isinstance(value[flag], bool):
                 raise ValueError(f"auto_approve.{flag} must be true or false")
@@ -189,6 +191,9 @@ def merge(layers: list[dict]) -> dict:
             values = [a[flag] for _, a in approvals if flag in a]
             if values:
                 merged[flag] = all(values)
+        tool_lists = [a["tools"] for _, a in approvals if "tools" in a]
+        if tool_lists:
+            merged["tools"] = [t for t in _dedupe(tool_lists[0]) if all(t in other for other in tool_lists[1:])]
         result["auto_approve"] = merged
         sources["auto_approve"] = [label for label, _ in approvals]
 

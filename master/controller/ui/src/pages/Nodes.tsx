@@ -56,6 +56,11 @@ export function NodesPage() {
         <div className="panel" style={{ padding: 14, marginBottom: 16 }} role="status">
           <b>Run this on the new machine</b> (it must already be on your tailnet):
           <pre className="out" style={{ userSelect: "all" }}>{enroll.command}</pre>
+          <p className="small" style={{ margin: "8px 0" }}>
+            When it asks for the enrollment code (input hidden), type:{" "}
+            <code style={{ userSelect: "all", fontSize: "1.1em", letterSpacing: "0.08em" }}>{enroll.code}</code>
+            <span className="quiet"> — the code is kept out of the command so it never lands in that machine's shell history.</span>
+          </p>
           <div className="row small">
             <button type="button" onClick={() => navigator.clipboard?.writeText(enroll.command)}>Copy command</button>
             <span className="quiet">Works once, until {new Date(enroll.expires_at * 1000).toLocaleTimeString()}. The node then shows up here waiting for your approval.</span>

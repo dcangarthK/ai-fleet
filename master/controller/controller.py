@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth  # noqa: E402
+import budget  # noqa: E402
 import events  # noqa: E402
 import evaluations  # noqa: E402
 import grounding  # noqa: E402
@@ -478,6 +479,7 @@ async def loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    budget.seed_rules()
     fleet_skills.import_repo()
     fleet_instructions.import_repo()
     events.bind_loop(asyncio.get_running_loop())
@@ -558,8 +560,9 @@ def create_enrollment(body: EnrollmentBody) -> dict:
                   (_enrollment_hash(code), body.name, expires, now()))
     master = auth.PUBLIC_HOST or "<master>"
     base = master if master.startswith(("http://", "https://")) else "https://" + master
-    command = (f"curl -fsS {base}/enroll/onboard.sh | bash -s -- --enroll {code} "
-               f"--master {base}")
+    # The code is shown separately and never put in the command: `--enroll` with no value makes onboard.sh ask
+    # for it on the terminal (input hidden), so it stays out of the node's shell history and process list.
+    command = f"curl -fsS {base}/enroll/onboard.sh | bash -s -- --enroll --master {base}"
     return {"code": code, "expires_at": expires, "command": command}
 
 
@@ -670,6 +673,191 @@ def call_stats(days: int = 7) -> list[dict]:
                        "check_failed_rate": outcomes["check_failed"] / grounded if grounded else None,
                        "logprob_mean": sum(scored) / len(scored) if scored else None})
     return result
+
+
+# ---------- paid-model budget (docs/SPEC-paid-budget.md) ----------
+
+class BudgetRulesBody(BaseModel):
+    body: dict
+
+
+class BudgetRestore(BaseModel):
+    version: int
+
+
+@app.get("/api/budget/rules")
+def get_budget_rules() -> dict:
+    return budget.rules_row()
+
+
+@app.get("/api/budget/rules/history")
+def budget_rules_history() -> list[dict]:
+    return budget.rules_history()
+
+
+@app.put("/api/budget/rules")
+def put_budget_rules(body: BudgetRulesBody, request: Request) -> dict:
+    """Admin only (auth.ADMIN_PATHS). Every save is a new version; nothing is overwritten."""
+    try:
+        saved = budget.save_rules(body.body, getattr(request.state, "actor", "local"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    events.emit(None, "budget.rules_changed", {"version": saved["version"], "author": saved["author"]})
+    return saved
+
+
+@app.post("/api/budget/rules/restore")
+def restore_budget_rules(body: BudgetRestore, request: Request) -> dict:
+    old = next((row for row in budget.rules_history() if row["version"] == body.version), None)
+    if not old:
+        raise HTTPException(404, f"no budget rules version {body.version}")
+    try:
+        saved = budget.save_rules(old["body"], getattr(request.state, "actor", "local"))
+    except ValueError as exc:
+        raise HTTPException(400, f"version {body.version} no longer validates: {exc}")
+    events.emit(None, "budget.rules_changed", {"version": saved["version"], "author": saved["author"],
+                                               "restored": body.version})
+    return saved
+
+
+def budget_profiles() -> list[dict]:
+    with db() as c:
+        rows = c.execute("SELECT id, name, runner FROM nodes WHERE runner IS NOT NULL ORDER BY name").fetchall()
+    out = []
+    for row in rows:
+        runner = _json(row["runner"], {})
+        agents = runner.get("agents") or {}
+        out.append({"node": row["id"], "name": row["name"],
+                    "codex_profile": runner.get("codex_profile", "shared") if agents.get("codex") else None,
+                    "claude_profile": runner.get("claude_profile") if agents.get("claude") else None})
+    return out
+
+
+@app.get("/api/budget/status")
+def budget_status() -> dict:
+    return budget.status() | {"profiles": budget_profiles()}
+
+
+def _day(ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+@app.get("/api/budget/usage")
+def budget_usage(days: int = 7, group: str = "model") -> dict:
+    """Tokens and cost of fleet tasks (agent_usage) plus local-model calls (call_usage, cost 0), grouped."""
+    if group not in ("model", "kind", "day"):
+        raise HTTPException(400, "group must be model, kind or day")
+    days = max(1, min(days, 365))
+    since = now() - days * 86400
+    with db() as c:
+        paid = [dict(r) for r in c.execute("SELECT * FROM agent_usage WHERE ts>=?", (since,))]
+        local = [dict(r) for r in c.execute("SELECT ts, model, tokens_in, tokens_out FROM call_usage WHERE ts>=?",
+                                            (since,))]
+    groups: dict[tuple, dict] = {}
+
+    def entry(keys: dict) -> dict:
+        ident = tuple(keys.values())
+        if ident not in groups:
+            groups[ident] = keys | {"tasks": 0, "input": 0, "output": 0, "cached": 0, "cost_usd": None,
+                                    "prompt_bytes": 0, "prompt_runs": 0, "limit_hits": 0, "local": False,
+                                    "agent": None}
+        return groups[ident]
+
+    for row in paid:
+        model = row["model"] or row["agent"]
+        keys = {"model": {"model": model}, "kind": {"kind": row["kind"] or "unknown"},
+                "day": {"day": _day(row["ts"]), "model": model}}[group]
+        e = entry(keys)
+        e["agent"] = e["agent"] or row["agent"]
+        e["tasks"] += 1
+        for field in ("input", "output", "cached"):
+            e[field] += row[field] or 0
+        if row["cost_usd"] is not None:
+            e["cost_usd"] = (e["cost_usd"] or 0) + row["cost_usd"]
+        if row["prompt_bytes"]:
+            e["prompt_bytes"] += row["prompt_bytes"]
+            e["prompt_runs"] += 1
+        e["limit_hits"] += row["outcome"] == "limit"
+    for row in local:
+        model = row["model"] or "local"
+        keys = {"model": {"model": model}, "kind": {"kind": "local"}, "day": {"day": _day(row["ts"]), "model": model}}[group]
+        e = entry(keys)
+        e["local"] = True
+        e["agent"] = e["agent"] or "local"
+        e["tasks"] += 1
+        e["input"] += row["tokens_in"] or 0
+        e["output"] += row["tokens_out"] or 0
+        e["cost_usd"] = e["cost_usd"] or 0
+    rows = []
+    for e in groups.values():
+        e["avg_prompt_kb"] = round(e["prompt_bytes"] / e["prompt_runs"] / 1024, 1) if e["prompt_runs"] else None
+        rows.append(e)
+    rows.sort(key=lambda e: (e.get("day") or "", -(e["input"] + e["output"])))
+    return {"days": days, "group": group, "fleet_only": True, "rows": rows}
+
+
+BUDGET_DECISIONS = ("budget.refused", "budget.queued", "budget.rerouted")
+
+
+@app.get("/api/budget/decisions")
+def budget_decisions(limit: int = 50) -> list[dict]:
+    limit = max(1, min(limit, 200))
+    marks = ",".join("?" * len(BUDGET_DECISIONS))
+    with db() as c:
+        rows = c.execute(f"SELECT * FROM events WHERE type IN ({marks}) ORDER BY id DESC LIMIT ?",
+                         (*BUDGET_DECISIONS, limit)).fetchall()
+    return [{"id": r["id"], "ts": r["ts"], "task_id": r["task_id"]} | _json(r["data"], {}) for r in rows]
+
+
+@app.get("/api/budget/savings")
+def budget_savings(days: int = 30) -> dict:
+    days = max(1, min(days, 365))
+    since = now() - days * 86400
+    with db() as c:
+        local_tokens = c.execute("SELECT COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)),0) FROM call_usage "
+                                 "WHERE ts>=?", (since,)).fetchone()[0]
+        paid_tokens = c.execute("SELECT COALESCE(SUM(COALESCE(input,0)+COALESCE(output,0)),0) FROM agent_usage "
+                                "WHERE ts>=? AND agent IN ('claude','codex')", (since,)).fetchone()[0]
+        stripped = c.execute("SELECT COALESCE(SUM(prompt_stripped_bytes),0) FROM tasks WHERE created_at>=?",
+                             (since,)).fetchone()[0]
+        pipelines = [_json(r["budget"], {}) for r in c.execute("SELECT budget FROM pipelines WHERE updated_at>=?",
+                                                                (since,))]
+    total = lambda field: sum(int(p.get(field) or 0) for p in pipelines)  # noqa: E731
+    return {"days": days, "fleet_only": True, "local_tokens": local_tokens, "paid_tokens": paid_tokens,
+            "local_reviews": total("local_reviews"), "paid_rounds_avoided": total("paid_rounds_avoided"),
+            "paid_reviews_skipped": total("paid_reviews_skipped"), "prompt_bytes_stripped": stripped,
+            "delta_reviews": total("delta_reviews"), "delta_bytes_saved": total("delta_bytes_saved"),
+            "empty_deltas": total("empty_deltas")}
+
+
+def _ratio(top: int, bottom: int) -> float | None:
+    return top / bottom if bottom else None
+
+
+@app.get("/api/budget/local-reviewers")
+def budget_local_reviewers() -> list[dict]:
+    """G2 benchmark numbers next to live agreement with paid reviewers. Live numbers never change trust."""
+    with db() as c:
+        assignments = [dict(r) for r in c.execute("SELECT role, model FROM assignments ORDER BY role")]
+        live = {r["local_model"]: dict(r) for r in c.execute(
+            "SELECT local_model, SUM(hint_id IS NOT NULL) AS findings, SUM(hint_id IS NOT NULL AND confirmed=1) AS confirmed, "
+            "SUM(hint_id IS NULL) AS misses FROM review_agreement GROUP BY local_model")}
+    results = evaluations.latest_role_results(evaluations.read_results(), evaluations.TRUSTED_ROLE)
+    trusted = evaluations.trusted_reviewer_references()
+    models = sorted({a["model"] for a in assignments} | set(live) | set(results))
+    out = []
+    for model in models:
+        canonical = evaluations.canonical_reference(model)
+        metrics = (((results.get(canonical) or {}).get("roles") or {}).get(evaluations.TRUSTED_ROLE) or {})
+        holdout = ((metrics.get("metrics") or {}).get(evaluations.TRUSTED_SPLIT) or {}) if isinstance(metrics, dict) else {}
+        row = live.get(model) or {}
+        findings, confirmed, misses = int(row.get("findings") or 0), int(row.get("confirmed") or 0), int(row.get("misses") or 0)
+        out.append({"model": model, "roles": sorted({a["role"] for a in assignments if a["model"] == model}),
+                    "trusted": evaluations.is_trusted_reference(model, trusted),
+                    "g2_precision": holdout.get("precision"), "g2_recall": holdout.get("recall"),
+                    "live": {"findings": findings, "confirmed": confirmed, "misses": misses,
+                             "precision": _ratio(confirmed, findings), "recall": _ratio(confirmed, confirmed + misses)}})
+    return out
 
 
 @app.get("/api/notify-rules")
@@ -1163,7 +1351,7 @@ class PipelineRequest(BaseModel):
 def pipeline_view(row) -> dict:
     value = dict(row)
     for field, fallback in (("builder", {}), ("reviewers", []), ("reviews", {}), ("history", []),
-                            ("trusted_roles", [])):
+                            ("trusted_roles", []), ("budget", {})):
         try:
             value[field] = json.loads(value.get(field))
         except (ValueError, TypeError):
@@ -1184,9 +1372,10 @@ def get_pipeline(pipeline_id: str) -> dict:
 def save_pipeline(p: dict) -> None:
     p["updated_at"] = time.time()
     with db() as c:
-        c.execute("""UPDATE pipelines SET state=?,round=?,build_task=?,reviews=?,history=?,updated_at=? WHERE id=?""",
+        c.execute("""UPDATE pipelines SET state=?,round=?,build_task=?,reviews=?,history=?,budget=?,updated_at=?
+                     WHERE id=?""",
                   (p["state"], p["round"], p.get("build_task"), json.dumps(p["reviews"]),
-                   json.dumps(p["history"]), p["updated_at"], p["id"]))
+                   json.dumps(p["history"]), json.dumps(p.get("budget") or {}), p["updated_at"], p["id"]))
 
 
 async def model_call(role: str, spec: str, diff: str) -> str:
@@ -1301,15 +1490,45 @@ async def role_review(role: str, spec: str, diff: str) -> tuple[str, str | None,
     return json.dumps({"verdict": verdict, "issues": issues}), ("; ".join(notes) or None), fallback
 
 
-def review_prompt(spec: str, diff: str, branch: str | None = None) -> str:
-    # The builder's worktree isn't committed until cleanup, so its branch still shows the code before the change.
-    where = ("This repository shows the code before the change; the builder's changes are exactly the diff below. "
-             "Read surrounding files here for context, but judge the change from the diff. ")
+# One instruction for every paid review (SPEC-paid-budget 3.4). The reviewer runs read-only in the build's worktree,
+# so a file it does open is current; it never gets the full diff *and* an invitation to read the tree.
+REVIEW_SCOPE = ("Review only the diff below. Read a file only when a line you need is ambiguous or outside the diff; "
+                "name each file you read. ")
+
+
+def _hint_text(hints: list[dict] | None) -> str:
+    if not hints:
+        return ""
+    lines = ["", "", "HINTS from a free local first-pass reviewer, quote-checked against the diff. For each one, "
+                     "confirm or reject it on your own evidence (report it as an issue only if you confirm it); "
+                     "your verdict decides:"]
+    for number, hint in enumerate(hints, start=1):
+        lines.append(f"{number}. [{hint.get('severity')}] {hint.get('problem')} ({hint.get('file') or 'no file'}); "
+                     f"evidence: {hint.get('evidence')}")
+    return "\n".join(lines)
+
+
+def review_prompt(spec: str, diff: str, branch: str | None = None, hints: list[dict] | None = None) -> str:
     return (
-        "Independently review the builder's branch against the spec below. Do not edit anything. " + where +
+        "Independently review the builder's change against the spec below. Do not edit anything. " + REVIEW_SCOPE +
         grounding.REVIEW_GUIDANCE + " Reply with JSON only using this schema: " +
-        grounding.REVIEW_SCHEMA + "\n\n"
+        grounding.REVIEW_SCHEMA + _hint_text(hints) + "\n\n"
         f"SPEC:\n{spec}\n\nDIFF:\n{diff}"
+    )
+
+
+def re_review_prompt(spec: str, findings: list[dict], delta: str, hints: list[dict] | None = None) -> str:
+    """Round 2+: the previous findings and only what changed since that review (SPEC-paid-budget 3.5)."""
+    previous = "\n".join(f"- [{f.get('severity')}] {f.get('problem')}" + (f" ({f['file']})" if f.get("file") else "")
+                         for f in findings) or "- (none recorded)"
+    files = "\n".join(f"- {name}" for name in budget.changed_files(delta)) or "- (no file headers in the delta)"
+    return (
+        "Re-review. The previous review round found the issues listed below; since then the builder changed only "
+        "what the diff below shows. Check that each finding is resolved and that the change adds no new defect. "
+        "Do not edit anything. " + REVIEW_SCOPE + grounding.REVIEW_GUIDANCE +
+        " Reply with JSON only using this schema: " + grounding.REVIEW_SCHEMA + _hint_text(hints) +
+        f"\n\nPREVIOUS FINDINGS:\n{previous}\n\nChanged since the last review:\n{files}"
+        f"\n\nSPEC:\n{spec}\n\nDIFF SINCE THE LAST REVIEW:\n{delta}"
     )
 
 
@@ -1340,20 +1559,192 @@ def auto_trusted_roles() -> list[str]:
     return evaluations.trusted_roles(assignments, catalog, evaluations.trusted_reviewer_references())
 
 
+LOCAL_REVIEW_ROLE = "reviewer"
+
+
+def local_review_role() -> str | None:
+    """The fleet role that does stage-1 reviews, when LiteLLM routes roles and the role holds a model."""
+    if not MASTER_KEY:
+        return None
+    with db() as c:
+        held = c.execute("SELECT 1 FROM assignments WHERE role=? AND state='active' LIMIT 1",
+                         (LOCAL_REVIEW_ROLE,)).fetchone()
+    return LOCAL_REVIEW_ROLE if held else None
+
+
+def role_model(role: str) -> str:
+    with db() as c:
+        row = c.execute("SELECT model FROM assignments WHERE role=? ORDER BY node LIMIT 1", (role,)).fetchone()
+    return row["model"] if row else role
+
+
+def stage1_reviewer(p: dict, rules: dict) -> tuple[str | None, int | None]:
+    """(role, index in p.reviewers or None) for the local first pass, or (None, None) when there is none.
+    Only pipelines with a paid (agent) reviewer get one; the pipeline's own role reviewer is reused if it has one."""
+    if "local" not in rules["reviews"].get("stages", []):
+        return None, None
+    if not any(r["kind"] == "agent" for r in p["reviewers"]):
+        return None, None
+    for index, reviewer in enumerate(p["reviewers"]):
+        if reviewer["kind"] == "role":
+            return reviewer["role"], index
+    return local_review_role(), None
+
+
+def _escalate(p: dict, note: str) -> dict:
+    before = len(p["history"])
+    p["state"] = "escalated"
+    p["history"].append({"round": p["round"], "state": "escalated", "at": time.time(), "note": note})
+    save_pipeline(p)
+    _pipeline_events(p, before)
+    return p
+
+
+async def _runner_tree(build: dict) -> str | None:
+    """The build worktree's tree hash, taken with a temporary index (the builder's own index is untouched)."""
+    try:
+        node = tasks.node_of(build)
+        if not tasks.budget_support(node):
+            return None
+        out = await tasks.runner_call(node, "POST", f"/jobs/{build['id']}/tree")
+    except HTTPException:
+        return None
+    tree = out.get("tree")
+    return tree if isinstance(tree, str) and tree else None
+
+
+async def _runner_delta(build: dict, since: str) -> str | None:
+    try:
+        node = tasks.node_of(build)
+        if not tasks.budget_support(node):
+            return None
+        out = await tasks.runner_call(node, "GET", f"/jobs/{build['id']}/diff?since={since}")
+    except HTTPException:
+        return None
+    return out.get("diff") if isinstance(out.get("diff"), str) else None
+
+
+async def _stage1(p: dict) -> dict | None:
+    """Run the local first pass for this round if it applies and hasn't run yet; returns the advanced pipeline."""
+    rules = budget.current_rules()
+    b = p.setdefault("budget", {})
+    if b.get("stage1_round") == p["round"]:
+        return None
+    role, index = stage1_reviewer(p, rules)
+    if not role:
+        return None
+    b["stage1_round"] = p["round"]
+    save_pipeline(p)
+    diff = await _pipeline_diff(p)
+    raw, reason, fallback = await role_review(role, p["spec"], diff)
+    build = tasks.get_task(p["build_task"]) if p.get("build_task") else {}
+    gate_passed = (build.get("gate_result") or {}).get("state") == "passed"
+    # The rule part of the skip check; the machine adds "trusted reviewer approved".
+    skip = budget.paid_skip_ok(rules["reviews"], diff, gate_passed, trusted_approved=True)
+    return await _pipeline_step_unlocked(p, {
+        "type": "local_review", "raw": raw, "diff": diff, "reason": reason, "fallback": fallback,
+        "trusted_roles": auto_trusted_roles(), "role": role, "reviewer_index": index, "model": role_model(role),
+        "skip_paid": skip})
+
+
+async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
+    """One paid review task: kind, delta, caps and hints per the budget rules."""
+    reviewer = p["reviewers"][index]
+    rules = budget.current_rules()
+    reviews_rules = rules["reviews"]
+    b = p.setdefault("budget", {})
+    build = tasks.get_task(p["build_task"])
+    is_codex = reviewer["agent"] == "codex"
+    security = budget.touches(budget.changed_files(diff), reviews_rules.get("security_paths") or [])
+    kind = ("security_review" if security else "review") if is_codex else "review"
+    if security and is_codex and p["round"] not in b.setdefault("security_review_rounds", []):
+        b["security_review_rounds"].append(p["round"])  # kept apart from the task kind, which may be re_review
+    origin_kind = b.setdefault("origin_kinds", {}).setdefault(str(index), kind)  # the first round's review kind
+    stage1 = b.get("stage1") or {}
+    hints = stage1.get("hints") if stage1.get("round") == p["round"] else None
+    trees = b.setdefault("trees", {})
+    prompt = None
+    previous_tree = trees.get(str(p["round"] - 1)) if p["round"] > 1 else None
+    if previous_tree and b.get("last_findings") is not None:
+        delta = await _runner_delta(build, previous_tree)
+        if delta is not None:
+            if not delta.strip():
+                b["empty_deltas"] = b.get("empty_deltas", 0) + 1
+                save_pipeline(p)
+                return await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
+                                                         "reason": "no change since last review"})
+            prompt = re_review_prompt(p["spec"], b["last_findings"], delta, hints)
+            kind = "re_review"  # every delta round, Codex's included; the security path is recorded below
+            b["delta_reviews"] = b.get("delta_reviews", 0) + 1
+            b["delta_bytes_saved"] = b.get("delta_bytes_saved", 0) + max(0, len(diff.encode()) - len(delta.encode()))
+    paid_rounds, codex_rounds = b.setdefault("paid_rounds", []), b.setdefault("codex_rounds", [])
+    if p["round"] not in paid_rounds and len(paid_rounds) >= reviews_rules["max_paid_rounds"]:
+        return _escalate(p, f"paid review rounds exhausted ({reviews_rules['max_paid_rounds']}); the owner decides")
+    if is_codex and p["round"] not in codex_rounds and len(codex_rounds) >= reviews_rules["max_codex_rounds"]:
+        return _escalate(p, f"paid review rounds exhausted for Codex ({reviews_rules['max_codex_rounds']}); "
+                            "the owner decides")
+    if str(p["round"]) not in trees:
+        tree = await _runner_tree(build)
+        if tree:
+            trees[str(p["round"])] = tree
+    save_pipeline(p)
+    try:
+        review_task = await tasks.create_task(tasks.TaskIn(
+            agent=reviewer["agent"], model=reviewer.get("model"),
+            prompt=prompt or review_prompt(p["spec"], diff, build.get("branch"), hints),
+            title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"), worktree=False,
+            node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
+            origin_kind=origin_kind if kind == "re_review" else None,
+        ))
+        # The round is spent only once the review task was admitted (a refused one costs nothing).
+        if p["round"] not in paid_rounds:
+            paid_rounds.append(p["round"])
+        if is_codex and p["round"] not in codex_rounds:
+            codex_rounds.append(p["round"])
+        p["reviews"][str(index)]["task_id"] = review_task["id"]
+        if review_task.get("split"):
+            p["reviews"][str(index)]["task_ids"] = review_task["split"]
+        save_pipeline(p)
+    except HTTPException as exc:
+        p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
+                                               "reason": f"{reviewer['agent']} task not started: {exc.detail}"})
+    return p
+
+
+async def _message_build(p: dict, text: str) -> None:
+    """A fix round: resume the builder; its effort follows the rules' ladder for fixes."""
+    task_id = p["build_task"]
+    async with tasks._locks[task_id]:
+        task = tasks.get_task(task_id)
+        if task["state"] not in tasks.RESUMABLE:
+            raise HTTPException(409, f"can't message a task that is {task['state']}")
+        effort = budget.resolve_effort(budget.current_rules(), task.get("budget_key"), "fix", None,
+                                       tasks.gate_failures(task_id))
+        await tasks.resume(task, text, [], reset_auto_approvals=True, effort=effort)
+
+
 async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
     for action in actions:
+        if p["state"] in pipeline_machine.TERMINAL:
+            break
         if action["do"] == "spawn_build":
             task = await tasks.create_task(tasks.TaskIn(
                 agent=p["builder"]["agent"], model=p["builder"].get("model"), prompt=p["spec"], title=p["title"], mode=p["mode"],
                 repo=p.get("repo"), gate=p.get("gate"), node=p["builder"].get("node"), worktree=True,
-                trusted_bypass=bool(p.get("bypass")),
+                trusted_bypass=bool(p.get("bypass")), kind="build",
             ))
             p["build_task"] = task["id"]
             save_pipeline(p)
         elif action["do"] == "message_build":
-            await tasks.message(p["build_task"], tasks.MessageIn(text=action["text"]))
+            await _message_build(p, action["text"])
         elif action["do"] == "spawn_review":
             index = action["reviewer"]
+            if p["state"] != "reviewing" or p["reviews"].get(str(index), {}).get("status") != "pending":
+                continue
+            if not action.get("after_local"):
+                advanced = await _stage1(p)
+                if advanced is not None:
+                    return advanced  # stage 1 asked for the paid reviews itself (or settled the round)
             reviewer = p["reviewers"][index]
             diff = await _pipeline_diff(p)
             if reviewer["kind"] == "role":
@@ -1363,21 +1754,41 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
                                                        "fallback": fallback,
                                                        "trusted_roles": auto_trusted_roles()})
             else:
-                builder = tasks.get_task(p["build_task"])
-                try:
-                    # Review in the original repo, read-only: the builder's worktree lives under the runner's own
-                    # directory, which node policy always refuses. Its branch is in the same repo.
-                    review_task = await tasks.create_task(tasks.TaskIn(
-                        agent=reviewer["agent"], model=reviewer.get("model"), prompt=review_prompt(p["spec"], diff, builder.get("branch")),
-                        title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"),
-                        worktree=False, node=builder["node_id"], parent_id=p["build_task"], link="review",
-                    ))
-                    p["reviews"][str(index)]["task_id"] = review_task["id"]
-                    save_pipeline(p)
-                except HTTPException as exc:
-                    p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
-                                                           "reason": f"{reviewer['agent']} task not started: {exc.detail}"})
+                p = await _spawn_paid_review(p, index, diff)
     return p
+
+
+def _merge_parts(results: list[str]) -> tuple[str, str | None]:
+    """One review from a review split into file chunks: any request_changes wins, issues are concatenated."""
+    verdict, issues = "approve", []
+    for number, text in enumerate(results, start=1):
+        try:
+            value = grounding._json_value(text or "")
+        except (TypeError, ValueError):
+            return "", f"invalid review for part {number}"
+        if not isinstance(value, dict) or not isinstance(value.get("issues"), list):
+            return "", f"invalid review for part {number}"
+        if value.get("verdict") == "request_changes":
+            verdict = "request_changes"
+        issues.extend(value["issues"])
+    return json.dumps({"verdict": verdict, "issues": issues}), None
+
+
+def record_agreement(p: dict, index: int, raw: str, diff: str) -> None:
+    """Stage-1 findings against this paid verdict: each confirmed or rejected, plus the paid findings it missed."""
+    stage1 = (p.get("budget") or {}).get("stage1") or {}
+    if stage1.get("round") != p["round"]:
+        return
+    parsed = pipeline_machine.parse_review(raw, diff)
+    if parsed.get("status") != "valid":
+        return
+    rows = budget.agreement_rows(stage1.get("findings") or [], parsed.get("issues") or [])
+    with db() as c:
+        for row in rows:
+            c.execute("INSERT INTO review_agreement (ts,pipeline_id,round,local_model,hint_id,confirmed,trusted,reviewer)"
+                      " VALUES (?,?,?,?,?,?,?,?)",
+                      (time.time(), p["id"], p["round"], stage1.get("model") or stage1.get("role"), row["hint_id"],
+                       int(row["confirmed"]), int(bool(stage1.get("trusted"))), p["reviewers"][index].get("agent")))
 
 
 async def _pipeline_step_unlocked(p: dict, event: dict) -> dict:
@@ -1420,8 +1831,9 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 return
             if reviewer["kind"] != "agent":
                 continue
-            review_task = tasks.get_task(current["task_id"])
-            if review_task["state"] == "cancelled":
+            parts = [tasks.get_task(i) for i in (current.get("task_ids") or [current["task_id"]])]
+            review_task = parts[0]
+            if any(part["state"] == "cancelled" for part in parts):
                 before = len(p["history"])
                 p["state"] = "failed"
                 p["history"].append({"round": p["round"], "state": "failed", "at": time.time(),
@@ -1430,13 +1842,19 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 _pipeline_events(p, before)
                 return
             # "blocked" counts as finished too: a read-only reviewer that hit a denied tool still has its answer.
-            if review_task["state"] in ("review", "failed", "interrupted", "blocked"):
+            if all(part["state"] in ("review", "failed", "interrupted", "blocked") for part in parts):
                 reason = None
-                if review_task["state"] != "review":
-                    reason = f"{reviewer['agent']} review task {review_task['state']}" + (
-                        f": {review_task['error']}" if review_task.get("error") else "")
+                unfinished = [part for part in parts if part["state"] != "review"]
+                if unfinished:
+                    reason = f"{reviewer['agent']} review task {unfinished[0]['state']}" + (
+                        f": {unfinished[0]['error']}" if unfinished[0].get("error") else "")
+                raw = review_task.get("result") or ""
+                if len(parts) > 1:
+                    raw, merge_reason = _merge_parts([part.get("result") or "" for part in parts])
+                    reason = reason or merge_reason
+                record_agreement(p, index, raw, diff)
                 p = await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index,
-                                                       "raw": review_task.get("result") or "", "diff": diff,
+                                                       "raw": raw, "diff": diff,
                                                        "task_id": review_task["id"], "reason": reason})
 
 
@@ -1492,6 +1910,7 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
                     json.dumps(p["reviews"]), json.dumps(p["history"]), now, now, int(p["require_trusted"]),
                     json.dumps(p["trusted_roles"]), int(p.get("bypass", False)),
                 ))
+            c.execute("UPDATE pipelines SET budget=? WHERE id=?", (json.dumps(p.get("budget") or {}), p["id"]))
         _pipeline_events(p, 0)
         try:
             p = await _pipeline_actions(p, actions)
@@ -1527,7 +1946,9 @@ async def retry_pipeline(pipeline_id: str) -> dict:
 @app.post("/api/pipelines/{pipeline_id}/cancel")
 async def cancel_pipeline(pipeline_id: str) -> dict:
     p = get_pipeline(pipeline_id)
-    task_ids = [p.get("build_task")] + [review.get("task_id") for review in p["reviews"].values()]
+    task_ids = [p.get("build_task")]
+    for review in p["reviews"].values():  # a split review has one task per chunk
+        task_ids += list(review.get("task_ids") or [review.get("task_id")])
     for task_id in dict.fromkeys(value for value in task_ids if value):
         try:
             await tasks.cancel(task_id)
@@ -1752,11 +2173,14 @@ def fleet_state() -> dict:
         n["effective_ceiling"] = tasks.ceiling(n) if n["runner"] else None
         n["update_available"] = bool(n["runner"] and runner_digest
                                      and n["runner"].get("digest") != runner_digest)
+        # Which agent profile fleet tasks use (SPEC-paid-budget 3.6): "fleet" (isolated) or "shared".
+        n["codex_profile"] = n["runner"].get("codex_profile", "shared") if n["runner"] else None
+        n["claude_profile"] = n["runner"].get("claude_profile") if n["runner"] else None
     for role in roles:
         role["params"] = _json(role.get("params"), {})
         role["routed"] = None if role["routed"] is None else bool(role["routed"])
     return {"nodes": nodes, "assignments": roles, "roles": role_info,
-            "max_fails": MAX_FAILS, "modes": tasks.MODES}
+            "max_fails": MAX_FAILS, "modes": tasks.MODES, "budget": budget.status()}
 
 
 @app.get("/api/fleet")

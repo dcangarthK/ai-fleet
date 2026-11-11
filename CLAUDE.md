@@ -41,6 +41,12 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
 ## Paid-model budget (Codex, Claude Opus/Fable, Sonnet)
 Paid models share account limits with the owner's own use. Spend them where they change the outcome.
 
+**Source of truth: the console's Budget page** (`/app/budget`, rules versioned in `fleet.db`). The controller enforces
+those rules on every task (kind allowed per model, limits, concurrency, prompt size); the table below is the intent.
+Name `kind` on every `spawn_task` (build, fix, review, re_review, final_review, security_review, merge, benchmark,
+check, draft). `budget_override` is the owner's (admin) decision; the orchestrator's operate scope can't use it.
+`fleet_status` returns each paid model's budget status (OK, limited until, at soft budget).
+
 **Who does what (cheapest capable first):**
 | Work | Default | Escalate to |
 |---|---|---|

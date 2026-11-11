@@ -699,14 +699,17 @@ FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
     "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
     "allowed_tools", "resume_session", "instructions", "policy", "policy_hash",
+    "effort", "tools", "max_turns",
 }
+EFFORTS = ("low", "medium", "high")
 BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
 )
 PUBLIC_JOB_KEYS = (
     "id", "agent", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
-    "gate", "runs", "instructions", "policy_hash",
+    "gate", "runs", "instructions", "policy_hash", "usage", "num_turns", "limits_applied", "error",
+    "profile", "account_label",
 )
 
 
@@ -770,6 +773,23 @@ def read_json(path, default=None):
             return json.load(handle)
     except (OSError, ValueError):
         return default
+
+
+ERROR_LINE = re.compile(r"^\s*error\b\s*[:\-]", re.IGNORECASE)
+SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|pk|rk|ghp|gho|ghs|xox[a-z])[-_][A-Za-z0-9_-]{12,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd|authorization)(\s*[=:]\s*)\S+"),
+    re.compile(r"\b[A-Za-z0-9+/_-]{40,}={0,2}"),
+)
+
+
+def error_line(value, limit=500):
+    """One agent error message, redacted of anything key-like and trimmed to its first `limit` characters."""
+    text = " ".join(str(value or "").split())
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub(lambda m: (m.group(1) + m.group(2) + "[redacted]") if m.lastindex == 2 else "[redacted]", text)
+    return text[:limit]
 
 
 def trim(value, limit=20000):
@@ -978,6 +998,20 @@ class JobManager:
             raise HttpError(403, "path not allowed by this node's runner policy")
         return resolved
 
+    def _review_worktree(self, value, mode):
+        """`value` when it is exactly the worktree of one of this runner's jobs and the new job is read-only."""
+        if mode != "read-only" or not isinstance(value, str):
+            return None
+        expanded = os.path.expanduser(value)
+        if not os.path.isabs(expanded) or not os.path.isdir(expanded):
+            return None
+        resolved = os.path.realpath(expanded)
+        for job in list(self.jobs.values()):
+            if job.get("worktree") and job.get("cwd") and self._comparable(job["cwd"]) == self._comparable(resolved):
+                self.audit("review_worktree", "read-only review of job " + job["id"])
+                return resolved
+        return None
+
     def _check_git_common_dir(self, repo, policy=None):
         found = subprocess.run(
             ["git", "-C", repo, "rev-parse", "--git-common-dir"], capture_output=True,
@@ -1077,16 +1111,192 @@ class JobManager:
         with self.lock:
             return [self.public(job) for job in sorted(self.jobs.values(), key=lambda item: item["started_at"])]
 
+    # ---- paid-model budget (docs/SPEC-paid-budget.md): usage, effort, review limits, profiles ----
+
+    def cli_help(self, agent):
+        """The agent CLI's help text (cached per binary), so only flags the installed CLI has are used."""
+        path = self.agents.get(agent)
+        if not path:
+            return ""
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            stamp = None
+        cache = self.__dict__.setdefault("_help_cache", {})
+        key = (path, stamp)
+        if key not in cache:
+            argv = [path, "exec", "--help"] if agent == "codex" else [path, "--help"]
+            try:
+                done = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=15,
+                                      stdin=subprocess.DEVNULL, env=dict(os.environ, PATH=agent_search_path()))
+                cache[key] = (done.stdout or "") + (done.stderr or "")
+            except (OSError, subprocess.SubprocessError):
+                cache[key] = ""
+        return cache[key]
+
+    def _has_flag(self, agent, flag):
+        return bool(re.search(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])", self.cli_help(agent) or ""))
+
+    @staticmethod
+    def _review_tools(job):
+        """The review tool list, narrowed by the policy's claude_allow when it has one."""
+        tools = [str(item) for item in (job.get("tools") or [])]
+        permitted = ((job.get("policy") or {}).get("tools") or {}).get("claude_allow")
+        return [item for item in tools if item in permitted] if permitted is not None else tools
+
+    def limits_applied(self, job):
+        """What this run really passes to the CLI: null where the CLI has no such option (nothing is faked)."""
+        agent = job.get("agent")
+        effort = job.get("effort")
+        if agent == "codex":
+            return {"effort": effort, "max_turns": None, "tools": None}
+        if agent != "claude":
+            return {"effort": None, "max_turns": None, "tools": None}
+        return {"effort": effort if effort and self._has_flag("claude", "--effort") else None,
+                "max_turns": (job.get("max_turns") if job.get("max_turns") and self._has_flag("claude", "--max-turns")
+                              else None),
+                "tools": (self._review_tools(job) if job.get("tools") is not None and self._has_flag("claude", "--tools")
+                          else None)}
+
+    @staticmethod
+    def codex_profile_dir():
+        return Path(os.path.expanduser(os.environ.get("FLEET_CODEX_PROFILE") or "~/.codex-fleet"))
+
+    def codex_profile_ready(self):
+        # Ready once the owner signed it in (CODEX_HOME=~/.codex-fleet codex login). The file is never read here.
+        home = self.codex_profile_dir()
+        return home.is_dir() and (home / "auth.json").exists()
+
+    def agent_env(self, agent, base):
+        env = dict(base)
+        if agent == "codex" and self.codex_profile_ready():
+            env["CODEX_HOME"] = str(self.codex_profile_dir())
+        return env
+
+    def profiles(self, env=None):
+        env = os.environ if env is None else env
+        claude_dir = env.get("CLAUDE_CONFIG_DIR")
+        return {"codex_profile": "fleet" if self.codex_profile_ready() else "shared",
+                "claude_profile": "fleet" if claude_dir and os.path.isdir(os.path.expanduser(claude_dir)) else "shared"}
+
+    def profile_of(self, agent):
+        """The profile a job of this agent runs under (docs/SPEC-limit-handoff.md 3.1): fleet or shared."""
+        return self.profiles().get(agent + "_profile") if agent in ("claude", "codex") else None
+
+    @staticmethod
+    def budget_support():
+        return True
+
+    def default_models(self):
+        """The model each agent CLI uses when a task names none (from its settings), when one is configured."""
+        found = {}
+        claude_dir = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+        settings = read_json(Path(os.path.expanduser(claude_dir)) / "settings.json", {})
+        if isinstance(settings, dict) and isinstance(settings.get("model"), str) and settings["model"]:
+            found["claude"] = settings["model"]
+        codex_home = (str(self.codex_profile_dir()) if self.codex_profile_ready()
+                      else os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
+        try:
+            text = (Path(os.path.expanduser(codex_home)) / "config.toml").read_text(encoding="utf-8")
+            match = re.search(r'^model\s*=\s*"([^"\n]+)"', text, re.MULTILINE)
+            if match:
+                found["codex"] = match.group(1)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return found
+
+    @staticmethod
+    def _add(total, value):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return (total or 0) + value
+        return total
+
+    def _usage(self, job, lines):
+        """Tokens for the current run only. Claude: the stream-json result event; Codex: turn.completed events,
+        summed. `input` counts uncached input for both (Codex reports cached tokens inside input_tokens)."""
+        usage = {"input": None, "output": None, "cached": None, "cost_usd": None, "model": None}
+        turns = None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("type")
+            if kind == "result":
+                if isinstance(event.get("num_turns"), int) and not isinstance(event.get("num_turns"), bool):
+                    turns = event["num_turns"]
+                found = event.get("usage")
+                if isinstance(found, dict):
+                    usage["input"] = self._add(self._add(None, found.get("input_tokens")),
+                                               found.get("cache_creation_input_tokens"))
+                    usage["output"] = self._add(None, found.get("output_tokens"))
+                    usage["cached"] = self._add(None, found.get("cache_read_input_tokens"))
+                    cost = event.get("total_cost_usd")
+                    usage["cost_usd"] = (float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                                         else None)
+                    models = event.get("modelUsage")
+                    if isinstance(models, dict) and models:
+                        def output_tokens(name):
+                            value = models[name].get("outputTokens") if isinstance(models[name], dict) else None
+                            return value if isinstance(value, (int, float)) else 0
+                        usage["model"] = max(models, key=output_tokens)
+            elif kind == "turn.completed" and isinstance(event.get("usage"), dict):
+                found = event["usage"]
+                given, cached = found.get("input_tokens"), found.get("cached_input_tokens")
+                if isinstance(given, int) and isinstance(cached, int):
+                    given = given - cached
+                usage["input"] = self._add(usage["input"], given)
+                usage["cached"] = self._add(usage["cached"], cached)
+                usage["output"] = self._add(usage["output"], found.get("output_tokens"))
+                usage["model"] = job.get("model")
+        return usage, turns
+
+    @staticmethod
+    def _codex_error(job, lines):
+        """The last error Codex reported in this run: an `error:` line on its stderr (events.jsonl holds both
+        streams) or the message of an `error` or `turn.failed` event. Only for a failed run; redacted and trimmed.
+        A usage-limit message ("... try again at 1:00 PM") reaches the controller this way."""
+        if job.get("agent") != "codex" or job.get("exit_code") in (0, None):
+            return None
+        found = None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                if ERROR_LINE.match(line):
+                    found = re.sub(r"^\s*error\b\s*[:\-]\s*", "error: ", line, count=1, flags=re.IGNORECASE)
+                continue
+            if not isinstance(event, dict):
+                continue
+            message = None
+            if event.get("type") == "error":
+                message = event.get("message")
+            elif event.get("type") == "turn.failed":
+                failure = event.get("error")
+                message = failure.get("message") if isinstance(failure, dict) else failure
+            if isinstance(message, str) and message.strip():
+                found = message
+        return error_line(found) if found else None
+
     def _parse_events(self, job):
         raw_path = self._job_dir(job) / "events.jsonl"
         session_id = None
         result = ""
         denials = []
         try:
-            with open(raw_path, encoding="utf-8", errors="replace") as handle:
-                lines = handle.readlines()
+            with open(raw_path, "rb") as handle:
+                data = handle.read()
         except OSError:
             return
+        offset = job.get("events_offset") or 0
+        if not isinstance(offset, int) or not 0 <= offset <= len(data):
+            offset = 0
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        current = data[offset:].decode("utf-8", errors="replace").split("\n")
+        job["usage"], job["num_turns"] = self._usage(job, current)
+        job["error"] = self._codex_error(job, current)
         for line in lines:
             try:
                 event = json.loads(line)
@@ -1277,6 +1487,20 @@ class JobManager:
         policy_hash = body.get("policy_hash")
         if policy_hash is not None and (not isinstance(policy_hash, str) or len(policy_hash) > 128):
             raise HttpError(400, "invalid policy_hash")
+        if body.get("effort") is not None and body["effort"] not in EFFORTS:
+            raise HttpError(400, "effort must be low, medium or high")
+        tools = body.get("tools")
+        if tools is not None and (not isinstance(tools, list) or any(
+                not isinstance(tool, str) or not TOOL_NAME.fullmatch(tool) for tool in tools)):
+            raise HttpError(400, "tools must be a list of tool names")
+        if (tools is not None and agent == "claude" and not self._review_tools({"tools": tools, "policy": policy})
+                and not self._has_flag("claude", "--tools")):
+            # The effective list (after the policy's claude_allow narrows it) is empty. Only `--tools ""` can say
+            # "no tools"; without it the restriction would be lost and the CLI's default tools would return.
+            raise HttpError(400, "this Claude CLI can't run with no tools (no --tools option)")
+        max_turns = body.get("max_turns")
+        if max_turns is not None and (not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1):
+            raise HttpError(400, "max_turns must be a positive integer")
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
@@ -1288,7 +1512,11 @@ class JobManager:
         repo = self.check_path(body["repo"], policy) if body.get("repo") else None
         if repo:
             self._check_git_common_dir(repo, policy)
-        requested_cwd = self.check_path(body["cwd"], policy) if body.get("cwd") else None
+        requested_cwd = None
+        if body.get("cwd"):
+            # A read-only review may run inside a build job's worktree (it lives under this runner's own
+            # directory, which is otherwise always refused); nothing else may.
+            requested_cwd = self._review_worktree(body["cwd"], mode) or self.check_path(body["cwd"], policy)
         if requested_cwd:
             self._check_git_common_dir(requested_cwd, policy)
         with self.lock:
@@ -1334,6 +1562,8 @@ class JobManager:
                 "allowed_tools": body.get("allowed_tools") or [], "pid": None,
                 "exit_file": "exit_code.1",
                 "instructions": instructions, "policy": policy, "policy_hash": policy_hash,
+                "effort": body.get("effort"), "tools": tools, "max_turns": max_turns,
+                "profile": self.profile_of(agent), "account_label": None,
                 "timeout_minutes": min(self.max_job_minutes,
                                        policy.get("limits", {}).get("task_minutes", self.max_job_minutes)),
             }
@@ -1363,12 +1593,22 @@ class JobManager:
             elif mode == "full":
                 cmd += ["--dangerously-skip-permissions"]
             policy_tools = policy.get("tools") or {}
-            requested = [str(item) for item in (allowed_tools or [])]
-            if "claude_allow" in policy_tools:
-                permitted = policy_tools["claude_allow"]
-                requested = ([item for item in requested if item in permitted] if requested else list(permitted))
+            review_tools = self._review_tools(job) if job.get("tools") is not None else None  # [] means no tools
+            if review_tools is not None:
+                requested = review_tools  # a review gets only its tool list (already narrowed by the policy)
+            else:
+                requested = [str(item) for item in (allowed_tools or [])]
+                if "claude_allow" in policy_tools:
+                    permitted = policy_tools["claude_allow"]
+                    requested = ([item for item in requested if item in permitted] if requested else list(permitted))
             if requested:
                 cmd += ["--allowedTools", ",".join(requested)]
+            if review_tools is not None and self._has_flag("claude", "--tools"):
+                cmd += ["--tools", ",".join(review_tools)]
+            if job.get("effort") and self._has_flag("claude", "--effort"):
+                cmd += ["--effort", job["effort"]]
+            if job.get("max_turns") and self._has_flag("claude", "--max-turns"):
+                cmd += ["--max-turns", str(job["max_turns"])]
             denied = list(policy_tools.get("claude_deny") or [])
             if (policy.get("network") or {}).get("agents") == "deny":
                 denied += ["WebFetch", "WebSearch"]
@@ -1392,6 +1632,8 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                if job.get("effort"):
+                    cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd += [job["session_id"], "-"]  # "-": prompt from stdin
             else:
                 cmd = [self.agents[agent], "exec", "--json"]
@@ -1403,6 +1645,8 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                if job.get("effort"):
+                    cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd.append("-")  # "-": prompt from stdin
             return cmd
         request_path = self._job_dir(job) / ("ollama-request.%d.json" % job["runs"])
@@ -1425,8 +1669,14 @@ class JobManager:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(delivered)
         prompt_in = open(prompt_path, "rb")
-        raw = open(job_dir / "events.jsonl", "ab", buffering=0)
-        env = os.environ.copy()
+        events_path = job_dir / "events.jsonl"
+        try:
+            job["events_offset"] = events_path.stat().st_size  # usage counts this run only
+        except OSError:
+            job["events_offset"] = 0
+        job.update({"usage": None, "num_turns": None, "error": None, "limits_applied": self.limits_applied(job)})
+        raw = open(events_path, "ab", buffering=0)
+        env = self.agent_env(job["agent"], os.environ.copy())
         env["PATH"] = agent_search_path()
         try:
             if os.name == "nt":
@@ -1476,6 +1726,11 @@ class JobManager:
             if MODE_RANK[mode] > MODE_RANK[self.max_mode]:
                 self.audit("mode_denied", "requested resume mode exceeded max_mode")
                 raise HttpError(403, "requested mode exceeds runner max_mode")
+            effort = body.get("effort")
+            if effort is not None and effort not in EFFORTS:
+                raise HttpError(400, "effort must be low, medium or high")
+            if effort:
+                job["effort"] = effort
             job.update({
                 "mode": mode, "state": "running", "exit_code": None,
                 "ended_at": None, "runs": job["runs"] + 1,
@@ -1593,7 +1848,35 @@ class JobManager:
         offset = min(max(offset, 0), len(data))
         return {"offset": len(data), "text": data[offset:].decode("utf-8", errors="replace")}
 
-    def diff(self, job):
+    def _tree(self, job):
+        """Hash of the job's working tree as it is now (untracked files included, ignored ones not). Uses a
+        temporary GIT_INDEX_FILE, so the job's own index is never touched."""
+        index = self._job_dir(job) / ("tree-index.%d" % time.time_ns())
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+        try:
+            done = None
+            # Start from HEAD's tree so tracked files that match .gitignore stay in; then take the worktree as is.
+            for args in (["git", "read-tree", "HEAD"], ["git", "add", "-A"], ["git", "write-tree"]):
+                done = subprocess.run(args, cwd=job["cwd"], env=env, capture_output=True, text=True,
+                                      errors="replace", timeout=120)
+                if done.returncode:
+                    raise HttpError(500, trim(done.stderr or "git %s failed" % args[1]))
+            return done.stdout.strip()
+        finally:
+            for path in (index, Path(str(index) + ".lock")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def tree(self, job):
+        inside = subprocess.run(["git", "-C", job["cwd"], "rev-parse", "--show-toplevel"], capture_output=True,
+                                text=True)
+        if inside.returncode:
+            raise HttpError(400, "job cwd is not a git repository")
+        return {"tree": self._tree(job)}
+
+    def diff(self, job, since=None):
         cwd = job["cwd"]
         inside = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True,
@@ -1608,6 +1891,15 @@ class JobManager:
             if result.returncode and not (allow_difference and result.returncode == 1):
                 raise HttpError(500, trim(result.stderr or "git diff failed"))
             return result.stdout
+
+        if since is not None:
+            # The change since an earlier tree hash (a re-review sees only this delta).
+            if not isinstance(since, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", since):
+                raise HttpError(400, "since must be a tree hash")
+            current = self._tree(job)
+            stat = git_output(["git", "diff", "--stat", since, current, "--"])
+            patch = git_output(["git", "diff", "--no-ext-diff", since, current, "--"])
+            return {"stat": stat[-200000:], "diff": patch[-200000:], "tree": current}
 
         stat = git_output(["git", "diff", "--stat", base, "--"])
         patch = git_output(["git", "diff", "--no-ext-diff", base, "--"])
@@ -2100,7 +2392,9 @@ class Handler(BaseHTTPRequestHandler):
                     "allowed_roots": self.manager.allowed_roots,
                     "max_jobs": self.manager.max_jobs,
                     "models": self.manager.models_config,
-                    "policy": True, "network": self.manager.network}
+                    "policy": True, "network": self.manager.network,
+                    "budget": self.manager.budget_support(), **self.manager.profiles(),
+                    "default_models": self.manager.default_models()}
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:
@@ -2129,7 +2423,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise HttpError(400, "invalid offset")
                 return self.manager.log(job, offset)
             if method == "GET" and len(parts) == 3 and parts[2] == "diff":
-                return self.manager.diff(job)
+                return self.manager.diff(job, since=parse_qs(parsed.query).get("since", [None])[0])
+            if method == "POST" and len(parts) == 3 and parts[2] == "tree":
+                return self.manager.tree(job)
             if method == "POST" and len(parts) == 3 and parts[2] == "message":
                 return self.manager.message(job, self._body())
             if method == "POST" and len(parts) == 3 and parts[2] == "cancel":

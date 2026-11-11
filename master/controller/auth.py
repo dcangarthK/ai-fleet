@@ -25,7 +25,7 @@ COOKIE = "fleet_token"
 # Writes that change who/what is trusted. Everything else that writes is "operate".
 ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies",
                "/api/skills", "/api/enroll", "/api/notify-rules", "/api/export", "/api/import",
-               "/api/tasks/approve", "/api/tasks/reject")
+               "/api/tasks/approve", "/api/tasks/reject", "/api/budget/rules")
 PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete"}
 
 
@@ -87,7 +87,14 @@ async def access_control(request: Request, call_next):
     if port != PUBLIC_PORT:
         if host not in LOCAL_HOSTS:
             return _deny("forbidden host")
-        request.state.scope = "admin"
+        scope = "admin"
+        # A local client may ask for *less* access (the orchestrator's MCP bridge sends operate), never more.
+        lowered = (request.headers.get("x-fleet-scope") or "").strip().lower()
+        if lowered in SCOPES and SCOPES.index(lowered) < SCOPES.index(scope):
+            scope = lowered
+            if SCOPES.index(scope) < SCOPES.index(required_scope(request)):
+                return _deny(f"needs {required_scope(request)} access; this request asked for {scope}")
+        request.state.scope = scope
         request.state.actor = "local"
         return await call_next(request)
     if request.url.path == "/login" or public_enrollment:

@@ -69,11 +69,10 @@ curl -s -X POST http://127.0.0.1:8700/api/enroll -H 'Content-Type: application/j
   -d '{"name":"laptop2"}' | python3 -m json.tool
 ```
 You get `code` (10 characters, single use, 30 minutes) and `command`. The command should start with
-`curl -fsS https://<master>:8443/enroll/onboard.sh`. If it says `https://<master>/...` (no `:8443`) or a literal
-`<master>`, step M3's public host isn't set: add `:8443` yourself when you type the address in L3.
-The console's `command` still ends in `--enroll <code>`, which would put the code in Laptop 2's shell history. Use
-it only for the `https://<master>:8443` address; in L3, type `--enroll` without the code and paste the code at the
-hidden prompt.
+`curl -fsS https://<master>:8443/enroll/onboard.sh` and end in `--enroll --master https://<master>:8443`; the
+code is not in it (the console shows it separately), so it never lands in Laptop 2's shell history. If it says
+`https://<master>/...` (no `:8443`) or a literal `<master>`, step M3's public host isn't set: add `:8443` yourself
+when you type the address in L3.
 
 ## Laptop 2 side
 
@@ -90,8 +89,8 @@ The script therefore enrolls first and tags the machine afterwards.
 ```bash
 curl -fsSo ~/onboard.sh https://<master>:8443/enroll/onboard.sh && bash -n ~/onboard.sh && echo ok
 ```
-Running from a file is better than `curl ... | bash`: you can read it first and re-run it later. (Piping also
-works now; prompts read the terminal.)
+Running from a file is better than `curl ... | bash`: you can read it first and re-run it later. (The console's
+piped command also works: prompts, including the hidden code prompt, read the terminal.)
 
 ### L3. Run it with the code
 ```bash

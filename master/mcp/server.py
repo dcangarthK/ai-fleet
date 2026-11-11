@@ -238,9 +238,12 @@ def gateway_health(role: str = "fast") -> str:
         return f"down: {e.__class__.__name__}: {str(e)[:200]}"
 
 
-def _controller(method: str, path: str, body: dict | None = None) -> str:
+def _controller(method: str, path: str, body: dict | None = None, scope: str | None = None) -> str:
+    headers = {"X-Fleet": "1"}
+    if scope:
+        headers["X-Fleet-Scope"] = scope  # the controller only ever lowers access with this, never raises it
     try:
-        r = httpx.request(method, f"{CONTROLLER}{path}", json=body, headers={"X-Fleet": "1"}, timeout=30)
+        r = httpx.request(method, f"{CONTROLLER}{path}", json=body, headers=headers, timeout=30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__}); is it running on the master?"
     if r.is_error:
@@ -251,7 +254,9 @@ def _controller(method: str, path: str, body: dict | None = None) -> str:
 @mcp.tool()
 def fleet_status() -> str:
     """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
-    including each runner's available gate profiles, and current role assignments."""
+    including each runner's available gate profiles, and current role assignments. `budget.models` gives each
+    paid model's budget status: ok / limited (limited_until) / soft (at its soft daily budget), running vs
+    max_concurrent and today's fleet tokens."""
     return _controller("GET", "/api/fleet")
 
 
@@ -304,7 +309,7 @@ def _q(value: str) -> str:
 @mcp.tool()
 def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: str = "auto-edit",
                gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
-               role: str = "") -> str:
+               role: str = "", kind: str = "", effort: str = "", budget_override: str = "") -> str:
     """Delegate work to an agent on the fleet and return immediately with the task.
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
@@ -312,13 +317,19 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
           | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
     node: optional; otherwise the least-busy eligible node is picked. role selects its instruction/policy layer.
     parent_id links sub-tasks.
+    kind: always name it: build, fix, review, re_review, final_review, security_review, merge, benchmark, check,
+          draft. The budget rules (console Budget page) refuse a kind a model is not for, with the cheaper model
+          to use; a limited model's task is queued until its reset (or rerouted, per the rules).
+    effort: low | medium | high; default from the budget rules.
+    budget_override: the owner's (admin) decision only; this bridge's calls have operate scope, so it is refused.
     Then use wait_tasks; don't poll."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
     for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node,
-                 "parent_id": parent_id, "role": role}.items():
+                 "parent_id": parent_id, "role": role, "kind": kind, "effort": effort,
+                 "budget_override": budget_override}.items():
         if v:
             body[k] = v
-    return _controller("POST", "/api/tasks", body)
+    return _controller("POST", "/api/tasks", body, scope="operate")
 
 
 @mcp.tool()

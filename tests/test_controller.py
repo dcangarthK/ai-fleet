@@ -361,6 +361,12 @@ class ControllerTests(unittest.TestCase):
         self.c.post("/api/nodes/master/ceiling", json={"mode": "full"}, headers=W)
         r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)
         self.assertEqual(r.status_code, 403, r.text)  # ceiling allows it, but no policy pre-approves it
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True,
+                                             "policy": {"auto_approve": {"agents": ["claude"], "full_mode": True}}}, headers=W)
+        self.assertEqual(r.status_code, 403, r.text)  # a task can't pre-approve itself
+        r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p",
+                                             "policy": {"auto_approve": {"agents": ["claude"], "denied_tools": True}}}, headers=W)
+        self.assertEqual(r.status_code, 403, r.text)
         self.c.put("/api/policies/agent/claude", json={"body": {"auto_approve": {"agents": ["claude"], "full_mode": True}}}, headers=W)
         try:
             r = self.c.post("/api/tasks", json={"agent": "claude", "prompt": "p", "trusted_bypass": True}, headers=W)

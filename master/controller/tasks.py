@@ -524,6 +524,9 @@ async def create_task(t: TaskIn) -> dict:
         get_task(t.parent_id)
     if t.role is not None and not ROLE_RE.fullmatch(t.role):
         raise HTTPException(400, "role must be lowercase letters, digits, dashes")
+    if t.policy is not None and "auto_approve" in t.policy:
+        # Approval authority comes only from the stored (admin-only) policy layers, never from the request.
+        raise HTTPException(403, "a task can't grant itself auto-approval; set it on the Policies page")
     try:
         if t.policy is not None:
             fleet_policy.validate(t.policy)

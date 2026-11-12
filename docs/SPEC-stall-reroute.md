@@ -1,6 +1,7 @@
 # Spec: stalled-task detection and rerouting (Part E)
 
-Status: draft v1, 2026-11-12. Needs the owner's OK before building.
+Status: draft v2, 2026-11-12, after Fable's spec review (t-c3a35126, request changes). §12 lists what changed and
+overrides earlier sections where they differ. Needs the owner's OK before building.
 
 ## 1. Problem
 Codex task `t-253101a7` stayed "working" for about 7.5 hours while its process was dead.
@@ -164,3 +165,82 @@ If a step's model is limited or stalls, the orchestrator moves it by hand by the
 - Automatic retries of reviews (a stalled review is rerouted, never duplicated).
 - Speculative parallel builds of the same task.
 - Paid availability probes.
+
+## 12. Changes in v2 (Fable review t-c3a35126); these override §3–§10 where they differ
+**Step 0 of the build: root cause.** Find out why t-253101a7 outlived the runner's own `max_job_minutes` (120)
+kill, and why `/jobs/{id}` returned 500 (suspect: the monitor thread was lost on a runner restart). Fix it, with a
+regression test, before anything else.
+
+1. **Ranking (fixes "doesn't allocate across the fleet").** A new `rank_slots(kind, exclude, task)` over
+   `resources()`. It replaces `candidate_slots` for stalls and for `agent="auto"`, and is shared with
+   `admit(reroute=…)` so there is one ranking. The filters are:
+   - `kind_allowed` for the kind, plus a hard-coded rule 0 check (Fable is never chosen for build, fix or test),
+     with its own test;
+   - free concurrency, not limited, not signed out;
+   - independence: for review and test kinds, exclude every model in `build_attempts()`, and carry `review_of`
+     over.
+
+   It orders by tier (cheap → standard → premium, per the budget table for the kind), then idle first. Cross-vendor
+   is **allowed for stalls** (a stalled Codex build may go to Sonnet). The `limits.fallbacks` list is not used.
+   - **Nodes:** v1 reroutes to slots **on the same node**, because the checkpoint branch lives there. All paid
+     accounts are on the master today, so this covers the real case. Moving across nodes, which needs a way to
+     transport the branch, is out of scope.
+2. **Liveness.** `alive` = the agent process **or** the gate process is alive. Gate output counts as activity.
+   Ollama jobs have no gate phase of their own.
+3. **Dead is already handled.** A dead pid already becomes `lost → interrupted`. Both `interrupted` and
+   `failed(stalled)` trigger a reroute. "Dead" in §3 then means only that the runner still says `running` while
+   the pid is gone, which the root-cause fix should make impossible.
+4. **Idle needs all three:** no output, no file changes **and** no CPU-time growth in the job's process group
+   (`ps -o time` summed over the group; `psutil` is not required). Then `idle_after = clamp(0.25 × job timeout,
+   15 min, 40 min)`.
+5. **Nudge, made possible.**
+   - For Claude and Codex: under the task lock, cancel the job, then transition `working → failed`
+     (`failure_reason="stalled"`, a new value in `lineage.failure_reason`) with usage recorded. Then one
+     `tasks.resume()` on the same session, which is admission-checked, with the nudge text. `stall.nudged_at` is
+     persisted, so it nudges once even across restarts.
+   - Ollama: no session, so it goes straight to reroute.
+   - A second stall after the nudge leads to reroute.
+6. **Stop without being cancelled.** All of this happens under the task lock:
+   - cancel, then read the job the runner returns;
+   - if the job already exited cleanly, settle it normally;
+   - otherwise set `failed(stalled)`, not `cancelled`, so the poll mapping can't win.
+
+   The work-item lock comes after, in Part C's lock order.
+7. **A stall branch of its own.** `handle_handoff(task_id, reason)` has a stall branch that never calls
+   `schedule_wait` and never says "usage limit". It gets:
+   - a `reason` parameter for the checkpoint commit message and `handoff_prompt`;
+   - its own wait state, "stalled; no free slot", retried each sweep pass;
+   - a new budget rule `on_task_stall` (default `reroute` for every kind, reviews included).
+8. **Runner `/health` gains `jobs`.**
+   - Each entry is `{id, state, alive, gate_alive, idle_s, activity_src, cpu_s}`, at most 32 jobs and about 160 B
+     each (well inside the 64 KB heartbeat cap).
+   - `idle_s` is computed on the **runner's** clock, so clock skew doesn't matter.
+   - The controller's health parser is extended explicitly for this field.
+   - A runner that doesn't send `jobs` (an old node) gives the verdict `unknown`, never dead or idle.
+9. **Safe reroute.** Reroute only after the runner confirms the process group is gone **and** the checkpoint
+   commit succeeded.
+   - If the checkpoint fails (for example 409 on a leftover `index.lock` or mid-rebase), or the runner can't
+     confirm the process is gone: set `failed(stalled)` with `stall.escalated=true`, leave the worktree untouched,
+     raise a red alert, and let the owner or orchestrator act.
+   - It never deletes lock files.
+10. **Escalation.** It is not a new state: `failed` + `stall.escalated=true` + the `task.escalated` event. The cap
+    is 2 **stall** reroutes per work item, counted separately from limit handoffs (`stall_handoffs_in_chain`).
+11. **Timeouts.** Overrun means 80% of the runner's `max_job_minutes` (or the task's timeout) has passed. It raises
+    an alert only, and the runner's own kill stays the hard stop. The runner's cancel behaviour is kept as it is
+    (SIGTERM, then SIGKILL after about 1 s).
+12. **Auto allocation.** `agent="auto"` (and `model` omitted) asks the controller to pick with `rank_slots`. A plain
+    omitted `model` keeps today's meaning: the node's default.
+13. **Pipelines.** For pipeline-owned tasks, the pipeline poll calls `handle_handoff(…, "stalled")`. A stall is not
+    a gate-failure round, and it doesn't use up one of the 3 fix rounds.
+14. **Resources.** `GET /api/resources` already exists (`handoff.py:650`). It gains tier, `kind_allowed`
+    summaries and idle state, and `fleet_status` includes it. No probes.
+15. **Grace.** No verdicts for 120 s after a controller restart, nor during a task's first 5 min.
+16. **Delivery changes.**
+    - Split out step 1b0: `agent="auto"` and `rank_slots`, built first.
+    - The real stall test (step 6) runs on **Haiku**, not on the builder's model, so no independence waiver is
+      needed.
+      - It uses two Ollama-capable slots, a small model and `qwen2.5:3b`, so a reroute target exists.
+      - Alternatively, it kills a Claude Haiku job and expects the reroute to Sonnet.
+    - Codex step 4 is the final **whole-branch** review. Fable step 5 is a **delta** green light on Codex's fixes
+      only.
+    - The summary reports spend: models, task counts and limit hits.

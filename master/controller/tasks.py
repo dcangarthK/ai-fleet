@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
+import loopheal
 import policy as fleet_policy
 import presence
 import usage as capacity_usage
@@ -883,6 +884,8 @@ def outcome(task: dict, job: dict) -> str:
         return "working"
     if state == "cancelled":
         return "cancelled"
+    if state == "capped" and loopheal.is_loop_cut(job):
+        return loopheal.loop_outcome(task, job)  # Part G 5: failed(loop), or a verdict review settled
     if state == "capped":
         return "capped"  # hit its turn/context cap (Part H 3.2): settled, with a handoff summary; not a failure
     if state == "lost":
@@ -943,6 +946,9 @@ async def _poll_task(task_id: str) -> bool:
         clear_unreachable(task_id)
         new = outcome(task, job)
         fields = job_fields(job)
+        if loopheal.is_loop_cut(job):
+            fields.update(loopheal.loop_fields(new, job))
+            emit(task_id, "task.loop_cut", {"title": task["title"], "reason": loopheal.loop_reason(job), "settled": new})
         agent_end = iso_epoch(job.get("ended_at"))
         if agent_end and task.get("run_started_at"):
             fields.update(close_run(task, agent_end))  # the gate's run time isn't agent time

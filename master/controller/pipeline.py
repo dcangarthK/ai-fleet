@@ -9,6 +9,9 @@ import grounding
 TERMINAL = {"ready", "failed", "escalated", "cancelled"}
 
 
+GATE_BOUNCES = 3  # automatic gate-failure rounds back to the builder (pipeline step 4)
+
+
 def _now() -> float:
     return time.time()
 
@@ -242,6 +245,15 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
             p["state"] = "escalated"
             _history(p, "escalated", note="builder task capped (turn or context cap); needs a continuation")
             return p, []
+        if state == "failed" and event.get("failure_reason") == "gate_failed" and event.get("gate_text"):
+            # Gate bounce (Part G 6): the stateless count (tasks.gate_failures) is the one fix-round counter.
+            failures = int(event.get("gate_failures") or 1)
+            if failures > GATE_BOUNCES:
+                p["state"] = "escalated"
+                _history(p, "escalated", note=f"gate failed {failures} times; bounce rounds used up")
+                return p, []
+            _history(p, "building", note=f"gate failed: bounce {failures} of {GATE_BOUNCES} to the builder")
+            return p, [{"do": "message_build", "text": event["gate_text"]}]
         if state in ("failed", "interrupted", "cancelled"):
             p["state"] = "failed"
             _history(p, "failed", note=f"builder task {state}")

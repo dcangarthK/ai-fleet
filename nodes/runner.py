@@ -86,6 +86,54 @@ DEFAULT_TOKEN_CAPS = {
     "test": {"turns": 20},
 }
 STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"
+_REFUSED_RE = re.compile(r"permission|denied|not allowed|requires approval|refus|haven't granted", re.I)
+
+
+class LoopDetector:
+    """Part G 5: a session that hits the same refused tool twice, or repeats the same step (same call or text, same
+    result) `turns` times in a row (default 3, FLEET_LOOP_TURNS), is looping. Fed from the job's stream-json events;
+    `found` becomes a cap dict `{"reason": "loop", ...}` once, and stays."""
+
+    def __init__(self, turns=None):
+        try:
+            self.turns = int(turns or os.environ.get("FLEET_LOOP_TURNS") or 3)
+        except ValueError:
+            self.turns = 3
+        self.turns = max(2, self.turns)
+        self.calls, self.refused, self.steps, self.found = {}, {}, [], None
+
+    def _hit(self, kind, detail):
+        if self.found is None:
+            self.found = {"reason": "loop", "kind": kind, "detail": detail[:200]}
+
+    def _step(self, sig):
+        self.steps.append(sig)
+        del self.steps[:-self.turns]
+        if len(self.steps) == self.turns and len(set(self.steps)) == 1:
+            self._hit("no_progress", "%d identical steps in a row" % self.turns)
+
+    def assistant(self, message):
+        content = message.get("content") if isinstance(message.get("content"), list) else []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                key = json.dumps([block.get("name"), block.get("input")], sort_keys=True, default=str)
+                self.calls[block["id"]] = (block.get("name") or "tool", key)
+            elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                self._step(("text", block["text"].strip()))
+
+    def tool_result(self, block):
+        name, key = self.calls.get(block.get("tool_use_id"), (None, None))
+        if name is None:
+            return
+        body = block.get("content")
+        text = body if isinstance(body, str) else json.dumps(body, default=str)
+        if block.get("is_error") and _REFUSED_RE.search(text or ""):
+            self.refused[key] = self.refused.get(key, 0) + 1
+            if self.refused[key] >= 2:
+                self._hit("refused_tool", "%s refused twice" % name)
+        self._step((key, text))
 CAP_STOP_SECONDS = 300  # the one resumed run that commits and writes the handoff
 
 
@@ -1763,6 +1811,8 @@ class JobManager:
                     st["dirty"] = True
             elif kind == "assistant":
                 message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                if job.get("agent") == "claude":
+                    st.setdefault("loop", LoopDetector()).assistant(message)
                 mid = message.get("id")
                 if isinstance(mid, str) and mid not in st["ids"]:
                     st["ids"].add(mid)
@@ -1785,8 +1835,16 @@ class JobManager:
                 for block in message.get("content") if isinstance(message.get("content"), list) else []:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         st["pending"].discard(block.get("tool_use_id"))
+                        if job.get("agent") == "claude":
+                            st.setdefault("loop", LoopDetector()).tool_result(block)
+                if st["cap"] is None and st.get("loop") and st["loop"].found:
+                    st["cap"] = st["loop"].found
                 if st["cap"] is not None and not st["pending"]:
                     return st["cap"]  # every tool call of the turn that hit the cap has its result
+            if st["cap"] is None and st.get("loop") and st["loop"].found:
+                st["cap"] = st["loop"].found
+        if st["cap"] is not None and st["cap"].get("reason") == "loop" and not st["pending"]:
+            return st["cap"]  # a text-only loop has no tool result to wait for
         return None
 
     def _cap_stop(self, job, cap):
@@ -1814,7 +1872,7 @@ class JobManager:
             self._parse_events_safe(job)
         stop = "terminated"
         try:
-            if self._stop_run(job):
+            if cap.get("reason") != "loop" and self._stop_run(job):  # a loop is cut off: no resume
                 stop = "resumed"
         except Exception as exc:
             self.audit("cap_resume_failed", "%s: %s" % (job.get("id"), error_line(exc)))

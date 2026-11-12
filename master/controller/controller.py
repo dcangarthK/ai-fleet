@@ -43,6 +43,7 @@ import evaluations  # noqa: E402
 import grounding  # noqa: E402
 import handoff  # noqa: E402
 import live  # noqa: E402
+import loopheal  # noqa: E402
 import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
@@ -1939,7 +1940,8 @@ async def poll_pipeline(pipeline_id: str) -> None:
                     await _pipeline_step_unlocked(p, {"type": "build_limited", **result})
                 return
             if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped"):
-                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"]})
+                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"],
+                                                  **loopheal.gate_event(build)})
             return
         if p["state"] == "review_waiting":
             due = [r["waiting_until"] for r in p["reviews"].values() if r.get("waiting_until") is not None]

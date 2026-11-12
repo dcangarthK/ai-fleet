@@ -50,7 +50,11 @@ DEFAULT_RULES = {
                # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
                # or wait for the reset. By kind; "*" covers the rest.
                "on_task_limit": {"build": "handoff", "fix": "handoff", "*": "wait"},
-               "max_handoffs": 2, "allow_cross_vendor": False},
+               "max_handoffs": 2, "allow_cross_vendor": False,
+               # A stalled task (docs/SPEC-stall-reroute.md 12.7, 12.10): reroute its work, or leave it for the
+               # owner. By kind; "*" covers the rest. At most max_stall_handoffs stall reroutes per work item,
+               # counted apart from limit handoffs; the next stall escalates.
+               "on_task_stall": {"*": "reroute"}, "max_stall_handoffs": 2},
     "effort_ladder": {"build": ["medium", "medium", "high"], "fix": ["low", "medium", "high"], "re_review": ["low", "medium"]},
     "limit_scope": "model",
     "review_exec": {"tools": ["Read", "Grep", "Glob"], "max_turns": 8, "task_minutes": 15},
@@ -179,7 +183,14 @@ def validate_rules(body) -> dict:
     limits = body["limits"]
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
-    _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor"}, "limits")
+    _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor", "on_task_stall",
+                      "max_stall_handoffs"}, "limits")
+    on_stall = limits.get("on_task_stall", {})
+    if not isinstance(on_stall, dict) or any((k != "*" and k not in KINDS) or v not in ("reroute", "leave")
+                                             for k, v in on_stall.items()):
+        raise ValueError("limits.on_task_stall maps task kinds (or '*') to reroute or leave")
+    if "max_stall_handoffs" in limits and not _int(limits["max_stall_handoffs"], 0):
+        raise ValueError("limits.max_stall_handoffs must be a non-negative integer")
     if limits.get("on_limit") not in ("queue", "fallback", "refuse"):
         raise ValueError("limits.on_limit must be queue, fallback or refuse")
     on_task = limits.get("on_task_limit", {})
@@ -774,6 +785,9 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     resolved = model or (node_default_model(agent, node_id) if paid else None)
     key = match_key(rules, agent, resolved)
+    if rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind):
+        raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "
+                           "guidance only)")
     if paid and key is None and rules.get("unlisted") == "refuse":
         raise Refusal(400, f"{identity(agent, resolved)} is not in the budget rules, which refuse unlisted models")
     if paid and key is None and resolved is None:
@@ -802,6 +816,9 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                             f_agent, f_model or node_default_model(f_agent, node_id)) in forbidden):
                         continue
                     f_key = match_key(rules, f_agent, f_model)
+                    if rule0_blocks(f_agent, f_model or node_default_model(f_agent, node_id), kind) or \
+                            rule0_blocks(f_agent, f_key, kind):
+                        continue  # rule 0: never reroute a build, fix or test onto Fable
                     if f_key and not kind_allowed(rules["models"][f_key], kind, origin_kind):
                         continue
                     f_entry = entry_for(rules, f_key, f_agent)
@@ -853,6 +870,20 @@ def on_task_limit(rules: dict, kind: str | None) -> str:
     """What a task of this kind does when it stops at a usage limit: "handoff" or "wait" (docs/SPEC-limit-handoff.md 4.2)."""
     table = (rules.get("limits") or {}).get("on_task_limit") or DEFAULT_RULES["limits"]["on_task_limit"]
     return table.get(kind or "draft") or table.get("*") or "wait"
+
+
+def on_task_stall(rules: dict, kind: str | None) -> str:
+    """What a stalled task of this kind does: "reroute" (the default for every kind, reviews included) or "leave"."""
+    table = (rules.get("limits") or {}).get("on_task_stall") or DEFAULT_RULES["limits"]["on_task_stall"]
+    return table.get(kind or "draft") or table.get("*") or "reroute"
+
+
+# CLAUDE.md rule 0, hard-coded whatever the rules say: Fable never builds, fixes or tests.
+RULE0_KINDS = {"build", "fix", "test"}
+
+
+def rule0_blocks(agent: str | None, model_or_key: str | None, kind: str) -> bool:
+    return kind in RULE0_KINDS and agent == "claude" and "fable" in (model_or_key or "").lower()
 
 
 def admission(task: dict, now: float | None = None, *, effort: str | None = None) -> dict:

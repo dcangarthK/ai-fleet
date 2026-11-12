@@ -21,6 +21,7 @@ import budget
 import handoff
 import presence
 import redaction
+import stall
 import tasks
 from events import emit
 from store import db, task_root
@@ -43,6 +44,7 @@ WARNINGS: dict[tuple[str, str], bool] = {}  # (node, event type) -> active
 def reset_state() -> None:
     for store in (ACTIVITY_POSTS, HEARTBEAT_ACCEPTED, HEARTBEAT_FAILURES, LIVENESS, WARNINGS):
         store.clear()
+    stall.reset_state()
 
 
 def _rate(bucket: collections.deque, limit: int, window: float, now: float) -> bool:
@@ -473,10 +475,13 @@ def machine_row(node: dict, now: float) -> dict:
 
 
 ALERT_TYPES = ("task.awaiting_approval", "task.blocked", "task.failed", "budget.limit", "budget.rules_invalid",
-               "budget.limit_unrecognised", "node.swap_high", "node.disk_low", "node.runner_offline")
+               "budget.limit_unrecognised", "node.swap_high", "node.disk_low", "node.runner_offline",
+               "task.escalated", "task.overrun", "task.stall_alert")  # Part E: a stall left for the owner; a run past 80% of its time
 
 
-TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.awaiting_approval": "awaiting_approval"}
+TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.awaiting_approval": "awaiting_approval",
+                    "task.escalated": "failed", "task.overrun": "working",
+                    "task.stall_alert": "working"}
 
 
 def _task_alert_open(c, task_id: str | None, kind: str) -> bool:
@@ -642,7 +647,7 @@ async def heartbeat(request: Request):
         return JSONResponse({"detail": "heartbeat body must be an object"}, status_code=400)
     HEARTBEAT_ACCEPTED[node_id] = now
     stored = _json(row["runner"]) or {}
-    health = {**stored, **tasks.clean_health(body)}  # what a poll could report, nothing more
+    health = tasks.merge_health(stored, body)  # what a poll could report, nothing more
     with db() as c:
         # Never resets runner_fails: a push proves runner-to-controller only (12.1).
         c.execute("UPDATE nodes SET runner=?, heartbeat_at=?, runner_age_s=? WHERE id=?",
@@ -688,6 +693,12 @@ async def sweep_once(now: float | None = None) -> None:
             if _transition((node["id"], kind), active, False):
                 emit(None, kind, {"node": node["id"], "name": node.get("name"),
                                   "state": "started" if active else "cleared"})
+    if stall.AUTO:
+        # Part E: stalled tasks (its own 120 s restart grace and per-task grace apply inside).
+        try:
+            await stall.sweep(now)
+        except Exception as exc:  # the failover below must still run
+            print(f"stall pass failed: {exc!r}")
     if grace:
         return
     # Level-triggered failover (12.6): every pass, each placed queued task on a node that is OFFLINE now.

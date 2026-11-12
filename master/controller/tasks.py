@@ -98,7 +98,10 @@ def runner_url(node: dict) -> str:
 
 
 class RunnerError(HTTPException):
-    pass
+    """`transport` is True when the runner never answered (connection refused, timeout): not an HTTP error answer."""
+    def __init__(self, status_code: int, detail: str, transport: bool = False):
+        super().__init__(status_code, detail)
+        self.transport = transport
 
 
 def node_runner_token(node: dict | str) -> str:
@@ -125,7 +128,7 @@ async def runner_call(node: dict, method: str, path: str, body: dict | None = No
         async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
             r = await client.request(method, runner_url(node) + path, json=body, headers=headers)
     except httpx.HTTPError as e:
-        raise RunnerError(502, f"runner unreachable: {e.__class__.__name__}")
+        raise RunnerError(502, f"runner unreachable: {e.__class__.__name__}", transport=True)
     if r.is_error:
         detail = r.json().get("detail", r.text) if r.content else r.reason_phrase
         raise RunnerError(502 if r.status_code >= 500 else r.status_code, f"runner: {detail}")
@@ -157,8 +160,55 @@ HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "runn
                  "age_s"}
 
 
+MAX_HEALTH_JOBS = 32
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+ACTIVITY_SOURCES = ("output", "files", "cpu", "session")
+
+
+def _number_or_none(value, cap: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < 0:
+        return None
+    return float(min(value, cap))
+
+
+def clean_jobs(value) -> list[dict] | None:
+    """The runner's per-job activity (docs/SPEC-stall-reroute.md 12.8), parsed explicitly: at most 32 entries, only
+    the contract's fields, wrong types become null. None when the value isn't a list (the field is dropped)."""
+    if not isinstance(value, list):
+        return None
+    out = []
+    for entry in value:
+        if len(out) >= MAX_HEALTH_JOBS:
+            break
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not JOB_ID_RE.fullmatch(entry["id"]):
+            continue
+        state = entry.get("state")
+        out.append({"id": entry["id"],
+                    "state": state if isinstance(state, str) and len(state) <= 16 else None,
+                    "alive": entry["alive"] if isinstance(entry.get("alive"), bool) else None,
+                    "gate_alive": entry["gate_alive"] if isinstance(entry.get("gate_alive"), bool) else None,
+                    # computed on the runner's clock, so clock skew doesn't matter; capped at a week
+                    "idle_s": _number_or_none(entry.get("idle_s"), 7 * 86400),
+                    "activity_src": entry["activity_src"] if entry.get("activity_src") in ACTIVITY_SOURCES else None,
+                    "cpu_s": _number_or_none(entry.get("cpu_s"), 1e9)})
+    return out
+
+
 def clean_health(body: dict) -> dict:
-    return {k: v for k, v in body.items() if k in HEALTH_FIELDS}
+    out = {k: v for k, v in body.items() if k in HEALTH_FIELDS}
+    jobs = clean_jobs(body.get("jobs")) if "jobs" in body else None
+    if jobs is not None:
+        out["jobs"] = jobs
+    return out
+
+
+def merge_health(stored: dict, body: dict) -> dict:
+    """A heartbeat's report over the stored one. A report without "jobs" (an older runner) removes the stored list,
+    so stale job data never looks fresh (its verdict is "unknown")."""
+    out = {**stored, **clean_health(body)}
+    if "jobs" not in clean_health(body):
+        out.pop("jobs", None)
+    return out
 
 
 def health_age(body: dict | None) -> float | None:
@@ -431,7 +481,7 @@ def task_view(row) -> dict:
     t["outcome"] = json.loads(t["outcome"]) if t.get("outcome") else None
     t["hidden"] = bool(t.get("hidden"))
     for field, fallback in (("usage", None), ("prompt_omitted", []), ("launch_extra", {}), ("limits_applied", None),
-                            ("independence", None), ("placement", None), ("chain", None)):
+                            ("independence", None), ("placement", None), ("chain", None), ("stall", None)):
         try:
             t[field] = json.loads(t[field]) if t.get(field) else fallback
         except (TypeError, ValueError):
@@ -511,7 +561,8 @@ def update(task_id: str, **fields) -> None:
         c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
 
 
-def transition(task: dict, expected: set[str], state: str, *, where_node: str | None = None, **fields) -> bool:
+def transition(task: dict, expected: set[str], state: str, *, where_node: str | None = None, quiet: bool = False,
+               **fields) -> bool:
     """Move the task to `state` only if it is still in one of `expected` (and, with `where_node`, still on that
     node: a start's lease, docs/SPEC-live-monitor.md 12.5). Returns whether it moved."""
     now = time.time()
@@ -541,7 +592,7 @@ def transition(task: dict, expected: set[str], state: str, *, where_node: str | 
         node_sql, node_args = (" AND node_id=?", (where_node,)) if where_node is not None else ("", ())
         moved = c.execute(f"UPDATE tasks SET state=?, {cols} WHERE id=? AND state IN ({marks}){node_sql}",
                           (state, *fields.values(), task["id"], *expected, *node_args)).rowcount == 1
-    if moved and state != task["state"]:
+    if moved and state != task["state"] and not quiet:  # quiet: the caller emits its own event (a stall nudge)
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
     if moved and state in ("review", "done"):
@@ -745,19 +796,40 @@ async def poll_task(task_id: str) -> None:
         await handoff.after_settled(task_id)
 
 
+# Consecutive GET /jobs/{id} polls per working task that the runner answered with an HTTP error
+# (docs/SPEC-stall-reroute.md 3: 3 in a row while the runner's /health still answers is an "unreachable" job).
+# Transport errors (the runner restarting, the network) never count. UNREACHABLE_SINCE holds when the run of
+# failures began: only a /health report newer than that proves the runner itself is up. In memory: a restart
+# starts counting again.
+UNREACHABLE_POLLS: dict[str, int] = {}
+UNREACHABLE_SINCE: dict[str, float] = {}
+
+
+def clear_unreachable(task_id: str) -> None:
+    UNREACHABLE_POLLS.pop(task_id, None)
+    UNREACHABLE_SINCE.pop(task_id, None)
+
+
 async def _poll_task(task_id: str) -> bool:
-    """Poll one working task; True when it just settled as failed."""
+    """Poll one working task; True when it just settled as failed or interrupted (both may be handed on)."""
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] != "working":
+            clear_unreachable(task_id)
             return False
         try:
             job = await runner_call(node_of(task), "GET", f"/jobs/{task_id}", timeout=5)
         except HTTPException as e:
+            if getattr(e, "transport", False):
+                clear_unreachable(task_id)  # the runner itself is unreachable: Part D's concern, not this job's
+            else:
+                UNREACHABLE_SINCE.setdefault(task_id, time.time())
+                UNREACHABLE_POLLS[task_id] = UNREACHABLE_POLLS.get(task_id, 0) + 1
             if not task["error"]:
                 update(task_id, error=str(e.detail))
                 emit(task_id, "task.unreachable", {"title": task["title"], "node": task["node_id"]})
             return False
+        clear_unreachable(task_id)
         new = outcome(task, job)
         fields = job_fields(job)
         agent_end = iso_epoch(job.get("ended_at"))
@@ -769,12 +841,14 @@ async def _poll_task(task_id: str) -> bool:
             record_usage(task_id)
             if new == "blocked":
                 await auto_approve_denials(get_task(task_id))
-            return new == "failed"
+            return new in ("failed", "interrupted")
     return False
 
 
-def record_usage(task_id: str) -> None:
-    """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none)."""
+def record_usage(task_id: str, outcome_name: str | None = None) -> None:
+    """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none). `outcome_name`
+    overrides the derived outcome (a stall nudge's run is "nudged", not an error)."""
+    forced = outcome_name
     t = get_task(task_id)
     if not t.get("started_at"):
         return  # never ran
@@ -787,6 +861,7 @@ def record_usage(task_id: str) -> None:
         outcome_name = "cancelled"
     else:
         outcome_name = "error"
+    outcome_name = forced or outcome_name
     run = t.get("runs") or 1
     prompt_bytes = t.get("prompt_bytes") if run <= 1 else t.get("run_prompt_bytes")
     row = {"ts": time.time(), "task_id": task_id, "run": run, "agent": t["agent"],
@@ -1021,11 +1096,40 @@ def check_independence(t: "TaskIn", kind: str, agent: str, model: str | None, no
     return None
 
 
+def allocate(t: "TaskIn") -> None:
+    """agent="auto" (docs/SPEC-stall-reroute.md 12.12): the best slot from handoff.rank_slots (the one ranking,
+    shared with stall reroutes) fills in agent, model and profile; admission then runs on it as for any task. An
+    explicit model or profile isn't allowed with "auto": name a real agent for that."""
+    import handoff  # local import: handoff builds on this module
+    if t.model or t.profile:
+        raise HTTPException(400, "agent 'auto' lets the controller pick the model and account: leave model and "
+                                 "profile out, or name the agent")
+    kind = t.kind or ("build" if t.gate else "draft")
+    if kind not in budget.KINDS:
+        raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
+    node_id = None
+    if t.review_of:
+        with db() as c:
+            row = c.execute("SELECT node_id FROM tasks WHERE id=?", (t.review_of,)).fetchone()
+        node_id = row["node_id"] if row else None
+    elif t.node:
+        found = [n["id"] for n in node_rows() if n["id"] == t.node or n.get("name") == t.node]
+        node_id = found[0] if len(found) == 1 else t.node
+    choices = handoff.rank_slots(kind, (), {"id": t.parent_id or t.review_of, "node_id": node_id})
+    if not choices:
+        raise HTTPException(409, f"no free slot can take a {kind} task now")
+    slot = choices[0]
+    t.agent, t.model, t.profile = slot["agent"], slot["model"], slot["profile"]
+
+
 async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None = None,
                       pipeline: bool = False) -> dict:
     """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
     `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to.
     `pipeline` (in-process only): the pipeline engine, whose reviews keep their own independence check."""
+    allocated = t.agent == "auto"
+    if allocated:
+        allocate(t)  # docs/SPEC-stall-reroute.md 12.12: the controller picks agent, model and account
     if t.agent not in AGENTS:
         raise HTTPException(400, f"agent must be one of {sorted(AGENTS)}")
     if t.mode not in MODES:
@@ -1163,7 +1267,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     waiver = check_independence(t, kind, agent, model, node, pipeline, slot["profile"] if slot else "fleet")
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
-              "accounts": [s["node"] for s in on_account] if on_account else None}
+              "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -1219,6 +1323,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             emit(task_id, "task.independence_waived", {"title": part_title, "kind": kind, "agent": agent,
                                                        "model": model, "reason": waiver["reason"]})
         if index == 0:
+            if allocated:
+                emit(task_id, "task.allocated", {"title": part_title, "agent": agent, "model": model,
+                                                 "label": slot["label"] if slot else None, "node": node["id"],
+                                                 "kind": kind})
             if decision["routed_from"]:
                 budget.log_decision("rerouted", f"{decision['routed_from']} is limited; sent to {decision['identity']}",
                                     task_id=task_id, title=part_title, routed_from=decision["routed_from"],

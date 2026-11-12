@@ -10,7 +10,8 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
   anything the owner will read as a document in normal prose.
 - **claude-mem** is the shared memory layer. When it is installed, use it to recall earlier work before re-reading
   files or re-deriving decisions, and let it record what you learn. If it is not installed, say so once in your
-  report; don't install it yourself.
+  report; don't install it yourself. In a fleet task, if a claude-mem (or any) tool call is refused once, don't
+  call it again: carry on without it and note it in your report. Retrying a refused tool only burns tokens.
 - Send less: point at files instead of pasting them; never paste generated files, lockfiles or large logs.
 - **Auto-compact at 200,000 tokens.** Every profile's settings.json sets `autoCompactWindow: 200000` and
   `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` (the documented minimum is 100,000).

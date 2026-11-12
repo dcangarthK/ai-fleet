@@ -104,6 +104,7 @@ Known traps that have cost gate rounds. Check each before you commit:
 - Don't run the gate yourself. The runner runs `fleet-gate` once after you finish.
 - Commit on your task branch before you stop. Uncommitted work is lost to review.
 - Stay inside the task's files. Ask via the task (blocked) instead of guessing at scope.
+- A tool refused once (permission, review read-only mode) stays refused. Don't retry it; report and finish.
 - Codex tasks: `gpt-5.6-terra`, medium effort (see Paid-model budget 1a).
 
 ## Rules

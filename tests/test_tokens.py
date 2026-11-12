@@ -1,4 +1,3 @@
-import asyncio
 import importlib.util
 import json
 import os
@@ -10,7 +9,13 @@ from pathlib import Path
 
 
 MODULE = Path(__file__).parents[1] / "master" / "controller" / "tokens.py"
-if "fastapi" not in sys.modules:
+try:
+    import fastapi as _real_fastapi
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+except ImportError:
+    _real_fastapi = None
+if _real_fastapi is None:
     fastapi = types.ModuleType("fastapi")
     class APIRouter:
         def get(self, _path):
@@ -28,8 +33,8 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(tokens)
 
 
-def assistant(input_tokens, cache_read, cache_write, output, content=None):
-    return {"type": "assistant", "message": {"usage": {
+def assistant(input_tokens, cache_read, cache_write, output, content=None, msg_id=None, **extra):
+    return {"type": "assistant", **extra, "message": {"id": msg_id, "usage": {
         "input_tokens": input_tokens, "cache_read_input_tokens": cache_read,
         "cache_creation_input_tokens": cache_write, "output_tokens": output},
         "content": content or []}}
@@ -42,6 +47,8 @@ class TokenTelemetryTests(unittest.TestCase):
         self.previous = os.environ.get("FLEET_JOBS_DIR")
         os.environ["FLEET_JOBS_DIR"] = str(self.jobs)
         tokens._cache.clear()
+        self._kinds = {"t-b01d0002": "build"}
+        tokens._kind = lambda task_id: self._kinds.get(task_id)
 
     def tearDown(self):
         if self.previous is None:
@@ -58,7 +65,7 @@ class TokenTelemetryTests(unittest.TestCase):
         return path
 
     def test_parses_peak_turn_one_tools_and_init(self):
-        path = self.write("build-one", [
+        path = self.write("t-b01d0001", [
             {"type": "system", "subtype": "init", "tools": [1, 2], "mcp_servers": [1], "skills": [], "plugins": [1]},
             assistant(100, 200, 300, 40, [{"type": "tool_use", "name": "Read"}]),
             assistant(900, 1, 2, 50, [{"type": "tool_use", "name": "Read"}]),
@@ -70,28 +77,62 @@ class TokenTelemetryTests(unittest.TestCase):
         self.assertEqual(result["init"], {"tools": 2, "mcp": 1, "skills": 0, "plugins": 1})
 
     def test_skips_malformed_and_non_object_lines(self):
-        path = self.write("test-bad", ["not json", "[]", assistant(3, 0, 0, 1)])
+        path = self.write("t-7e570001", ["not json", "[]", assistant(3, 0, 0, 1)])
         self.assertEqual(tokens.parse_events(path)["turns"], 1)
 
     def test_eighty_percent_alert(self):
-        self.write("build-cap", [assistant(120_000, 0, 0, 1)])
-        row = asyncio.run(tokens.task_tokens("build-cap"))
+        self.write("t-b01d0002", [assistant(120_000, 0, 0, 1)])
+        row = (tokens.task_tokens("t-b01d0002"))
         self.assertIn("context_80_percent", row["alerts"])
 
     def test_turn_one_alert(self):
-        self.write("test-lean", [assistant(8_001, 0, 0, 1)])
-        row = asyncio.run(tokens.task_tokens("test-lean"))
+        self.write("t-7e570002", [assistant(8_001, 0, 0, 1)])
+        row = (tokens.task_tokens("t-7e570002"))
         self.assertIn("turn1_context", row["alerts"])
 
     def test_since_filter_and_unknown_task(self):
-        old = self.write("test-old", [assistant(1, 0, 0, 1)])
+        old = self.write("t-7e570003", [assistant(1, 0, 0, 1)])
         os.utime(old, (1, 1))
-        self.write("test-new", [assistant(1, 0, 0, 1)])
-        rows = asyncio.run(tokens.tokens_since(since=2))["tasks"]
-        self.assertEqual([row["task_id"] for row in rows], ["test-new"])
+        self.write("t-7e570004", [assistant(1, 0, 0, 1)])
+        rows = (tokens.tokens_since(since=2))["tasks"]
+        self.assertEqual([row["task_id"] for row in rows], ["t-7e570004"])
         with self.assertRaises(tokens.HTTPException) as raised:
-            asyncio.run(tokens.task_tokens("missing"))
+            (tokens.task_tokens("t-ffffff"))
         self.assertEqual(raised.exception.status_code, 404)
+
+    def test_dedupes_message_id_and_skips_sidechain(self):
+        tool = lambda i: [{"type": "tool_use", "name": "Read", "id": i}]
+        path = self.write("t-b01d0003", [
+            assistant(10, 0, 0, 5, tool("a"), msg_id="m1"),
+            assistant(10, 0, 0, 7, tool("b"), msg_id="m1"),
+            assistant(50, 0, 0, 1, msg_id="m2"),
+            assistant(9_999, 0, 0, 9, msg_id="m3", parent_tool_use_id="x"),
+        ])
+        result = tokens.parse_events(path)
+        self.assertEqual((result["turns"], result["peak_context"], result["output"]), (2, 50, 8))
+        self.assertEqual(result["tool_counts"], {"Read": 2})
+
+    def test_kind_from_record_and_float_caps(self):
+        self.write("t-b01d0004", [assistant(100, 0, 0, 1)])
+        self.assertNotIn("kind", tokens.task_tokens("t-b01d0004"))
+        self._kinds["t-b01d0004"] = "build"
+        os.environ["FLEET_TOKEN_CAPS"] = '{"build": {"context": 120.5}}'
+        try:
+            self.assertIn("context_80_percent", tokens.task_tokens("t-b01d0004")["alerts"])
+        finally:
+            os.environ.pop("FLEET_TOKEN_CAPS", None)
+
+    @unittest.skipIf(_real_fastapi is None, "fastapi not installed")
+    def test_routes_via_testclient(self):
+        self.write("t-b01d0005", [assistant(1, 0, 0, 1, msg_id="m")])
+        app = FastAPI()
+        app.include_router(tokens.router)
+        client = TestClient(app)
+        one = client.get("/api/tokens/t-b01d0005")
+        self.assertEqual((one.status_code, one.json()["turns"]), (200, 1))
+        self.assertEqual([r["task_id"] for r in client.get("/api/tokens").json()["tasks"]], ["t-b01d0005"])
+        self.assertEqual(client.get("/api/tokens/..%2Fescape").status_code, 404)
+        self.assertEqual(client.get("/api/tokens/bad-id").status_code, 404)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ DEFAULT_CAPS = {
     "test": {"turns": 20},
 }
 LEAN_TURN1_TARGET = 8_000
+TASK_ID_RE = re.compile(r"^t-[0-9a-f]{6,}$")
 _cache: dict[str, tuple[str, int, int, dict[str, Any]]] = {}
 
 
@@ -44,6 +46,11 @@ def _number(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _cap(value: object) -> float:
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    return value if ok else 0
+
+
 def parse_events(path: Path, job_id: str | None = None) -> dict[str, Any]:
     """Stream a Claude JSONL event log into a conservative telemetry summary."""
     job_id = job_id or path.parent.name
@@ -57,8 +64,10 @@ def parse_events(path: Path, job_id: str | None = None) -> dict[str, Any]:
         return dict(cached[3])
 
     result = _empty(job_id)
-    with path.open(encoding="utf-8") as events:
-        for line in events:
+    usages: dict[object, dict] = {}
+    seen_tools: set[object] = set()
+    with path.open(encoding="utf-8", errors="replace") as events:
+        for lineno, line in enumerate(events):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -73,32 +82,41 @@ def parse_events(path: Path, job_id: str | None = None) -> dict[str, Any]:
                     "plugins": _count(event.get("plugins")),
                 }
                 continue
-            if event.get("type") != "assistant":
+            if event.get("type") != "assistant" or event.get("parent_tool_use_id"):
                 continue
             message = event.get("message")
             usage = message.get("usage") if isinstance(message, dict) else None
             if not isinstance(usage, dict):
                 continue
-            input_tokens = _number(usage.get("input_tokens"))
-            cache_read = _number(usage.get("cache_read_input_tokens"))
-            cache_write = _number(usage.get("cache_creation_input_tokens"))
-            output = _number(usage.get("output_tokens"))
-            context = input_tokens + cache_read + cache_write
-            result["turns"] += 1
-            result["peak_context"] = max(result["peak_context"], context)
-            if result["turns"] == 1:
-                result["turn1_context"] = context
-            result["cache_read"] += cache_read
-            result["cache_write"] += cache_write
-            result["output"] += output
+            # One API message is streamed as several events (one per content block) sharing id and usage.
+            msg_id = message.get("id")
+            key = msg_id if isinstance(msg_id, str) and msg_id else ("line", lineno)
+            usages[key] = usage  # dict keeps first-seen order; last usage wins
             content = message.get("content")
             if isinstance(content, list):
                 counts = result["tool_counts"]
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_use":
                         name = block.get("name")
+                        block_id = block.get("id")
+                        if block_id is not None:
+                            if block_id in seen_tools:
+                                continue
+                            seen_tools.add(block_id)
                         if isinstance(name, str):
                             counts[name] = counts.get(name, 0) + 1
+    for usage in usages.values():
+        input_tokens = _number(usage.get("input_tokens"))
+        cache_read = _number(usage.get("cache_read_input_tokens"))
+        cache_write = _number(usage.get("cache_creation_input_tokens"))
+        context = input_tokens + cache_read + cache_write
+        result["turns"] += 1
+        result["peak_context"] = max(result["peak_context"], context)
+        if result["turns"] == 1:
+            result["turn1_context"] = context
+        result["cache_read"] += cache_read
+        result["cache_write"] += cache_write
+        result["output"] += _number(usage.get("output_tokens"))
     _cache[job_id] = (*marker, dict(result))
     return result
 
@@ -116,15 +134,20 @@ def _caps() -> dict[str, dict[str, int]]:
         return caps
     for kind, values in supplied.items():
         if isinstance(kind, str) and isinstance(values, dict):
-            caps[kind] = {key: _number(value) for key, value in values.items()}
+            caps[kind] = {key: _cap(value) for key, value in values.items()}
     return caps
 
 
 def _kind(task_id: str) -> str | None:
-    for kind in _caps():
-        if task_id == kind or task_id.startswith(f"{kind}-") or task_id.startswith(f"{kind}_"):
-            return kind
-    return None
+    """Task kind from the tasks table; None when unknown (never guessed from the id)."""
+    try:
+        from store import db
+        with db() as c:
+            row = c.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()
+    except Exception:
+        return None
+    kind = row["kind"] if row else None
+    return kind if isinstance(kind, str) and kind else None
 
 
 def _row(path: Path) -> dict[str, Any]:
@@ -158,18 +181,27 @@ def _event_paths() -> list[Path]:
 
 
 @router.get("/api/tokens/{task_id}")
-async def task_tokens(task_id: str) -> dict[str, Any]:
-    path = _jobs_dir() / task_id / "events.jsonl"
-    if not path.is_file():
+def task_tokens(task_id: str) -> dict[str, Any]:
+    if not TASK_ID_RE.match(task_id):
         raise HTTPException(status_code=404, detail="task token log not found")
-    return _row(path)
+    root = _jobs_dir().resolve()
+    path = (root / task_id / "events.jsonl").resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="task token log not found")
+    try:
+        return _row(path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="task token log not found")
 
 
 @router.get("/api/tokens")
-async def tokens_since(since: float | None = Query(default=None)) -> dict[str, list[dict[str, Any]]]:
+def tokens_since(since: float | None = Query(default=None)) -> dict[str, list[dict[str, Any]]]:
     rows = []
     for path in _event_paths():
-        if since is not None and path.stat().st_mtime < since:
+        try:
+            if since is not None and path.stat().st_mtime < since:
+                continue
+            rows.append(_row(path))
+        except FileNotFoundError:
             continue
-        rows.append(_row(path))
     return {"tasks": rows}

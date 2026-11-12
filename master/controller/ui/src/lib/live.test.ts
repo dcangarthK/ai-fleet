@@ -68,9 +68,9 @@ describe("queue", () => {
 describe("stage strips", () => {
   it("highlights current, reds failed, counts repeats", () => {
     expect(stageChip({ stage: "build", state: "done" })).toEqual({ className: "stage stage-done", label: "build" });
-    expect(stageChip({ stage: "test-1", state: "current", count: 2 })).toEqual({ className: "stage stage-current", label: "test-1 ×2" });
-    expect(stageChip({ stage: "review", state: "failed", count: 1 }).className).toBe("stage stage-failed");
-    expect(stageChip({ stage: "merge", state: "next", count: 0 }).label).toBe("merge");
+    expect(stageChip({ stage: "test-1", state: "current", attempts: 2 })).toEqual({ className: "stage stage-current", label: "test-1 ×2" });
+    expect(stageChip({ stage: "review", state: "failed", attempts: 1 }).className).toBe("stage stage-failed");
+    expect(stageChip({ stage: "merge", state: "next", attempts: 0 }).label).toBe("merge");
     expect(stageChip({ stage: "review", state: "superseded" }).className).toBe("stage stage-superseded");
   });
   it("colours a stage by the controller's tone, so a settled attempt is never red", () => {
@@ -108,10 +108,12 @@ describe("machines and accounts", () => {
     expect(accountTone(a("no recent limit"))).toBe("ok");
   });
   it("alert text never needs more than the title or node", () => {
-    expect(alertText({ id: 1, ts: NOW, task_id: null, type: "node.swap_high", title: null, node: "master", state: "started" }))
-      .toBe("Swap high: master");
-    expect(alertText({ id: 2, ts: NOW, task_id: "t-1", type: "budget.limit", title: "Build", node: null, state: null }))
-      .toBe("Usage limit: Build");
+    expect(alertText({ id: 1, ts: NOW, task_id: null, type: "node.swap_high", title: null, node: "master", event_state: "started",
+      state: "open", resolved_by: null })).toBe("Swap high: master");
+    expect(alertText({ id: 2, ts: NOW, task_id: "t-1", type: "budget.limit", title: "Build", node: null, event_state: null,
+      state: "open", resolved_by: null })).toBe("Usage limit: Build");
+    expect(alertText({ id: 3, ts: NOW, task_id: "t-1", type: "task.failed", title: "Build", node: null, event_state: null,
+      state: "resolved", resolved_by: "settled" })).toBe("Failed (resolved: settled): Build");
   });
 });
 

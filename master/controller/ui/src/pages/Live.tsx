@@ -48,7 +48,9 @@ export function LivePage() {
   const phone = usePhone();
   const now = useNow();
   // SSE invalidation (Shell) refetches it on any event; a hidden tab neither refetches nor polls.
-  const live = useQuery({ queryKey: ["live"], queryFn: () => get<Live>("/api/live"), ...liveQueryOptions(visible) });
+  const [showResolved, setShowResolved] = useState(false);  // alerts: open by default, resolved behind a toggle
+  const live = useQuery({ queryKey: ["live", showResolved],
+    queryFn: () => get<Live>(`/api/live${showResolved ? "?include_resolved=1" : ""}`), ...liveQueryOptions(visible) });
   const data = live.data;
   const updated = data ? Math.max(0, Math.round(now - data.generated_at)) : null;
   return (
@@ -59,7 +61,7 @@ export function LivePage() {
       {!data && live.isLoading && <p className="quiet">Loading…</p>}
       {data && (
         <div className="live">
-          <PresenceSection data={data} now={now} />
+          <PresenceSection data={data} now={now} showResolved={showResolved} onShowResolved={setShowResolved} />
           <AccountsSection data={data} />
           <WorkersSection data={data} now={now} phone={phone} />
           <ChainsSection data={data} />
@@ -72,7 +74,8 @@ export function LivePage() {
   );
 }
 
-function PresenceSection({ data, now }: { data: Live; now: number }) {
+function PresenceSection({ data, now, showResolved, onShowResolved }:
+  { data: Live; now: number; showResolved: boolean; onShowResolved: (v: boolean) => void }) {
   return (
     <Section title="Orchestrator" aside={<Link to="/activity">all activity</Link>}>
       {data.orchestrator.length === 0 && (
@@ -84,10 +87,13 @@ function PresenceSection({ data, now }: { data: Live; now: number }) {
           {presenceText(s, now)}{s.stale && !s.stale_since && " (stale)"}
         </p>
       ))}
+      <label className="small quiet">
+        <input type="checkbox" checked={showResolved} onChange={(e) => onShowResolved(e.target.checked)} /> show resolved alerts
+      </label>
       {data.alerts.length > 0 && (
         <ul className="live-alerts" aria-label="Recent alerts">
           {data.alerts.map((a) => (
-            <li key={a.id}>
+            <li key={a.id} className={a.state === "resolved" ? "quiet" : undefined}>
               <span className="quiet small">{ago(a.ts, now)}</span>{" "}
               {a.task_id ? <Link to={`/tasks?task=${a.task_id}`}>{alertText(a)}</Link>
                 : a.node ? <Link to={`/nodes/${encodeURIComponent(a.node)}`}>{alertText(a)}</Link> : alertText(a)}

@@ -225,8 +225,11 @@ class ChainTests(LiveBase):
         found = next(ch for ch in self.live()["chains"] if ch.get("root_id") == build["id"])
         states = {s["stage"]: s for s in found["stages"]}
         self.assertEqual(states["build"]["state"], "done")
-        self.assertEqual((states["test-1"]["state"], states["test-1"]["count"], states["test-1"]["task_id"]),
+        self.assertEqual((states["test-1"]["state"], states["test-1"]["attempts"], states["test-1"]["task_id"]),
                          ("current", 2, t2["id"]))
+        self.assertNotIn("count", states["test-1"])  # Part F req 10: renamed to what it counts, tasks (attempts)
+        self.assertEqual(states["build"]["attempts"], 1)
+        self.assertEqual(states["merge"]["attempts"], 0)
         self.assertEqual(states["review"]["state"], "superseded")
         self.assertEqual(states["merge"]["state"], "next")
         with db() as c:
@@ -858,6 +861,82 @@ class AlertTests(LiveBase):
         for _ in range(12):
             self.event(self.task("done"), "task.failed")
         self.assertTrue(set(keep) <= {a["task_id"] for a in self.live()["alerts"]})
+
+    # ---- Part F req 4: computed state open | resolved, resolved_by, include_resolved ----
+
+    def all_alerts(self, tid):
+        r = self.c.get("/api/live", params={"include_resolved": 1})
+        self.assertEqual(r.status_code, 200, r.text)
+        return [a for a in r.json()["alerts"] if a["task_id"] == tid]
+
+    def test_open_alerts_carry_state_and_default_hides_resolved(self):
+        tid = self.task("failed")
+        self.event(tid, "task.failed")
+        (a,) = [a for a in self.live()["alerts"] if a["task_id"] == tid]
+        self.assertEqual((a["state"], a["resolved_by"]), ("open", None))
+        done = self.task("failed", resolution=json.dumps({"kind": "done_elsewhere"}))
+        self.event(done, "task.failed")
+        self.assertEqual(self.kinds(done), [])
+
+    def test_resolved_by_settled(self):
+        tid = self.task("failed", resolution=json.dumps({"kind": "done_elsewhere"}))
+        self.event(tid, "task.failed")
+        (a,) = self.all_alerts(tid)
+        self.assertEqual((a["state"], a["resolved_by"]), ("resolved", "settled"))
+        out = self.task("failed", outcome=json.dumps({"kind": "merged", "commit": "abc"}))
+        self.event(out, "task.failed")
+        self.assertEqual(self.all_alerts(out)[0]["resolved_by"], "settled")
+
+    def test_resolved_by_superseded(self):
+        tid = self.task("failed")
+        self.event(tid, "task.failed")
+        self.task("done", parent_id=tid, created_at=time.time() + 1)
+        (a,) = self.all_alerts(tid)
+        self.assertEqual((a["state"], a["resolved_by"]), ("resolved", "superseded"))
+
+    def test_a_hidden_task_alert_is_not_open(self):
+        tid = self.task("failed", hidden=1)
+        self.event(tid, "task.failed")
+        self.assertEqual(self.kinds(tid), [])
+
+    def test_resolved_by_limit_reset(self):
+        account = "claude:test-acct-2"
+        tid = self.task("done")
+        self.event(tid, "budget.limit", agent="claude", account=account)
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (task_id, ts, agent, model, identity, outcome, resets_at, account) "
+                      "VALUES (?,?,?,?,?,?,?,?)", (tid, time.time(), "claude", None, "claude", "limit",
+                                                   time.time() + 3600, account))
+            c.execute("INSERT INTO limit_resets (account, at, actor) VALUES (?,?,?)", (account, time.time() + 1, "t"))
+        self.assertNotIn("budget.limit", [a["type"] for a in self.live()["alerts"]])
+        got = [a for a in self.all_alerts(tid) if a["type"] == "budget.limit"]
+        self.assertEqual([(a["state"], a["resolved_by"]) for a in got], [("resolved", "limit_reset")])
+
+    def test_resolved_by_node_recovered(self):
+        node = "node-x"
+
+        def add(kind, **data):
+            with db() as c:
+                c.execute("INSERT INTO events (ts, task_id, type, data) VALUES (?,?,?,?)",
+                          (time.time(), None, kind, json.dumps({"node": node} | data)))
+
+        def mine(**params):
+            return [a for a in self.c.get("/api/live", params=params).json()["alerts"] if a["node"] == node]
+        add("node.runner_offline")
+        self.assertEqual([a["state"] for a in mine()], ["open"])
+        add("node.runner_online")
+        self.assertEqual(mine(), [])
+        got = mine(include_resolved=1)
+        self.assertEqual([(a["state"], a["resolved_by"]) for a in got], [("resolved", "node_recovered")])
+        add("node.disk_low", state="cleared")  # a cleared warning is resolved too
+        self.assertFalse([a for a in mine() if a["type"] == "node.disk_low"])
+
+    def test_resolved_do_not_crowd_out_open(self):
+        for _ in range(15):
+            self.event(self.task("done"), "task.failed")
+        keep = self.task("failed")
+        self.event(keep, "task.failed")
+        self.assertEqual(len(self.kinds(keep)), 1)
 
 
 class SweepTests(LiveBase):

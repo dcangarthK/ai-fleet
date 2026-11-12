@@ -62,7 +62,8 @@ export interface Stage {
   state: "done" | "current" | "next" | "failed" | "superseded";
   /** The controller's label and tone for the stage's latest attempt (same as /api/work); absent for pipeline strips. */
   display?: { tone: "running" | "ok" | "paused" | "attention" | "resolved" | "muted"; label: string } | null;
-  count?: number;
+  /** Tasks (attempts) in this stage; 0 when it has not started. */
+  attempts?: number;
   task_id?: string | null;
   agent?: string;
   model?: string;
@@ -132,7 +133,11 @@ export interface Alert {
   type: string;
   title: string | null;
   node: string | null;
-  state: string | null;
+  /** The event's own state (a node warning "started" or "cleared"). */
+  event_state: string | null;
+  /** Computed on every call (Part F req 4). */
+  state: "open" | "resolved";
+  resolved_by: "settled" | "superseded" | "limit_reset" | "node_recovered" | null;
 }
 
 export interface Live {
@@ -212,7 +217,7 @@ export function queueText(q: QueueRow): string {
 
 /** A stage chip: its class (current highlighted, failed red) and its label, with "×2" for a repeat. */
 export function stageChip(s: Stage): { className: string; label: string } {
-  const repeat = (s.count ?? 0) > 1 ? ` ×${s.count}` : "";
+  const repeat = (s.attempts ?? 0) > 1 ? ` ×${s.attempts}` : "";
   // The colour follows the controller's tone when it sent one (settled attempts are never red); `state` is the
   // fallback for pipeline strips, which have no attempt.
   const className = s.display ? `stage stage-tone-${s.display.tone}` : `stage stage-${s.state}`;
@@ -261,7 +266,7 @@ export const ALERT_LABEL: Record<string, string> = {
 
 export function alertText(a: Alert): string {
   const what = ALERT_LABEL[a.type] ?? a.type;
-  const cleared = a.state === "cleared" ? " (cleared)" : "";
+  const cleared = a.state === "resolved" ? ` (resolved: ${a.resolved_by ?? "closed"})` : "";
   return `${what}${cleared}${a.title ? `: ${a.title}` : a.node ? `: ${a.node}` : ""}`;
 }
 

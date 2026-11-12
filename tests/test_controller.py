@@ -349,6 +349,12 @@ class ControllerTests(unittest.TestCase):
                                                 "model": "fake-model:1b", "prompt": "x"}, headers=W)
         self.assertEqual(400, bad.status_code)
 
+    def test_plain_ollama_job_body_omits_engine(self):
+        task = self.task(agent="ollama", model="fake-model:1b", mode="read-only")
+        self.addCleanup(self.drop_task, task["id"])
+        sent = [b for p, b in FakeRunner.calls if p == "/jobs" and b["id"] == task["id"]][0]
+        self.assertNotIn("engine", sent)
+
     def test_task_lifecycle_to_review_and_wait(self):
         t = self.task(gate="pytest")
         self.assertEqual(t["state"], "working")

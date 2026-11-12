@@ -1576,7 +1576,7 @@ class JobManager:
                 catalog = adapter.refresh()
             if not catalog["reachable"]:
                 raise HttpError(503, "dmr engine is unreachable")
-            if body.get("model") not in {item["reference"] for item in catalog["models"]}:
+            if not isinstance(body.get("model"), str) or body["model"] not in {item["reference"] for item in catalog["models"]}:
                 raise HttpError(400, "model is not in the dmr catalog")
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
             self.audit("gate_denied", "gate requested below auto-edit mode")

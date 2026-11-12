@@ -656,8 +656,8 @@ async def start(task: dict) -> None:
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
-    if task["agent"] == "ollama":
-        body["engine"] = task.get("engine") or "ollama"
+    if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":
+        body["engine"] = task["engine"]  # omitted for plain ollama: older runners reject unknown job fields
     support = budget_support(node)
     extra = task.get("launch_extra") or {}
     if profile_support(node) and task["agent"] in budget.PAID_AGENTS:

@@ -15,6 +15,9 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
 - Send less: point at files instead of pasting them; never paste generated files, lockfiles or large logs.
 - **Auto-compact at 200,000 tokens.** Every profile's settings.json sets `autoCompactWindow: 200000` and
   `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` (the documented minimum is 100,000).
+- **Orchestrator hygiene.** State lives in fleet.db and the stored plan, not in chat. Use a fresh session per batch,
+  started from the handoff summary. `wait_tasks` is event-based (no polling loop). `wait_tasks` and `task_status`
+  return state, verdict, findings and gate summary only; pass `full=True` for the whole output.
 
 ## Fleet rules that apply everywhere
 - Work in ai-fleet follows the repo's CLAUDE.md (pipeline, paid-model budget, Fable never builds/fixes/tests).

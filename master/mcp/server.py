@@ -254,6 +254,56 @@ def _controller(method: str, path: str, body: dict | None = None, scope: str | N
     return json.dumps(r.json(), indent=2)
 
 
+_FINDING_RE = re.compile(r"^\s*[-*#>\s]*\**(HIGH|MED(?:IUM)?|LOW)\b\**\s*[:\])-]", re.I)
+_VERDICT_RE = re.compile(r"^\s*[-*#>\s]*\**verdict\b", re.I)
+_GATE_RE = re.compile(r"^(Ran \d+ tests?\b|OK\b|FAILED\b)")
+_FAILING_RE = re.compile(r"^(FAIL|ERROR): ")
+
+
+def _trim_on(full: bool) -> bool:
+    """Trimmed unless full=True or FLEET_MCP_TRIM=0 (docs/SPEC-token-budget.md 3.11)."""
+    return not full and os.environ.get("FLEET_MCP_TRIM", "1") != "0"
+
+
+def trim_task(t: dict) -> dict:
+    """The orchestrator's view of a task: state, verdict line, findings (HIGH/MED/LOW blocks, each to the next
+    blank line) and gate summary (Ran/OK/FAILED lines plus failing test names). Drops the rest of the result
+    text and the gate output tail; full=True on the tools returns everything."""
+    verdict, findings, block = "", [], None
+    for line in (t.get("result") or "").splitlines():
+        if _VERDICT_RE.match(line) and not verdict:
+            verdict, block = line.strip(), None
+        elif _FINDING_RE.match(line):
+            block = [line.strip()]
+            findings.append(block)
+        elif block is not None and line.strip():
+            block.append(line.rstrip())
+        else:
+            block = None
+    gate = t.get("gate_result")
+    if isinstance(gate, dict):
+        lines = [x.strip() for x in (gate.get("output_tail") or "").splitlines()]
+        gate = {"state": gate.get("state"), "exit_code": gate.get("exit_code"),
+                "summary": [x for x in lines if _GATE_RE.match(x)],
+                "failing": [x for x in lines if _FAILING_RE.match(x)]}
+    else:
+        gate = None
+    keep = ("id", "title", "state", "agent", "node_id", "exit_code", "error", "kind", "branch")
+    return {k: t[k] for k in keep if k in t} | {"verdict": verdict, "findings": ["\n".join(b) for b in findings],
+                                                "gate": gate}
+
+
+def _full_record(t: dict) -> dict:
+    """The wait endpoint returns a 2000-char result and no gate; for a settled task read the record so the
+    trimmed view has the whole findings list and the gate summary. Falls back to what the wait returned."""
+    if t.get("state") in ("working", "queued", "pending") or not t.get("id"):
+        return t
+    try:
+        return json.loads(_controller("GET", f"/api/tasks/{_q(t['id'])}"))
+    except ValueError:
+        return t
+
+
 @mcp.tool()
 def fleet_status() -> str:
     """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
@@ -387,15 +437,20 @@ def set_chain(work_item: str, stages: list[dict]) -> str:
 
 
 @mcp.tool()
-def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False) -> str:
+def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False, full: bool = False) -> str:
     """Block until the tasks settle (review/failed/blocked/interrupted/done/cancelled), or until any one does
-    with any_of=True. Returns each task's state and final result text. Max timeout 1800s."""
+    with any_of=True. One long-poll the controller wakes on task events: nothing prints or loops while you
+    wait. Returns each task's state, verdict line, findings and gate summary; full=True returns the result text
+    (first 2000 chars) instead. Max timeout 1800s."""
     params = f"ids={','.join(_q(i) for i in ids)}&timeout={timeout_seconds}&mode={'any' if any_of else 'all'}"
     try:
         r = httpx.get(f"{CONTROLLER}/api/tasks/wait?{params}", headers=_headers(), timeout=timeout_seconds + 30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__})"
-    return json.dumps(r.json(), indent=2)
+    data = r.json()
+    if _trim_on(full) and isinstance(data.get("tasks"), list):
+        data["tasks"] = [trim_task(_full_record(t)) for t in data["tasks"]]
+    return json.dumps(data, indent=2)
 
 
 @mcp.tool()
@@ -406,9 +461,17 @@ def list_tasks(state: str = "", parent_id: str = "") -> str:
 
 
 @mcp.tool()
-def task_status(task_id: str) -> str:
-    """Full task record: state, node, branch/worktree, result, denied tools, gate result."""
-    return _controller("GET", f"/api/tasks/{_q(task_id)}")
+def task_status(task_id: str, full: bool = False) -> str:
+    """Task state, verdict line, findings (HIGH/MED/LOW blocks) and gate summary (Ran/OK/FAILED lines, failing
+    test names). full=True: the whole record (result, denied tools, gate output tail). FLEET_MCP_TRIM=0 makes
+    full the default."""
+    out = _controller("GET", f"/api/tasks/{_q(task_id)}")
+    if _trim_on(full):
+        try:
+            return json.dumps(trim_task(json.loads(out)), indent=2)
+        except ValueError:
+            pass  # an error string from _controller: pass it through
+    return out
 
 
 @mcp.tool()

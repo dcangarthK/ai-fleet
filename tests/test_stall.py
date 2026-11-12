@@ -232,6 +232,10 @@ class VerdictTests(StallBase):
     def test_fix1_unreachable_needs_a_health_report_newer_than_the_first_failure(self):
         t = self.running()
         self.set_jobs(job(t["id"]))
+        # The background poll loop answers GET /jobs/{id} fine and would clear the counters set by hand below
+        # (a rare race under load, also on main): freeze that clearing for this test.
+        self.addCleanup(setattr, tasks, "clear_unreachable", tasks.clear_unreachable)
+        tasks.clear_unreachable = lambda task_id: None
         tasks.UNREACHABLE_POLLS[t["id"]] = 5
         tasks.UNREACHABLE_SINCE[t["id"]] = time.time() + 30  # failures began after the latest /health report
         self.assertNotEqual(self.verdict(t["id"])["kind"], "unreachable")

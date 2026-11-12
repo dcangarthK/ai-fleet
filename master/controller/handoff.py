@@ -612,6 +612,9 @@ async def after_settled(task_id: str) -> None:
         return
     if not limit_failure(task) or pipeline_owned(task_id):
         return
+    import capacity  # Part G req 4: a limit failure with no sooner slot re-queues for its reset (live mode)
+    if await capacity.requeue_on_limit(task_id):
+        return
     await handle_limit(task_id)
 
 

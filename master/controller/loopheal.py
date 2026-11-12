@@ -70,6 +70,8 @@ def _stale_embed(failures, output):
 def _old_onboarding_kept(failures, output):
     """test_onboard fails on a missing needle (assertIn: "... not found in ..."): newer onboarding text is gone, which
     is what keeping an old branch's onboard.sh / onboard.ps1 in a merge looks like."""
+    if _stale_embed(failures, output):  # the two traps are exclusive: a stale embed also fails with "not found in"
+        return False
     return any("test_onboard" in name and "not found in" in err for name, err in failures)
 
 
@@ -125,8 +127,10 @@ def gate_text(gate: dict | None, round_no: int = 1) -> str:
     else:
         tail = [ln for ln in output.splitlines() if ln.strip()][-3:]
         lines.append("- no failing test names found; last output: " + " | ".join(t.strip()[:200] for t in tail))
+    # No parsed test names: match the traps against the raw output, as one pseudo failure.
+    trap_input = failures or ([(output, output)] if output else [])
     for _name, matches, line in TRAPS:
-        if matches(failures, output):
+        if matches(trap_input, output):
             lines.append("Checklist: " + line)
     return "\n".join(lines)
 

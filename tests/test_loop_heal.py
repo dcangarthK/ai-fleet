@@ -62,7 +62,7 @@ class DetectorTests(unittest.TestCase):
         det = runner.LoopDetector()
         events = []
         for n, i in enumerate("abc"):
-            events += [use(i, cmd="ls", text="Let me look again (attempt %d)" % n if False else "Let me look again"),
+            events += [use(i, cmd="ls", text="Let me look again"),
                        result(i, "same output")]
         self.assertEqual(self.feed(det, events)["kind"], "no_progress")
 
@@ -212,6 +212,19 @@ class GateBounceTests(unittest.TestCase):
         self.assertNotIn("python3 nodes/build.py` to re-embed", text)
         # conflict markers alone no longer trigger it
         self.assertNotIn("git checkout main", loopheal.gate_text({"output_tail": "<<<<<<< merge\ntest_onboard"}))
+
+    def test_traps_match_raw_output_when_no_test_names_parse(self):
+        out = "tests/test_onboard.py: runner embed out of date\n"
+        self.assertEqual(loopheal.summarize_gate_failure(out), [])
+        self.assertIn("python3 nodes/build.py", loopheal.gate_text({"output_tail": out}))
+        out = "test_onboard: '--enroll-file' not found in 'usage'\n"
+        self.assertIn("git checkout main -- nodes/onboard.sh", loopheal.gate_text({"output_tail": out}))
+
+    def test_a_stale_embed_not_found_error_gets_only_the_build_trap(self):
+        out = "FAIL: test_embed (tests.test_onboard.Embed)\nTraceback\nAssertionError: 'def main' not found in runner embed\n"
+        text = loopheal.gate_text({"output_tail": out})
+        self.assertIn("python3 nodes/build.py", text)
+        self.assertNotIn("git checkout main", text)
 
     def test_a_non_gate_failure_still_fails_the_pipeline(self):
         p, actions = PL.step(self.pipeline(), {"type": "build", "state": "failed", "failure_reason": "error"})

@@ -90,7 +90,7 @@ table via the attempt's `display`, never from `state`. The UI maps `tone` to a c
    After a controller restart, Live shows the last known presence as "stale since T" instead of empty, until a new
    request refreshes it. Covers P2-2.
 9. **Usage counts are defined.** `/api/usage` states its window and counts `failed` as unsettled failures only
-   (requirement 1). Covers P2-6.
+   (requirement 1); unsettled `interrupted` tasks count as failed too. Covers P2-6.
 10. **Chain counts.** A chain stage `count` equals the number of runs shown for that stage, or is renamed to what it
     really counts. Covers N2.
 

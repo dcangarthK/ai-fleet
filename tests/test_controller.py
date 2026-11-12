@@ -1974,6 +1974,18 @@ Imported body.
         root = failed_task(outcome=json.dumps({"kind": "merged", "commit": "abc1234"}))
         failed_task(parent_id=root)
         self.assertEqual(failed_now(), 2)  # root and child both belong to a merged work item
+        failed_task(resolution=json.dumps({"kind": "dismissed", "by": "me"}))
+        self.assertEqual(failed_now(), 2)  # dismissed: settled
+        retried = failed_task()
+        self.assertEqual(failed_now(), 3)
+        failed_task("review", parent_id=retried, link="retry")
+        self.assertEqual(failed_now(), 2)  # a failure with a retry child is not counted
+        # A failure paused on a provider limit is still unsettled: it is counted (decision pinned, req 9).
+        paused = failed_task(failure_reason="limit", resets_at=time.time() + 3600)
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (ts, task_id, run, agent, outcome) VALUES (?,?,1,'claude','limit')",
+                      (time.time(), paused))
+        self.assertEqual(failed_now(), 3)
 
     # ---------- phase 8: operations ----------
 

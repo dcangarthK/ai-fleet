@@ -81,7 +81,7 @@ function PresenceSection({ data, now }: { data: Live; now: number }) {
       )}
       {data.orchestrator.map((s) => (
         <p key={s.session} className={`live-presence ${s.stale ? "tone-quiet" : ""}`} title={`session ${s.session}`}>
-          {presenceText(s, now)}{s.stale && " (stale)"}
+          {presenceText(s, now)}{s.stale && !s.stale_since && " (stale)"}
         </p>
       ))}
       {data.alerts.length > 0 && (

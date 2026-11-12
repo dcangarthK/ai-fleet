@@ -518,17 +518,21 @@ class BudgetApiTests(unittest.TestCase):
         self.assertEqual(status["claude:claude-sonnet-*"]["state"], "limited")
 
     def test_a_codex_limit_on_stderr_becomes_a_limit_failure_with_its_reset_time(self):
+        import datetime
+        soon = datetime.datetime.now() + datetime.timedelta(hours=1)  # a passed time is never rolled to tomorrow
+        if soon.date() != datetime.date.today():
+            self.skipTest("less than an hour left in the day")
+        clock_text = f"{soon.hour % 12 or 12}:{soon.minute:02d} {'AM' if soon.hour < 12 else 'PM'}"
         t = self.ok(agent="codex", kind="build", gate="pytest")
         FakeRunner.jobs[t["id"]].update(
             state="exited", exit_code=1, result="", gate=None,
-            error="error: You've hit your usage limit. Upgrade to Pro, or try again at 1:00 PM.")
+            error=f"error: You've hit your usage limit. Upgrade to Pro, or try again at {clock_text}.")
         self.c.portal.call(tasks.poll_task, t["id"])
         got = self.c.get(f"/api/tasks/{t['id']}").json()
         self.assertEqual((got["state"], got["failure_reason"]), ("failed", "limit"))
-        self.assertIn("try again at 1:00 PM", got["error"])
-        import datetime
+        self.assertIn(f"try again at {clock_text}", got["error"])
         resets = datetime.datetime.fromtimestamp(got["resets_at"])  # the machine's own zone
-        self.assertEqual((resets.hour, resets.minute), (13, 0))
+        self.assertEqual((resets.hour, resets.minute), (soon.hour, soon.minute))
 
     def test_codex_re_review_needs_a_proven_security_or_final_origin(self):
         body = dict(agent="codex", kind="re_review", mode="read-only", worktree=False)

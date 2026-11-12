@@ -484,23 +484,46 @@ def limit_state(rows: list[dict], now: float, scope: str = "model") -> dict:
     return {"models": models, "accounts": accounts}
 
 
-def limited_for(state: dict, agent: str, ident: str) -> tuple[float | None, str | None]:
+def _limit(state: dict, agent: str, ident: str | None, rules: dict | None, key: str | None):
+    """(until, scope, subject): the one place a limit is read (Part F 6). `scope` is "account" (the whole agent
+    account is limited: limit_scope "account", or two limited models of one agent) or "model". A model is limited
+    when a limited identity is its own, maps to the same rules key (when `rules` is given), or is the bare agent
+    (a run whose model was unknown); a run whose model is unknown (ident == agent) is held while any model is."""
     if agent in state["accounts"]:
-        until = state["accounts"][agent]
-        return until, f"{agent} account limited until {clock(until)}"
-    if ident in state["models"]:
-        until = state["models"][ident]
-        return until, f"{ident} limited until {clock(until)}"
-    if ident == agent:
-        # A run whose model is unknown could land on any model of this agent: held while any of them is limited.
-        related = [until for other, until in state["models"].items() if other.split(":", 1)[0] == agent]
-        if related:
-            return max(related), f"{agent} limited until {clock(max(related))}"
-    elif agent in state["models"]:
-        # A limit recorded on the bare agent (a run whose model was unknown) holds every model of it.
-        until = state["models"][agent]
-        return until, f"{agent} limited until {clock(until)}"
-    return None, None
+        return state["accounts"][agent], "account", f"{agent} account"
+    if key is None and rules is not None and ident:
+        key = match_key(rules, *(ident.split(":", 1) if ":" in ident else (ident, None)))
+    found: list[tuple[float, str]] = []
+    for other, until in state["models"].items():
+        other_agent, _, other_model = other.partition(":")
+        if other_agent != agent:
+            continue
+        if (other == agent or other == ident or ident == agent
+                or (key is not None and rules is not None
+                    and match_key(rules, other_agent, other_model or None) == key)):
+            found.append((until, other))
+    if not found:
+        return None, None, None
+    until, other = max(found)
+    if ident in state["models"] and ident != agent:
+        subject = ident
+    else:
+        subject = agent if (ident == agent or other == agent) else (key or other)
+    return until, "model", subject
+
+
+def limit_for(rules: dict, state: dict, agent: str, ident: str | None, key: str | None = None
+              ) -> tuple[float | None, str | None]:
+    """(limited-until, scope) for one model key on one account; `state` is limit_snapshot(rules, now, account).
+    Budget status, fleet, resources, live and admission all read limits through this."""
+    until, scope, _subject = _limit(state, agent, ident, rules, key)
+    return until, scope
+
+
+def limited_for(state: dict, agent: str, ident: str, rules: dict | None = None,
+                key: str | None = None) -> tuple[float | None, str | None]:
+    until, _scope, subject = _limit(state, agent, ident, rules, key)
+    return (until, f"{subject} limited until {clock(until)}") if until else (None, None)
 
 
 def clock(ts: float) -> str:
@@ -625,6 +648,49 @@ def task_account(task: dict) -> str:
     return task.get("account") or account_key(task.get("agent") or "", task.get("node_id"), None, None)
 
 
+def clean_codex_rate_limits(value) -> dict | None:
+    """The runner's `codex_rate_limits` ({primary, secondary, seen_at}), keeping only numbers; None if it holds
+    no usable window. Heartbeats can carry anything, so this is the only way the field is stored."""
+    def number(x):
+        return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and x >= 0 else None
+
+    if not isinstance(value, dict):
+        return None
+    out: dict = {}
+    for name in ("primary", "secondary"):
+        w = value.get(name)
+        used = number(w.get("used_percent")) if isinstance(w, dict) else None
+        reset = number(w.get("resets_at")) if isinstance(w, dict) else None
+        out[name] = ({"used_percent": used, "resets_at": reset, "window_minutes": number(w.get("window_minutes"))}
+                     if used is not None and reset is not None else None)
+    if not (out["primary"] or out["secondary"]):
+        return None
+    out["seen_at"] = number(value.get("seen_at"))
+    return out
+
+
+def codex_rate_limits() -> dict | None:
+    """The newest rate_limits record any approved runner reports (docs/SPEC-dashboard-truth.md 11), or None."""
+    with db() as c:
+        rows = c.execute("SELECT runner FROM nodes WHERE status='approved' AND runner IS NOT NULL").fetchall()
+    best = None
+    for row in rows:
+        try:
+            found = clean_codex_rate_limits((json.loads(row["runner"]) or {}).get("codex_rate_limits"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if found and (best is None or (found["seen_at"] or 0) > (best["seen_at"] or 0)):
+            best = found
+    return best
+
+
+def rate_limit_until(record: dict, now: float) -> float | None:
+    """When Codex is free again: the latest reset among windows that are used up and whose reset is still ahead."""
+    ends = [w["resets_at"] for w in (record.get("primary"), record.get("secondary"))
+            if w and w["used_percent"] >= 100 and w["resets_at"] > now]
+    return max(ends) if ends else None
+
+
 def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     """The breaker reads what each run itself ended with (agent_usage), never the task's current state: cancelling,
     completing or resuming a limited task changes the task but not the fact that its run hit the limit.
@@ -648,7 +714,15 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
         rows = [dict(r) | ({"state": "failed", "failure_reason": "limit"} if r["outcome"] == "limit"
                            else {"state": "review", "failure_reason": None})
                 for r in c.execute(query, args)]
+    # Codex's own rate_limits record (Part F 11) beats error text: a limit message only holds Codex until the next
+    # record, which says what is really left.
+    record = codex_rate_limits()
+    if record and record.get("seen_at"):
+        rows = [r for r in rows if not (r["agent"] == "codex" and r["failure_reason"] == "limit"
+                                        and r["ended_at"] <= record["seen_at"])]
     state = limit_state(rows, now, rules.get("limit_scope", "model"))
+    if record and (until := rate_limit_until(record, now)):
+        state["accounts"]["codex"] = max(until, state["accounts"].get("codex", 0))
     # Past the daily hard token budget, a model behaves as limited until local midnight.
     midnight = local_midnight(now) + 86400
     for key, entry in rules.get("models", {}).items():
@@ -734,7 +808,7 @@ def maybe_soft_notice(rules: dict, key: str, now: float) -> None:
 
 
 def blocked_by(rules: dict, state: dict, agent: str, key: str | None, ident: str) -> tuple[float | None, str | None]:
-    until, why = limited_for(state, agent, ident)
+    until, why = limited_for(state, agent, ident, rules, key)
     if until:
         return until, why
     hard = (state.get("hard") or {}).get(key) if key else None
@@ -922,18 +996,13 @@ def status(now: float | None = None) -> dict:
     now = time.time() if now is None else now
     rules, error = resolve_rules()
     state = limit_snapshot(rules, now)
+    record = codex_rate_limits()
     out = []
     for key, entry in rules["models"].items():
         agent = key.split(":", 1)[0]
         if agent not in PAID_AGENTS:
             continue
-        until = state["accounts"].get(agent)
-        scope = "account" if until else None
-        if not until:
-            matching = [u for ident, u in state["models"].items()
-                        if match_key(rules, *(ident.split(":", 1) if ":" in ident else (ident, None))) == key]
-            until = max(matching) if matching else None
-            scope = "model" if until else None
+        until, scope = limit_for(rules, state, agent, None, key)
         if not until and (state.get("hard") or {}).get(key):
             until, scope = state["hard"][key], "daily"
         used = today_tokens(rules, key, now)
@@ -942,6 +1011,7 @@ def status(now: float | None = None) -> dict:
         out.append({"key": key, "agent": agent, "tier": entry.get("tier"), "state": status_name,
                     "limited_until": until, "limit_scope": scope, "running": running_count(key),
                     "max_concurrent": entry.get("max_concurrent"), "today_tokens": used, "soft": soft,
-                    "hard": entry.get("daily_tokens_hard")})
+                    "hard": entry.get("daily_tokens_hard"),
+                    **({"rate_limits": record} if agent == "codex" and record else {})})
     return {"fleet_only": True, "models": out, "rules_version": rules_row()["version"],
             "rules_invalid": error is not None, "rules_error": error}

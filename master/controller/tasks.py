@@ -157,7 +157,7 @@ NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
-                 "age_s"}
+                 "age_s", "codex_rate_limits"}
 
 
 MAX_HEALTH_JOBS = 32
@@ -196,6 +196,8 @@ def clean_jobs(value) -> list[dict] | None:
 
 def clean_health(body: dict) -> dict:
     out = {k: v for k, v in body.items() if k in HEALTH_FIELDS}
+    if "codex_rate_limits" in out:
+        out["codex_rate_limits"] = budget.clean_codex_rate_limits(out["codex_rate_limits"])
     jobs = clean_jobs(body.get("jobs")) if "jobs" in body else None
     if jobs is not None:
         out["jobs"] = jobs
@@ -540,7 +542,7 @@ def live_display(t: dict, now: float | None = None) -> dict:
     rules = budget.current_rules()
     snap = budget.limit_snapshot(rules, now, budget.task_account(t))
     ident = t.get("budget_identity") or budget.identity(t["agent"], t.get("model"))
-    until, _ = budget.limited_for(snap, t["agent"], ident)
+    until, _ = budget.limited_for(snap, t["agent"], ident, rules)
     if until:
         return {"tone": "paused", "label": f"Paused: limit, resets {clock(until)}"}
     return {"tone": "attention", "label": "Limit cleared: resume or hand off"}

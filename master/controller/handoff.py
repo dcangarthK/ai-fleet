@@ -155,11 +155,7 @@ def _split(ident: str) -> tuple[str, str | None]:
 
 
 def key_limited(rules: dict, snap: dict, agent: str, key: str) -> float | None:
-    if agent in snap["accounts"]:
-        return snap["accounts"][agent]
-    found = [u for ident, u in snap["models"].items()
-             if ident == agent or budget.match_key(rules, *_split(ident)) == key]
-    return max(found) if found else None
+    return budget.limit_for(rules, snap, agent, None, key)[0]
 
 
 def _offline(node: dict) -> bool:

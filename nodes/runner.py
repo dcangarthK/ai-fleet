@@ -1192,6 +1192,66 @@ class JobManager:
     def budget_support():
         return True
 
+    def codex_home(self):
+        return Path(os.path.expanduser(str(self.codex_profile_dir()) if self.codex_profile_ready()
+                                       else os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")))
+
+    def codex_rate_limits_cached(self, max_age=15.0):
+        """For /health and heartbeats, which run every few seconds: the log directory is scanned at most every
+        `max_age` seconds."""
+        cached = getattr(self, "_rate_limits_cache", None)
+        if cached and time.time() - cached[0] < max_age:
+            return cached[1]
+        value = self.codex_rate_limits()
+        self._rate_limits_cache = (time.time(), value)
+        return value
+
+    def codex_rate_limits(self):
+        """The newest `rate_limits` record in the Codex session logs (sessions/**/rollout-*.jsonl): `primary` is the
+        5-hour window, `secondary` the weekly one, each {used_percent, resets_at, window_minutes}; `seen_at` is the
+        log's modification time. The same data `codex /status` shows. None when there is none. Read only; only the
+        numbers are kept, never a line of the log."""
+        try:
+            files = sorted(((p.stat().st_mtime, p) for p in (self.codex_home() / "sessions").glob("**/rollout-*.jsonl")),
+                           key=lambda item: item[0], reverse=True)
+        except OSError:
+            return None
+
+        def window(value):
+            if not isinstance(value, dict):
+                return None
+            numbers = {}
+            for name in ("used_percent", "resets_at", "window_minutes"):
+                x = value.get(name)
+                numbers[name] = x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
+            return numbers if numbers["used_percent"] is not None and numbers["resets_at"] is not None else None
+
+        for mtime, path in files[:5]:  # the newest logs; an old one can't hold the newest record
+            try:
+                with path.open("rb") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    handle.seek(max(0, size - 512 * 1024))  # records are appended: the end holds the newest
+                    lines = handle.read().decode("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+            for line in reversed(lines):
+                if '"rate_limits"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                payload = event.get("payload") if isinstance(event, dict) else None
+                limits = (payload.get("rate_limits") if isinstance(payload, dict) else None) or (
+                    event.get("rate_limits") if isinstance(event, dict) else None)
+                if not isinstance(limits, dict):
+                    continue
+                primary, secondary = window(limits.get("primary")), window(limits.get("secondary"))
+                if primary or secondary:
+                    return {"primary": primary, "secondary": secondary, "seen_at": mtime}
+        return None
+
     def default_models(self):
         """The model each agent CLI uses when a task names none (from its settings), when one is configured."""
         found = {}
@@ -1199,10 +1259,9 @@ class JobManager:
         settings = read_json(Path(os.path.expanduser(claude_dir)) / "settings.json", {})
         if isinstance(settings, dict) and isinstance(settings.get("model"), str) and settings["model"]:
             found["claude"] = settings["model"]
-        codex_home = (str(self.codex_profile_dir()) if self.codex_profile_ready()
-                      else os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
+        codex_home = self.codex_home()
         try:
-            text = (Path(os.path.expanduser(codex_home)) / "config.toml").read_text(encoding="utf-8")
+            text = (codex_home / "config.toml").read_text(encoding="utf-8")
             match = re.search(r'^model\s*=\s*"([^"\n]+)"', text, re.MULTILINE)
             if match:
                 found["codex"] = match.group(1)
@@ -2742,6 +2801,8 @@ def health_report(manager):
               "budget": manager.budget_support(), **manager.profiles(),
               "profiles": manager.profile_report(), "checkpoint": True,
               "default_models": manager.default_models(),
+              "codex_rate_limits": (manager.codex_rate_limits_cached()
+                                    if callable(getattr(manager, "codex_rate_limits_cached", None)) else None),
               "engines": engine_health,
               # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
               "heartbeat": bool(getattr(manager, "controller_url", None))}

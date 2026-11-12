@@ -353,7 +353,7 @@ def queue(now: float) -> list[dict]:
             if wait == "limit" and r["agent"] in budget.PAID_AGENTS:
                 snap = budget.limit_snapshot(rules, now, budget.task_account(r))
                 ident = r["budget_identity"] or budget.identity(r["agent"], r["model"])
-                until = budget.limited_for(snap, r["agent"], ident)[0]
+                until = budget.limited_for(snap, r["agent"], ident, rules)[0]
         elif r["error"]:
             wait, reason = "node", r["error"]
         else:
@@ -423,7 +423,7 @@ def accounts(now: float) -> list[dict]:
             running = c.execute(f"SELECT COUNT(*) FROM tasks WHERE state IN ('starting','working') AND "
                                 f"{budget.ACCOUNT_SQL}=?", (account,)).fetchone()[0]
             snap = budget.limit_snapshot(rules, now, account)
-            until, _ = budget.limited_for(snap, acct["agent"], acct["agent"])
+            until, _ = budget.limited_for(snap, acct["agent"], acct["agent"], rules)
             if until:
                 status = f"limited until {budget.clock(until)}"
             elif reset and (not last or reset >= last["ts"]):
@@ -526,7 +526,7 @@ def alerts() -> list[dict]:
                 if account not in snaps:
                     snaps[account] = budget.limit_snapshot(rules, now, account)
                 agent = data.get("agent") if isinstance(data.get("agent"), str) else ""
-                if not budget.limited_for(snaps[account], agent, agent)[0]:
+                if not budget.limited_for(snaps[account], agent, agent, rules)[0]:
                     continue
             # Titles and node ids only: never result, log or limit-message text.
             out.append({"id": r["id"], "ts": r["ts"], "task_id": r["task_id"], "type": r["type"],

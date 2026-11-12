@@ -35,6 +35,16 @@ def fresh_loop_state():
 
 SAST = ZoneInfo("Africa/Johannesburg")
 LIMIT_TEXT = "You've hit your 5-hour limit · resets 2:30pm (Africa/Johannesburg)"
+
+
+def limit_text_ahead(test) -> str:
+    """A Claude limit message whose reset is later today (a passed time is no longer rolled to tomorrow)."""
+    soon = datetime.datetime.now(SAST) + datetime.timedelta(hours=1)
+    if soon.date() != datetime.datetime.now(SAST).date():
+        test.skipTest("less than an hour left in the day")
+    return f"You've hit your 5-hour limit · resets {soon.hour % 12 or 12}:{soon.minute:02d}{'am' if soon.hour < 12 else 'pm'} (Africa/Johannesburg)"
+
+
 CODEX_LIMIT = "You've hit your usage limit. Upgrade to Pro, or try again at 1:00 PM."
 
 
@@ -103,19 +113,26 @@ class ParseResetTests(unittest.TestCase):
         before = epoch(2026, 11, 11, 13, 0)
         self.assertEqual(tasks.parse_reset(LIMIT_TEXT, before), epoch(2026, 11, 11, 14, 30))
         after = epoch(2026, 11, 11, 15, 0)
-        self.assertEqual(tasks.parse_reset(LIMIT_TEXT, after), epoch(2026, 11, 12, 14, 30))
+        self.assertIsNone(tasks.parse_reset(LIMIT_TEXT, after))  # already passed today: never rolled to tomorrow
 
     def test_try_again_uses_local_timezone(self):
         utc = ZoneInfo("UTC")
         got = tasks.parse_reset(CODEX_LIMIT, epoch(2026, 11, 11, 10, 0, utc), utc)
         self.assertEqual(got, epoch(2026, 11, 11, 13, 0, utc))
-        got = tasks.parse_reset(CODEX_LIMIT, epoch(2026, 11, 11, 14, 0, utc), utc)
-        self.assertEqual(got, epoch(2026, 11, 12, 13, 0, utc))
+        self.assertIsNone(tasks.parse_reset(CODEX_LIMIT, epoch(2026, 11, 11, 14, 0, utc), utc))
+
+    def test_a_passed_time_never_limits_until_tomorrow(self):
+        """t-54eebb94: "try again at 1:47 PM" seen at 15:00 gave a false 22-hour limit."""
+        utc = ZoneInfo("UTC")
+        text = "You've hit your usage limit. Try again at 1:47 PM."
+        self.assertIsNone(tasks.parse_reset(text, epoch(2026, 11, 12, 15, 0, utc), utc))
+        self.assertEqual(tasks.parse_reset(text, epoch(2026, 11, 12, 13, 0, utc), utc),
+                         epoch(2026, 11, 12, 13, 47, utc))
 
     def test_twelve_oclock(self):
         utc = ZoneInfo("UTC")
-        self.assertEqual(tasks.parse_reset("limit reached, resets 12:15am", epoch(2026, 1, 1, 22, 0, utc), utc),
-                         epoch(2026, 1, 2, 0, 15, utc))
+        self.assertEqual(tasks.parse_reset("limit reached, resets 12:15am", epoch(2026, 1, 1, 0, 5, utc), utc),
+                         epoch(2026, 1, 1, 0, 15, utc))
 
     def test_garbage_is_none(self):
         for text in ("", "nothing here", "resets soon", None, "resets 99:99pm"):
@@ -318,7 +335,7 @@ class LineageApiTests(unittest.TestCase):
         return tid
 
     def test_work_and_task_agree_on_a_limit_message_after_a_long_result(self):
-        long_output = ("x" * 6000) + "\n" + LIMIT_TEXT
+        long_output = ("x" * 6000) + "\n" + limit_text_ahead(self)
         tid = self.legacy(result=long_output)
         one = self.get(tid)
         item = self.work_item(tid)
@@ -389,10 +406,11 @@ class LineageApiTests(unittest.TestCase):
 
     def test_limit_failure_is_paused_with_reset_time(self):
         t = self.task(title="Limit hit")
-        failed = self.fail(t["id"], LIMIT_TEXT)
+        text = limit_text_ahead(self)
+        failed = self.fail(t["id"], text)
         self.assertEqual(failed["failure_reason"], "limit")
         resets = datetime.datetime.fromtimestamp(failed["resets_at"], SAST)
-        self.assertEqual((resets.hour, resets.minute), (14, 30))
+        self.assertEqual(f"{resets.hour % 12 or 12}:{resets.minute:02d}", text.split("resets ")[1].split("pm")[0].split("am")[0])
         self.assertGreater(failed["resets_at"], failed["ended_at"])
         self.assertLessEqual(failed["resets_at"] - failed["ended_at"], 86400)
         self.assertEqual(failed["display"]["tone"], "paused")

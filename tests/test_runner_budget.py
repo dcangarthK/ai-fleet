@@ -301,6 +301,67 @@ class CodexProfile(Base):
         self.assertEqual(self.m.profiles({})["claude_profile"], "shared")
 
 
+class CodexRateLimits(Base):
+    """Part F 11: the newest `rate_limits` record in $CODEX_HOME/sessions/**/rollout-*.jsonl, reported on /health."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.base / "codex-home"
+        (self.home / "sessions" / "2026" / "11" / "12").mkdir(parents=True)
+        self.saved_home = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.home)
+        runner.find_agents = lambda _url, **_kw: {"claude": None, "codex": None, "ollama": None}  # restored by Base
+
+    def tearDown(self):
+        if self.saved_home is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = self.saved_home
+        super().tearDown()
+
+    def rollout(self, name, records, mtime):
+        path = self.home / "sessions" / "2026" / "11" / "12" / f"rollout-{name}.jsonl"
+        path.write_text("\n".join(json.dumps(r) if isinstance(r, dict) else r for r in records) + "\n")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    @staticmethod
+    def record(primary, secondary, ts="2026-11-12T10:00:00Z"):
+        return {"timestamp": ts, "type": "event_msg", "payload": {"type": "token_count", "info": None, "rate_limits": {
+            "primary": {"used_percent": primary[0], "window_minutes": 300, "resets_at": primary[1]},
+            "secondary": {"used_percent": secondary[0], "window_minutes": 10080, "resets_at": secondary[1]}}}}
+
+    def test_reports_both_windows_from_the_newest_record(self):
+        now = time.time()
+        self.rollout("old", [self.record((90.0, 1), (80.0, 2))], now - 1000)
+        self.rollout("new", [self.record((10.0, 100), (20.0, 200)), "not json",
+                             {"type": "event_msg", "payload": {"type": "agent_message"}},
+                             self.record((3.0, 1762999999), (56.0, 1763500000))], now - 10)
+        got = self.m.codex_rate_limits()
+        self.assertEqual(got["primary"], {"used_percent": 3.0, "resets_at": 1762999999, "window_minutes": 300})
+        self.assertEqual(got["secondary"], {"used_percent": 56.0, "resets_at": 1763500000, "window_minutes": 10080})
+
+    def test_health_carries_only_the_rate_limits(self):
+        self.rollout("a", [self.record((3.0, 5), (56.0, 6))], time.time())
+        report = runner.health_report(self.m)
+        self.assertEqual(report["codex_rate_limits"]["primary"]["used_percent"], 3.0)
+        self.assertEqual(set(report["codex_rate_limits"]), {"primary", "secondary", "seen_at"})
+
+    def test_none_when_there_is_no_record(self):
+        self.assertIsNone(self.m.codex_rate_limits())
+        self.rollout("a", ["garbage", {"type": "session_meta"}], time.time())
+        self.assertIsNone(self.m.codex_rate_limits())
+        self.assertIsNone(runner.health_report(self.m)["codex_rate_limits"])
+
+    def test_a_malformed_window_is_dropped(self):
+        record = self.record((3.0, 5), (56.0, 6))
+        record["payload"]["rate_limits"]["secondary"] = {"used_percent": "lots", "resets_at": "soon"}
+        self.rollout("a", [record], time.time())
+        got = self.m.codex_rate_limits()
+        self.assertEqual(got["primary"]["used_percent"], 3.0)
+        self.assertIsNone(got["secondary"])
+
+
 class TreesAndReviewCwd(Base):
     def git(self, *args, cwd=None):
         return subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True, text=True).stdout

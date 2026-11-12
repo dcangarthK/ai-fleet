@@ -31,6 +31,8 @@ def job(task_id, **kw):
 class StallBase(HandoffBase):
     @classmethod
     def setUpClass(cls):
+        cls._poll = tasks.POLL_SECONDS
+        tasks.POLL_SECONDS = 0  # the app's own task poll stays off; tests call recover/poll_task for a tick
         super().setUpClass()
         cls._auto = stall.AUTO
         stall.AUTO = False  # the background sweep leaves stalls to the tests, which call stall.sweep themselves
@@ -38,6 +40,7 @@ class StallBase(HandoffBase):
     @classmethod
     def tearDownClass(cls):
         stall.AUTO = cls._auto
+        tasks.POLL_SECONDS = cls._poll
         FakeRunner.health_extra = {}
         FakeRunner.cancel_reply = None
         FakeRunner.models.pop("other-model:3b", None)
@@ -97,6 +100,11 @@ class StallBase(HandoffBase):
         then = time.time() - minutes * 60
         with db() as c:
             c.execute("UPDATE tasks SET started_at=?, run_started_at=? WHERE id=?", (then, then, task_id))
+
+    def tick(self, task_id, times=1):
+        """One task-poll tick (the app's own poll loop is off in this suite)."""
+        for _ in range(times):
+            self.c.portal.call(tasks.poll_task, task_id)
 
     def sweep(self, now=None):
         self.c.portal.call(stall.sweep, now)
@@ -212,7 +220,8 @@ class VerdictTests(StallBase):
         self.assertEqual(self.verdict(t["id"])["kind"], "ok")
         saved = FakeRunner.jobs.pop(t["id"])  # /health still answers, GET /jobs/{id} now fails (as t-253101a7)
         self.addCleanup(FakeRunner.jobs.__setitem__, t["id"], saved)
-        wait_for(lambda: tasks.UNREACHABLE_POLLS.get(t["id"], 0) >= 3)
+        self.tick(t["id"], 3)
+        self.assertGreaterEqual(tasks.UNREACHABLE_POLLS.get(t["id"], 0), 3)
         wait_for(lambda: self.verdict(t["id"])["kind"] == "unreachable")  # once /health answers after that
 
     def test_fix1_transport_errors_never_count_as_unreachable(self):
@@ -412,6 +421,7 @@ class ResponseTests(StallBase):
     def test_interrupted_also_reroutes(self):
         t = self.running()
         FakeRunner.jobs[t["id"]].update(state="lost", group_gone=True)
+        self.tick(t["id"])
         wait_for(lambda: self.children(t["id"]))
         old = tasks.get_task(t["id"])
         self.assertEqual(old["state"], "interrupted")
@@ -423,7 +433,8 @@ class ResponseTests(StallBase):
         for extra in ({}, {"group_gone": False}):  # an older runner (no field), and a surviving child
             t = self.running()
             FakeRunner.jobs[t["id"]].update(state="lost", **extra)
-            wait_for(lambda: tasks.get_task(t["id"])["state"] == "interrupted")
+            self.tick(t["id"])
+            self.assertEqual(tasks.get_task(t["id"])["state"], "interrupted")
             wait_for(lambda: self.record(t["id"]).get("escalated"))
             self.assertEqual(self.children(t["id"]), [])
             self.assertFalse(self.posts(t["id"], "checkpoint"))
@@ -553,7 +564,8 @@ class FixRoundTests(StallBase):
         t = self.running()
         self.set_jobs(job(t["id"], state="lost", alive=True))
         FakeRunner.jobs[t["id"]].update(state="lost")
-        wait_for(lambda: tasks.get_task(t["id"])["state"] == "interrupted")
+        self.tick(t["id"])
+        self.assertEqual(tasks.get_task(t["id"])["state"], "interrupted")
         wait_for(lambda: "alive" in (self.record(t["id"]).get("waiting") or ""))
         self.assertEqual(self.children(t["id"]), [])
         self.assertFalse(self.posts(t["id"], "checkpoint"))

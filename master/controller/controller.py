@@ -491,10 +491,12 @@ async def lifespan(_: FastAPI):
     fleet_skills.import_repo()
     fleet_instructions.import_repo()
     events.bind_loop(asyncio.get_running_loop())
-    background = [asyncio.create_task(loop()), asyncio.create_task(tasks.poll_loop()),
+    background = [asyncio.create_task(loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
                   asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop()),
                   asyncio.create_task(live.sweep_loop())]
+    if tasks.POLL_SECONDS > 0:  # FLEET_TASK_POLL_SECONDS=0 turns the task poll off; tests then drive ticks themselves
+        background.append(asyncio.create_task(tasks.poll_loop()))
     yield
     for t in background:
         t.cancel()

@@ -548,17 +548,35 @@ def group_alive(pgid):
 def proc_start(pid):
     """Start time of process `pid` as `ps` prints it (the identity that tells a pid from a reused one).
     "" if no such process, None if it could not be determined or the platform has no `ps`."""
-    if not isinstance(pid, int) or pid <= 1 or os.name == "nt":
+    if not isinstance(pid, int) or pid <= 1:
         return None
+    if os.name == "nt":
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+               "(Get-Process -Id %d -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')" % pid]
+    else:
+        cmd = ["ps", "-o", "lstart=", "-p", str(pid)]
     try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=3,
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=10 if os.name == "nt" else 3,
                              env={**os.environ, "LC_ALL": "C"})
     except (OSError, subprocess.SubprocessError):
         return None
-    text = " ".join((out.stdout or "").split())
-    if text:
-        return text
-    return "" if out.returncode == 1 and not (out.stderr or "").strip() else None
+    if out.returncode != 0:
+        # Error text is never a start time. A missing pid exits non-zero, but so does a broken ps/powershell:
+        # call it gone only when a second probe agrees, else unknown.
+        return "" if _pid_absent(pid) else None
+    return " ".join((out.stdout or "").split())
+
+
+def _pid_absent(pid):
+    if os.name == "nt":
+        return not process_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def boot_time():
@@ -1771,24 +1789,35 @@ class JobManager:
         pid = job.get("pid")
         if not (isinstance(pid, int) and pid > 1 and job.get("pgid", pid) == pid):
             return False
-        if os.name == "nt":
-            return True
         live = proc_start(pid)
         if live is None:
             return False
         return live == "" or live == job.get("pid_start")
 
-    def _old_group_alive(self, job):
-        """True when a stopped job's process group may still be running (resume and hand-off must wait)."""
+    def _old_group_alive(self, job, wait=1.5):
+        """True when a stopped job's process group may still be running (resume and hand-off must wait).
+        `wait` seconds are spent letting a normal exit finish: callers holding self.lock pass 0."""
         if job.get("group_gone") is True:
             return False
         if self._group_ok(job):
             # The wrapper writes the exit code just before it exits: give a normal exit a moment to finish.
-            return not self._wait_group_gone(job.get("pid"), 1.5)
-        return job.get("group_gone") is False  # identity unverifiable: believe the last report
+            if not wait:
+                return group_alive(job.get("pid"))
+            return not self._wait_group_gone(job.get("pid"), wait)
+        if os.name != "nt" and job.get("pid_start"):
+            live = proc_start(job.get("pid"))
+            if live and live != job["pid_start"]:
+                return False  # the pid was reused: the job's own leader (and group) is long gone
+        # Identity unverifiable: fail closed. Only a job known lost (reboot) has no group to wait for.
+        return job.get("state") != "lost"
+
+    def _settle_group(self, job):
+        """Wait for a stopped job's group to exit. Call without self.lock: it sleeps up to 1.5 s."""
+        if job.get("state") != "running" and job.get("group_gone") is not True and self._group_ok(job):
+            self._wait_group_gone(job.get("pid"), 1.5)
 
     def _refuse_if_group_alive(self, job):
-        if self._old_group_alive(job):
+        if self._old_group_alive(job, wait=0):
             raise HttpError(409, "the job's old process group is still alive; stop it before resuming or handing off")
 
     @staticmethod
@@ -1818,14 +1847,14 @@ class JobManager:
             if not self._group_ok(job):
                 self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
             elif os.name == "nt":
-                if process_alive(pid):
+                if process_alive(pid) and self._group_ok(job):
                     self._signal_group(job, True)
                 gone = self._wait_group_gone(pid, 2.0)
             else:
                 if graceful and group_alive(pid):
                     self._signal_group(job, False)
                     self._wait_group_gone(pid, 1.0)
-                if group_alive(pid):
+                if group_alive(pid) and self._group_ok(job):  # identity again: the graceful wait took a while
                     self._signal_group(job, True)
                     self._wait_group_gone(pid, 2.0)
                 gone = not group_alive(pid)
@@ -2250,6 +2279,7 @@ class JobManager:
         if job.get("profile_id") and self.profile_entry(job["agent"], job["profile_id"]) is None:
             # Its session lives in that profile; under another one it would not be found.
             raise HttpError(409, "this job's profile is no longer configured on this runner")
+        self._settle_group(job)
         with self.lock:
             self.refresh(job)
             if job["state"] == "running":
@@ -2339,6 +2369,7 @@ class JobManager:
         body = body or {}
         label = body.get("label") if isinstance(body.get("label"), str) else ""
         label = re.sub(r"[^A-Za-z0-9._:/ -]", "", label)[:80] or job.get("agent") or "agent"
+        self._settle_group(job)
         with self.lock:
             self.refresh(job)
             if job["state"] == "running":

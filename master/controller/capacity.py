@@ -22,6 +22,7 @@ import usage
 from events import emit
 from store import db
 
+MAX_RESTART_FAILURES = 3  # runner refusals of a re-queued task's resume, per run, before it stops retrying
 RESUME_TEXT = "The usage limit has reset. Continue the task where you stopped."
 _SEEN: set = set()  # shadow decisions already recorded (one event per distinct decision)
 _LIMIT_SEEN: dict[str, str] = {}
@@ -84,10 +85,15 @@ def choose_move(task: dict, now: float, claimed: dict | None = None, nodes: list
     current = handoff.slot_identity(task)
     current_tier = budget.entry_for(rules, task.get("budget_key"), task["agent"]).get("tier")
     claimed = {} if claimed is None else claimed
+    frozen = budget.held_accounts()  # the owner's hold (req 9): nothing moves onto or off a held account
+    if budget.task_account(task) in frozen:
+        return None
     for slot in handoff.rank_slots(kind, [current], {"id": task["id"]}, now=now, nodes=nodes):
         if slot["agent"] != task["agent"] or slot["node"] != task["node_id"] or slot["state"] != "free":
             continue
         if slot["max"] is not None and slot["running"] + claimed.get((slot["account"], slot["key"]), 0) >= slot["max"]:
+            continue
+        if slot["account"] in frozen:
             continue
         if "profile" in held and slot["account"] != budget.task_account(task):
             continue
@@ -144,12 +150,16 @@ async def _apply_move(task_id: str, slot: dict, reason: str, ranked: dict) -> bo
         if task["state"] != "queued":
             return False
         before = _view(ranked)
+        budget.held_accounts()  # reports a corrupt hold (an event can't be written inside the transaction below)
         with db() as c:  # the compare-and-set: only if it is still queued on exactly the slot we ranked from
+            c.execute("BEGIN IMMEDIATE")  # the hold is read in the same transaction as the update (a set_hold waits)
+            if {budget.task_account(task), slot["account"]} & budget.held_accounts(c, report=False):
+                return False  # the owner froze an account between ranking and now
             moved = c.execute(
                 "UPDATE tasks SET node_id=?, profile=?, account=?, account_label=?, model=?, budget_key=?, "
                 "budget_identity=?, budget_wait=NULL, error=NULL, updated_at=? WHERE id=? AND state='queued' "
                 "AND node_id=? AND COALESCE(profile,'fleet')=? AND COALESCE(account,'')=COALESCE(?,'') "
-                "AND COALESCE(budget_key,'')=COALESCE(?,'')",
+                "AND COALESCE(budget_key,'')=COALESCE(?,'') AND COALESCE(runs,0)=0 AND not_before IS NULL",
                 (slot["node"], slot["profile"], slot["account"], slot["label"], slot["model"], slot["key"],
                  budget.identity(task["agent"], slot["model"]), time.time(), task_id, ranked["node_id"],
                  before["profile"], ranked.get("account"), ranked.get("budget_key"))).rowcount == 1
@@ -212,6 +222,7 @@ async def restart_requeued(task: dict) -> bool:
                                  "mode": None})
     except HTTPException as exc:
         tasks.update(task["id"], error=str(exc.detail))
+        _restart_failed(task, str(exc.detail))
         return False
     finally:
         budget.RESERVED.pop(task["id"], None)
@@ -222,6 +233,23 @@ async def restart_requeued(task: dict) -> bool:
         emit(task["id"], "task.resumed", {"title": task.get("title"), "run": runs, "from": "queued",
                                           "reason": "limit reset"})
     return True
+
+
+def _restart_failed(task: dict, why: str) -> None:
+    """Record one failed resume. The third for the same run records `task.restart_gave_up` and fails the task, so
+    try_start stops retrying it every poll. (The task lock is held by the caller.)"""
+    run = task.get("runs") or 0
+    emit(task["id"], "task.restart_failed", {"title": task.get("title"), "run": run, "reason": why})
+    with db() as c:
+        rows = c.execute("SELECT data FROM events WHERE type='task.restart_failed' AND task_id=?",
+                         (task["id"],)).fetchall()
+    fails = sum(1 for r in rows if json.loads(r["data"] or "{}").get("run") == run)
+    if fails < MAX_RESTART_FAILURES:
+        return
+    message = f"could not resume after {fails} tries: {why}"
+    if tasks.transition(task, {"queued"}, "failed", ended_at=time.time(), error=message, budget_wait=None):
+        emit(task["id"], "task.restart_gave_up", {"title": task.get("title"), "run": run, "tries": fails,
+                                                  "reason": why})
 
 
 # ---------- the tick ----------

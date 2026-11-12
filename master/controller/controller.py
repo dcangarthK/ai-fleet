@@ -721,6 +721,31 @@ def put_budget_rules(body: BudgetRulesBody, request: Request) -> dict:
     return saved
 
 
+class BudgetHold(BaseModel):
+    account: str
+    hold: bool = True
+
+
+@app.get("/api/budget/rules/hold")
+def get_budget_hold() -> dict:
+    return {"hold": sorted(budget.held_accounts())}
+
+
+@app.put("/api/budget/rules/hold")
+def put_budget_hold(body: BudgetHold, request: Request) -> dict:
+    """Admin only (it sits under auth.ADMIN_PATHS' /api/budget/rules): the owner freezes or releases one account.
+    Placement then moves nothing onto or off it (Part G req 9)."""
+    current = budget.held_accounts()
+    wanted = current | {body.account} if body.hold else current - {body.account}
+    try:
+        saved = budget.set_hold(sorted(wanted), getattr(request.state, "actor", "local"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    events.emit(None, "budget.hold_changed", {"account": body.account, "hold": body.hold, "version": saved["version"],
+                                              "author": saved["author"]})
+    return saved
+
+
 @app.post("/api/budget/rules/restore")
 def restore_budget_rules(body: BudgetRestore, request: Request) -> dict:
     old = next((row for row in budget.rules_history() if row["version"] == body.version), None)

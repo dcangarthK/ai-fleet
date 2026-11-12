@@ -276,6 +276,9 @@ def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[d
         return []
     limits = rules.get("limits") or {}
     source_account = budget.task_account(task)
+    frozen = budget.held_accounts()  # the owner's hold (Part G req 9): nothing moves onto or off a held account
+    if source_account in frozen:
+        return []
     targets = [(task["agent"], task.get("model"))]
     for target in (limits.get("fallbacks") or {}).get(task.get("budget_key") or "") or []:
         agent, _, model = target.partition(":")
@@ -298,7 +301,7 @@ def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[d
             continue  # rule 0, whatever the fallbacks say
         ident = budget.identity(agent, resolved)
         for slot in tasks.node_slots(node, agent, flags):
-            if not tasks.usable(slot) or (agent, model, slot["account"]) in seen:
+            if not tasks.usable(slot) or (agent, model, slot["account"]) in seen or slot["account"] in frozen:
                 continue
             if agent == task["agent"] and model == task.get("model") and slot["account"] == source_account:
                 continue  # the slot that just hit its limit
@@ -861,6 +864,8 @@ async def _handoff(task: dict, slot: dict, rules: dict, now: float, stall: dict 
 
 async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float, stall: dict | None = None) -> dict:
     """The claimed part of a handoff, under the task lock: {"action": "none", "reason"} or {"task_id", "checkpoint"}."""
+    if {budget.task_account(task), slot["account"]} & budget.held_accounts():  # held after the slot was chosen
+        return {"action": "none", "reason": "an account involved is on hold"}
     blob = claim(task["id"])
     if blob is None:
         return {"action": "none", "reason": "already claimed"}

@@ -149,10 +149,12 @@ async def _apply_move(task_id: str, slot: dict, reason: str, ranked: dict) -> bo
         task = tasks.get_task(task_id)
         if task["state"] != "queued":
             return False
-        if {budget.task_account(task), slot["account"]} & budget.held_accounts():
-            return False  # the owner froze an account between ranking and now
         before = _view(ranked)
+        budget.held_accounts()  # reports a corrupt hold (an event can't be written inside the transaction below)
         with db() as c:  # the compare-and-set: only if it is still queued on exactly the slot we ranked from
+            c.execute("BEGIN IMMEDIATE")  # the hold is read in the same transaction as the update (a set_hold waits)
+            if {budget.task_account(task), slot["account"]} & budget.held_accounts(c, report=False):
+                return False  # the owner froze an account between ranking and now
             moved = c.execute(
                 "UPDATE tasks SET node_id=?, profile=?, account=?, account_label=?, model=?, budget_key=?, "
                 "budget_identity=?, budget_wait=NULL, error=NULL, updated_at=? WHERE id=? AND state='queued' "

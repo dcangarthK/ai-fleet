@@ -10,9 +10,11 @@ from fastapi import HTTPException
 
 from tests.test_budget import events_of, rules
 from tests.test_capacity import CapacityBase
+from tests.test_controller import W
 
 import budget
 import capacity
+import handoff
 import tasks
 import usage
 from store import db
@@ -159,6 +161,73 @@ class HoldTests(CapacityBase):
         budget.set_hold([slot["account"]], "owner")
         self.assertFalse(self.c.portal.call(capacity._apply_move, c["id"], slot, "test", ranked))
         self.assertEqual(tasks.get_task(c["id"])["account"], c["account"])
+
+
+class HoldEverywhereTests(CapacityBase):
+    def tearDown(self):
+        budget.set_hold([], "test")
+        super().tearDown()
+
+    def accounts(self, task):
+        return {s["account"] for s in handoff.candidate_slots(tasks.get_task(task["id"]), budget.current_rules())}
+
+    def test_handoff_candidates_skip_a_held_target(self):
+        a = self.build()
+        free = self.accounts(a)
+        self.assertTrue(free, "a free spare slot is a candidate before the hold")
+        budget.set_hold(sorted(free), "owner")
+        self.assertEqual(self.accounts(a), set())
+
+    def test_handoff_off_a_held_account_has_no_candidates(self):
+        a = self.build()
+        self.assertTrue(self.accounts(a))
+        budget.set_hold([a["account"]], "owner")
+        self.assertEqual(self.accounts(a), set())
+
+    def test_the_handoff_apply_step_refuses_a_held_account(self):
+        a = self.build()
+        slot = handoff.candidate_slots(tasks.get_task(a["id"]), budget.current_rules())[0]
+        budget.set_hold([slot["account"]], "owner")  # held after the slot was chosen
+        got = self.c.portal.call(handoff._claim_to_insert, tasks.get_task(a["id"]), slot, budget.current_rules(),
+                                 usage.now())
+        self.assertEqual(got["action"], "none")
+        self.assertIn("hold", got["reason"])
+
+    def test_corrupt_hold_json_records_an_event(self):
+        budget._reported_bad_hold.clear()
+        with db() as c:
+            budget.ensure_hold_column(c)
+            c.execute("UPDATE budget_rules SET hold='{not json' WHERE version=(SELECT MAX(version) FROM budget_rules)")
+        self.assertEqual(budget.held_accounts(), set())
+        budget.held_accounts()  # once per version
+        bad = events_of("budget.hold_invalid")
+        self.assertEqual(len(bad), 1)
+        self.assertIn("JSON", bad[0]["data"]["error"])
+
+    def test_invalid_keys_are_reported_and_valid_ones_kept(self):
+        budget._reported_bad_hold.clear()
+        with db() as c:
+            budget.ensure_hold_column(c)
+            c.execute("UPDATE budget_rules SET hold=? WHERE version=(SELECT MAX(version) FROM budget_rules)",
+                      (json.dumps(["claude/spare", "junk"]),))
+        self.assertEqual(budget.held_accounts(), {"claude/spare"})
+        self.assertTrue(events_of("budget.hold_invalid"))
+
+    def test_hold_route_is_admin_only(self):
+        r = self.c.put("/api/budget/rules/hold", json={"account": "claude/spare", "hold": True},
+                       headers=W | {"X-Fleet-Scope": "operate"})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(budget.held_accounts(), set())
+        r = self.c.put("/api/budget/rules/hold", json={"account": "claude/spare", "hold": True}, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(budget.held_accounts(), {"claude/spare"})
+        self.assertEqual(self.c.get("/api/budget/rules/hold", headers=W).json(), {"hold": ["claude/spare"]})
+        r = self.c.put("/api/budget/rules/hold", json={"account": "claude/spare", "hold": False}, headers=W)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(budget.held_accounts(), set())
+        r = self.c.put("/api/budget/rules/hold", json={"account": "nonsense", "hold": True}, headers=W)
+        self.assertEqual(r.status_code, 400)
+        self.assertTrue(events_of("budget.hold_changed"))
 
 
 if __name__ == "__main__":

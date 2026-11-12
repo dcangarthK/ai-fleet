@@ -587,16 +587,36 @@ def valid_hold_key(key) -> bool:
     return bool(re.fullmatch(r"(claude|codex|ollama)(@[^/]+)?/.+", key)) and key.split("/", 1)[0].split("@")[0] in KEY_AGENTS
 
 
-def held_accounts() -> set[str]:
-    """Accounts the owner froze: placement moves nothing onto or off them."""
-    with db() as c:
-        ensure_hold_column(c)
-        row = c.execute("SELECT hold FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
-    try:
-        value = json.loads(row["hold"]) if row and row["hold"] else []
-    except (ValueError, TypeError):
+_reported_bad_hold: set[int] = set()
+
+
+def held_accounts(conn=None, report: bool = True) -> set[str]:
+    """Accounts the owner froze: placement moves nothing onto or off them. Pass `conn` to read inside the caller's
+    transaction. Corrupt or invalid stored hold is never dropped silently: a budget.hold_invalid event (once per
+    rules version) says what was ignored."""
+    if conn is None:
+        with db() as c:
+            return held_accounts(c, report)
+    ensure_hold_column(conn)
+    row = conn.execute("SELECT version, hold FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+    if not row or not row["hold"]:
         return set()
-    return {k for k in value if valid_hold_key(k)} if isinstance(value, list) else set()
+    problem, value = None, None
+    try:
+        value = json.loads(row["hold"])
+    except (ValueError, TypeError):
+        problem = "hold is not valid JSON"
+    if problem is None and not isinstance(value, list):
+        problem = "hold is not a list"
+    keys = {k for k in value if valid_hold_key(k)} if problem is None else set()
+    if problem is None and len(keys) != len(value):
+        problem = "hold has invalid account keys"
+    if problem and report and row["version"] not in _reported_bad_hold:  # (no event inside a caller's transaction)
+        _reported_bad_hold.add(row["version"])
+        from events import emit
+        emit(None, "budget.hold_invalid", {"version": row["version"], "error": problem, "raw": str(row["hold"])[:200],
+                                           "kept": sorted(keys)})
+    return keys
 
 
 def set_hold(accounts, author: str) -> dict:

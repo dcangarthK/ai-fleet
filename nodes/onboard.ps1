@@ -2898,7 +2898,7 @@ if (-not (Have winget)) { Write-Host "winget is required (App Installer from the
 if ($EnrollRequested) {  # resolve the code first: a bad file or no terminal stops before anything changes
   if (-not $Master) { throw "-Master is required with -Enroll, -EnrollFile or -EnrollPrompt" }
   if ($EnrollFile) {
-    if (-not (Test-Path -LiteralPath $EnrollFile)) { throw "-EnrollFile $EnrollFile: no such file" }
+    if (-not (Test-Path -LiteralPath $EnrollFile)) { throw "-EnrollFile ${EnrollFile}: no such file" }
     $EnrollCode = (Get-Content -LiteralPath $EnrollFile -Raw).Trim()
   } elseif ($EnrollPrompt) {
     $secure = Read-Host -AsSecureString "Console enrollment code"

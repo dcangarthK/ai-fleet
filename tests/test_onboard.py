@@ -808,5 +808,70 @@ class Build(unittest.TestCase):
         self.assertEqual(hashlib.sha256(installed).hexdigest(),
                          hashlib.sha256((ROOT / "nodes" / "runner.py").read_bytes()).hexdigest())
 
+
+SCOPES = {"env", "script", "global", "using", "local", "private"}
+
+
+def scoped_var_pitfalls(text: str):
+    """Find `$Name:` inside double-quoted PowerShell strings (parsed as a scope/drive prefix).
+
+    Line-based scanner: skips comments, single-quoted strings and here-string blocks
+    (@' ... '@ and @" ... "@ are treated as opaque)."""
+    found = []
+    here = None
+    for n, line in enumerate(text.splitlines(), 1):
+        if here:
+            if line.startswith(here):
+                here = None
+            continue
+        m = re.search(r"@(['\"])\s*$", line)
+        if m:
+            here = m.group(1) + "@"
+            continue
+        i, state = 0, None
+        while i < len(line):
+            c = line[i]
+            if state is None:
+                if c == "#":
+                    break
+                if c in "'\"":
+                    state = c
+            elif state == "'":
+                if c == "'":
+                    state = None
+            else:
+                if c == "`":
+                    i += 2
+                    continue
+                if c == '"':
+                    state = None
+                elif c == "$":
+                    mm = re.match(r"\$([A-Za-z_][A-Za-z0-9_]*):", line[i:])
+                    if mm and mm.group(1).lower() not in SCOPES:
+                        found.append((n, mm.group(0)))
+            i += 1
+    return found
+
+
+class OnboardPs1SyntaxTests(unittest.TestCase):
+    def test_no_scoped_variable_pitfalls_in_double_quoted_strings(self):
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertEqual(scoped_var_pitfalls(text), [],
+                         'use "${Name}:" instead of "$Name:" in double-quoted strings')
+
+    def test_pitfall_detector_catches_the_known_bug(self):
+        self.assertEqual(scoped_var_pitfalls('throw "-X $EnrollFile: no such file"'), [(1, "$EnrollFile:")])
+        self.assertEqual(scoped_var_pitfalls('x "${EnrollFile}: ok $env:HOME $(f):"'), [])
+        self.assertEqual(scoped_var_pitfalls("x 'single $Name: ok' # \"$a: c\""), [])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh not installed")
+    def test_onboard_ps1_parses(self):
+        script = ("$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+                  "$args[0],[ref]$null,[ref]$e); if ($e.Count) { $e | ForEach-Object { $_.ToString() }; exit 1 }")
+        r = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script,
+                            str(ROOT / "nodes" / "onboard.ps1")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ export function OverviewPage() {
     return n?.healthy && n.models.includes(a.model);
   }).length;
   const calls = useQuery({ queryKey: ["calls"], queryFn: () => get<CallStat[]>("/api/usage/calls?days=7"), retry: 0 });
-  const agentTime = (usage.data ?? []).reduce((s, r) => s + (r.seconds || 0), 0);
+  const agentTime = (usage.data?.rows ?? []).reduce((s, r) => s + (r.seconds || 0), 0);
   const open = (id: string) => nav(`/tasks?view=all&tab=all&task=${encodeURIComponent(id)}`);
 
   return (

@@ -286,7 +286,7 @@ function fillModels() {
 }
 
 async function renderUsage() {
-  const rows = await api("/api/usage");
+  const rows = (await api("/api/usage")).rows;
   $("usage").innerHTML = rows.map((r) => `<tr><td>${esc(nodeName(r.node_id))}</td><td>${esc(r.agent)}</td><td>${r.tasks}</td>
     <td>${r.running}</td><td>${r.failed ? `<span class="bad">${r.failed}</span>` : 0}</td><td>${dur(r.seconds)}</td></tr>`).join("")
     || '<tr><td colspan="6" class="muted">No tasks today.</td></tr>';

@@ -785,6 +785,9 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     resolved = model or (node_default_model(agent, node_id) if paid else None)
     key = match_key(rules, agent, resolved)
+    if rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind):
+        raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "
+                           "guidance only)")
     if paid and key is None and rules.get("unlisted") == "refuse":
         raise Refusal(400, f"{identity(agent, resolved)} is not in the budget rules, which refuse unlisted models")
     if paid and key is None and resolved is None:
@@ -813,6 +816,9 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                             f_agent, f_model or node_default_model(f_agent, node_id)) in forbidden):
                         continue
                     f_key = match_key(rules, f_agent, f_model)
+                    if rule0_blocks(f_agent, f_model or node_default_model(f_agent, node_id), kind) or \
+                            rule0_blocks(f_agent, f_key, kind):
+                        continue  # rule 0: never reroute a build, fix or test onto Fable
                     if f_key and not kind_allowed(rules["models"][f_key], kind, origin_kind):
                         continue
                     f_entry = entry_for(rules, f_key, f_agent)

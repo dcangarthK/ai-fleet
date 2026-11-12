@@ -98,7 +98,10 @@ def runner_url(node: dict) -> str:
 
 
 class RunnerError(HTTPException):
-    pass
+    """`transport` is True when the runner never answered (connection refused, timeout): not an HTTP error answer."""
+    def __init__(self, status_code: int, detail: str, transport: bool = False):
+        super().__init__(status_code, detail)
+        self.transport = transport
 
 
 def node_runner_token(node: dict | str) -> str:
@@ -125,7 +128,7 @@ async def runner_call(node: dict, method: str, path: str, body: dict | None = No
         async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
             r = await client.request(method, runner_url(node) + path, json=body, headers=headers)
     except httpx.HTTPError as e:
-        raise RunnerError(502, f"runner unreachable: {e.__class__.__name__}")
+        raise RunnerError(502, f"runner unreachable: {e.__class__.__name__}", transport=True)
     if r.is_error:
         detail = r.json().get("detail", r.text) if r.content else r.reason_phrase
         raise RunnerError(502 if r.status_code >= 500 else r.status_code, f"runner: {detail}")
@@ -159,7 +162,7 @@ HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "runn
 
 MAX_HEALTH_JOBS = 32
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-ACTIVITY_SOURCES = ("output", "files", "cpu")
+ACTIVITY_SOURCES = ("output", "files", "cpu", "session")
 
 
 def _number_or_none(value, cap: float) -> float | None:
@@ -558,7 +561,8 @@ def update(task_id: str, **fields) -> None:
         c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
 
 
-def transition(task: dict, expected: set[str], state: str, *, where_node: str | None = None, **fields) -> bool:
+def transition(task: dict, expected: set[str], state: str, *, where_node: str | None = None, quiet: bool = False,
+               **fields) -> bool:
     """Move the task to `state` only if it is still in one of `expected` (and, with `where_node`, still on that
     node: a start's lease, docs/SPEC-live-monitor.md 12.5). Returns whether it moved."""
     now = time.time()
@@ -588,7 +592,7 @@ def transition(task: dict, expected: set[str], state: str, *, where_node: str | 
         node_sql, node_args = (" AND node_id=?", (where_node,)) if where_node is not None else ("", ())
         moved = c.execute(f"UPDATE tasks SET state=?, {cols} WHERE id=? AND state IN ({marks}){node_sql}",
                           (state, *fields.values(), task["id"], *expected, *node_args)).rowcount == 1
-    if moved and state != task["state"]:
+    if moved and state != task["state"] and not quiet:  # quiet: the caller emits its own event (a stall nudge)
         emit(task["id"], f"task.{state}", {"title": task["title"], "from": task["state"], "node": task["node_id"],
                                            "agent": task["agent"]})
     if moved and state in ("review", "done"):
@@ -792,9 +796,18 @@ async def poll_task(task_id: str) -> None:
         await handoff.after_settled(task_id)
 
 
-# Consecutive failed GET /jobs/{id} polls per working task (docs/SPEC-stall-reroute.md 3: 3 in a row while the
-# runner's /health still answers is an "unreachable" job). In memory: a restart starts counting again.
+# Consecutive GET /jobs/{id} polls per working task that the runner answered with an HTTP error
+# (docs/SPEC-stall-reroute.md 3: 3 in a row while the runner's /health still answers is an "unreachable" job).
+# Transport errors (the runner restarting, the network) never count. UNREACHABLE_SINCE holds when the run of
+# failures began: only a /health report newer than that proves the runner itself is up. In memory: a restart
+# starts counting again.
 UNREACHABLE_POLLS: dict[str, int] = {}
+UNREACHABLE_SINCE: dict[str, float] = {}
+
+
+def clear_unreachable(task_id: str) -> None:
+    UNREACHABLE_POLLS.pop(task_id, None)
+    UNREACHABLE_SINCE.pop(task_id, None)
 
 
 async def _poll_task(task_id: str) -> bool:
@@ -802,17 +815,21 @@ async def _poll_task(task_id: str) -> bool:
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] != "working":
-            UNREACHABLE_POLLS.pop(task_id, None)
+            clear_unreachable(task_id)
             return False
         try:
             job = await runner_call(node_of(task), "GET", f"/jobs/{task_id}", timeout=5)
         except HTTPException as e:
-            UNREACHABLE_POLLS[task_id] = UNREACHABLE_POLLS.get(task_id, 0) + 1
+            if getattr(e, "transport", False):
+                clear_unreachable(task_id)  # the runner itself is unreachable: Part D's concern, not this job's
+            else:
+                UNREACHABLE_SINCE.setdefault(task_id, time.time())
+                UNREACHABLE_POLLS[task_id] = UNREACHABLE_POLLS.get(task_id, 0) + 1
             if not task["error"]:
                 update(task_id, error=str(e.detail))
                 emit(task_id, "task.unreachable", {"title": task["title"], "node": task["node_id"]})
             return False
-        UNREACHABLE_POLLS.pop(task_id, None)
+        clear_unreachable(task_id)
         new = outcome(task, job)
         fields = job_fields(job)
         agent_end = iso_epoch(job.get("ended_at"))
@@ -828,8 +845,10 @@ async def _poll_task(task_id: str) -> bool:
     return False
 
 
-def record_usage(task_id: str) -> None:
-    """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none)."""
+def record_usage(task_id: str, outcome_name: str | None = None) -> None:
+    """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none). `outcome_name`
+    overrides the derived outcome (a stall nudge's run is "nudged", not an error)."""
+    forced = outcome_name
     t = get_task(task_id)
     if not t.get("started_at"):
         return  # never ran
@@ -842,6 +861,7 @@ def record_usage(task_id: str) -> None:
         outcome_name = "cancelled"
     else:
         outcome_name = "error"
+    outcome_name = forced or outcome_name
     run = t.get("runs") or 1
     prompt_bytes = t.get("prompt_bytes") if run <= 1 else t.get("run_prompt_bytes")
     row = {"ts": time.time(), "task_id": task_id, "run": run, "agent": t["agent"],

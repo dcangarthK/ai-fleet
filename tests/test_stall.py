@@ -51,6 +51,7 @@ class StallBase(HandoffBase):
         FakeRunner.cancel_reply = None
         stall.reset_state()
         tasks.UNREACHABLE_POLLS.clear()
+        tasks.UNREACHABLE_SINCE.clear()
         with db() as c:  # freshness here comes from the suite's fast polls, not from older heartbeat tests
             c.execute("UPDATE nodes SET heartbeat_at=NULL, heartbeat_ts=NULL")
         for model in (OPUS, SONNET, HAIKU, FABLE):  # the newest runs on record name each tier's concrete model
@@ -72,6 +73,22 @@ class StallBase(HandoffBase):
         self.c.post("/api/refresh", headers=W)
         wait_for(lambda: (self.master()["runner"] or {}).get("jobs") == want and
                  (time.time() - (self.master().get("polled_at") or 0)) < 5)
+
+    def prime(self, task_id, cpu=5.0):
+        """An earlier, distinct runner report with this CPU time: a flat CPU now means idle (fix 2)."""
+        stall.CPU_SEEN[task_id] = [(cpu, 1.0)]
+
+    def new_report(self, *entries):
+        """The same jobs payload again, in a new /health report (a later polled_at)."""
+        before = self.master().get("polled_at") or 0
+        FakeRunner.health_extra = {"jobs": list(entries)}
+        self.c.post("/api/refresh", headers=W)
+        wait_for(lambda: (self.master().get("polled_at") or 0) > before)
+
+    def backoff_over(self, task_id):
+        record = self.record(task_id)
+        record["retry_at"] = time.time() - 1
+        handoff.save_stall(task_id, record)
 
     def master(self):
         return next(n for n in tasks.node_rows() if n["id"] == "master")
@@ -108,7 +125,7 @@ class HealthParserTests(unittest.TestCase):
     def test_jobs_are_kept_cleaned_and_capped(self):
         raw = [job(f"t-{i:08x}") | {"secret": "x", "cwd": "/home/me"} for i in range(40)]
         raw[1] = {"id": "t-00000001", "state": "running", "alive": "yes", "gate_alive": None, "idle_s": -5,
-                  "activity_src": "session", "cpu_s": "lots"}
+                  "activity_src": "bogus", "cpu_s": "lots"}
         raw.insert(0, "junk")
         out = tasks.clean_health({"ok": True, "jobs": raw})["jobs"]
         self.assertEqual(len(out), 32)
@@ -146,10 +163,23 @@ class VerdictTests(StallBase):
         self.assertEqual(stall.idle_after(tasks.get_task(t["id"])), 30 * 60)  # 0.25 x 120 min
         self.set_jobs(job(t["id"], idle_s=29 * 60))
         self.assertEqual(self.verdict(t["id"])["kind"], "ok")
-        self.set_jobs(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
-        self.assertEqual(self.verdict(t["id"])["kind"], "idle")
-        self.set_jobs(job(t["id"], idle_s=31 * 60, cpu_s=9.0))  # CPU time grew since the last look: not idle
+        self.new_report(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
+        self.assertEqual(self.verdict(t["id"])["kind"], "idle")  # flat over two distinct reports
+        self.new_report(job(t["id"], idle_s=31 * 60, cpu_s=9.0))  # CPU time grew since the last report: not idle
         self.assertEqual(self.verdict(t["id"])["kind"], "ok")
+
+    def test_fix2_first_look_is_not_idle_and_a_report_is_never_compared_with_itself(self):
+        t = self.running()
+        self.set_jobs(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
+        self.assertEqual(self.verdict(t["id"])["kind"], "ok")  # no previous report: no evidence
+        self.assertEqual(self.verdict(t["id"])["kind"], "ok")  # the same report again (a faster sweep) proves nothing
+        self.assertEqual(len(stall.CPU_SEEN[t["id"]]), 1)
+        self.new_report(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
+        self.assertEqual(self.verdict(t["id"])["kind"], "idle")
+
+    def test_fix9_session_activity_source_is_kept(self):
+        out = tasks.clean_health({"ok": True, "jobs": [job("t-00000001", activity_src="session")]})["jobs"]
+        self.assertEqual(out[0]["activity_src"], "session")
 
     def test_idle_after_clamp(self):
         self.assertEqual(stall.idle_after({"policy": {"limits": {"task_minutes": 20}}}), 15 * 60)
@@ -178,7 +208,48 @@ class VerdictTests(StallBase):
         saved = FakeRunner.jobs.pop(t["id"])  # /health still answers, GET /jobs/{id} now fails (as t-253101a7)
         self.addCleanup(FakeRunner.jobs.__setitem__, t["id"], saved)
         wait_for(lambda: tasks.UNREACHABLE_POLLS.get(t["id"], 0) >= 3)
+        wait_for(lambda: self.verdict(t["id"])["kind"] == "unreachable")  # once /health answers after that
+
+    def test_fix1_transport_errors_never_count_as_unreachable(self):
+        t = self.running()
+        real = tasks.runner_call
+
+        async def down(node, method, path, body=None, timeout=20):
+            raise tasks.RunnerError(502, "runner unreachable: ConnectError", transport=True)
+        tasks.runner_call = down
+        try:
+            for _ in range(4):
+                self.c.portal.call(tasks._poll_task, t["id"])
+        finally:
+            tasks.runner_call = real
+        self.assertEqual(tasks.UNREACHABLE_POLLS.get(t["id"], 0), 0)
+
+    def test_fix1_unreachable_needs_a_health_report_newer_than_the_first_failure(self):
+        t = self.running()
+        self.set_jobs(job(t["id"]))
+        tasks.UNREACHABLE_POLLS[t["id"]] = 5
+        tasks.UNREACHABLE_SINCE[t["id"]] = time.time() + 30  # failures began after the latest /health report
+        self.assertNotEqual(self.verdict(t["id"])["kind"], "unreachable")
+        tasks.UNREACHABLE_SINCE[t["id"]] = time.time() - 30
         self.assertEqual(self.verdict(t["id"])["kind"], "unreachable")
+
+    def test_fix1_cancel_transport_error_leaves_the_task_working(self):
+        t = self.running()
+        real = tasks.runner_call
+
+        async def down(node, method, path, body=None, timeout=20):
+            if path.endswith("/cancel"):
+                raise tasks.RunnerError(502, "runner unreachable: ReadTimeout", transport=True)
+            return await real(node, method, path, body, timeout)
+        tasks.runner_call = down
+        try:
+            result = self.c.portal.call(lambda: stall.stop(t["id"], {"kind": "dead", "detail": "x"}, nudge=False,
+                                                           now=time.time()))
+        finally:
+            tasks.runner_call = real
+        self.assertEqual(result, "retry")
+        self.assertEqual(tasks.get_task(t["id"])["state"], "working")
+        self.assertFalse(self.events(t["id"], "task.escalated"))
 
     def test_task_grace_first_five_minutes(self):
         t = self.running()
@@ -251,6 +322,7 @@ class ResponseTests(StallBase):
     def test_idle_claude_task_is_nudged_once_then_rerouted(self):
         t = self.running()
         self.set_jobs(job(t["id"], idle_s=40 * 60))
+        self.prime(t["id"])
         self.sweep()
         now = tasks.get_task(t["id"])
         self.assertEqual(now["state"], "working")  # resumed on the same session
@@ -262,6 +334,7 @@ class ResponseTests(StallBase):
         self.age(t["id"])
         self.set_jobs(job(t["id"], idle_s=20 * 60, cpu_s=6.0))
         stall.reset_state()
+        self.prime(t["id"], 6.0)
         self.sweep()
         self.assertEqual(len(self.posts(t["id"], "message")), 1)
         self.assertEqual(tasks.get_task(t["id"])["failure_reason"], "stalled")
@@ -270,9 +343,11 @@ class ResponseTests(StallBase):
     def test_nudged_at_survives_a_restart(self):
         t = self.running()
         self.set_jobs(job(t["id"], idle_s=40 * 60))
+        self.prime(t["id"])
         self.sweep()
         stall.reset_state()  # a controller restart forgets everything in memory
         self.age(t["id"])
+        self.prime(t["id"])
         self.sweep()
         self.assertEqual(len(self.posts(t["id"], "message")), 1)
         self.assertEqual(len(self.children(t["id"])), 1)
@@ -283,6 +358,7 @@ class ResponseTests(StallBase):
         t = self.ok(agent="ollama", model="fake-model:1b", kind="draft")
         self.age(t["id"])
         self.set_jobs(job(t["id"], idle_s=40 * 60))
+        self.prime(t["id"])
         self.sweep()
         self.assertFalse(self.posts(t["id"], "message"))
         [new_id] = self.children(t["id"])
@@ -353,6 +429,9 @@ class ResponseTests(StallBase):
         self.assertEqual(old["stall"]["waiting"], "stalled; no free slot")
         self.assertEqual(self.children(t["id"]), [])
         self.c.post(f"/api/tasks/{other['id']}/cancel", headers=W)
+        self.sweep()  # backing off: too soon to try again
+        self.assertEqual(self.children(t["id"]), [])
+        self.backoff_over(t["id"])
         self.sweep()
         [new_id] = self.children(t["id"])
         self.assertEqual(tasks.get_task(new_id)["profile"], "spare")
@@ -409,6 +488,128 @@ class ResponseTests(StallBase):
         finally:
             stall.AUTO = False
         self.assertEqual(tasks.get_task(t["id"])["failure_reason"], "stalled")
+
+
+class FixRoundTests(StallBase):
+    def test_fix3_stop_during_the_gate_phase_leaves_the_task_working(self):
+        t = self.running()
+        FakeRunner.cancel_reply = {"state": "exited", "exit_code": 0, "result": "done", "gate": {"state": "running"}}
+        self.set_jobs(job(t["id"], alive=False, gate_alive=False))
+        self.sweep()
+        self.assertEqual(tasks.get_task(t["id"])["state"], "working")
+        self.assertFalse(self.events(t["id"], "task.escalated"))
+        self.assertEqual(self.children(t["id"]), [])
+
+    def test_fix8_a_nudge_is_not_a_failure(self):
+        t = self.running()
+        self.set_jobs(job(t["id"], idle_s=40 * 60))
+        self.prime(t["id"])
+        self.sweep()
+        self.assertEqual(tasks.get_task(t["id"])["state"], "working")
+        self.assertEqual(len(self.events(t["id"], "task.nudged")), 1)
+        self.assertFalse(self.events(t["id"], "task.failed"))
+        with db() as c:
+            outcomes = [r[0] for r in c.execute("SELECT outcome FROM agent_usage WHERE task_id=?", (t["id"],))]
+        self.assertEqual(outcomes, ["nudged"])
+
+    def test_fix7_interrupted_task_whose_process_is_still_alive_is_not_rerouted(self):
+        t = self.running()
+        self.set_jobs(job(t["id"], state="lost", alive=True))
+        FakeRunner.jobs[t["id"]].update(state="lost")
+        wait_for(lambda: tasks.get_task(t["id"])["state"] == "interrupted")
+        wait_for(lambda: "alive" in (self.record(t["id"]).get("waiting") or ""))
+        self.assertEqual(self.children(t["id"]), [])
+        self.assertFalse(self.posts(t["id"], "checkpoint"))
+
+    def test_fix6_tries_the_next_choice_and_admits_before_the_checkpoint(self):
+        t = self.running()
+        real = budget.admit
+        refused = []
+
+        def admit(**kw):
+            if kw.get("model") == SONNET:
+                refused.append(kw["model"])
+                raise budget.Refusal(409, "no")
+            return real(**kw)
+        budget.admit = admit
+        try:
+            self.set_jobs(job(t["id"], alive=False))
+            self.sweep()
+        finally:
+            budget.admit = real
+        self.assertTrue(refused)
+        [new_id] = self.children(t["id"])
+        self.assertNotEqual(tasks.get_task(new_id)["model"], SONNET)
+        self.assertEqual(len(self.posts(t["id"], "checkpoint")), 1)  # only for the slot that admitted it
+
+    def test_fix6_no_checkpoint_while_no_slot_admits(self):
+        t = self.running()
+        real = budget.admit
+
+        def admit(**kw):
+            raise budget.Refusal(409, "no")
+        budget.admit = admit
+        try:
+            self.set_jobs(job(t["id"], alive=False))
+            self.sweep()
+            self.backoff_over(t["id"])
+            self.sweep()
+        finally:
+            budget.admit = real
+        self.assertFalse(self.posts(t["id"], "checkpoint"))
+        record = self.record(t["id"])
+        self.assertTrue(record["waiting"])
+        self.assertEqual(record["tries"], 2)
+
+    def test_fix4_admit_refuses_fable_for_build_fix_and_test_even_with_override(self):
+        body = rules()
+        body["models"]["claude:claude-fable-*"]["kinds"] = ["*"]
+        self.put_rules(body)
+        for kind in ("build", "fix", "test"):
+            with self.assertRaises(budget.Refusal):
+                budget.admit(agent="claude", model=FABLE, kind=kind, effort=None, override=True)
+        budget.admit(agent="claude", model=FABLE, kind="review", effort=None, override=False)
+
+    def test_fix4_auto_build_never_lands_on_fable(self):
+        body = rules()
+        for key in body["models"]:
+            body["models"][key]["kinds"] = ["review"]
+        body["models"]["claude:claude-fable-*"]["kinds"] = ["*"]
+        self.put_rules(body)
+        r = self.c.post("/api/tasks", json={"agent": "auto", "prompt": "x", "kind": "build", "gate": "pytest",
+                                            "repo": "/repo"}, headers=W)
+        self.assertEqual(r.status_code, 409, r.text)
+
+    def test_fix4_fallback_reroute_skips_fable(self):
+        body = rules()
+        body["models"]["claude:claude-fable-*"]["kinds"] = ["*"]
+        body["limits"]["on_limit"] = "fallback"
+        body["limits"]["fallbacks"] = {"claude:claude-opus-*": ["claude:claude-fable-5-2"]}
+        self.put_rules(body)
+        with db() as c:  # Opus limited on every account
+            c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
+                      "VALUES (?,?,?,?,?,?,?,?,NULL)", (time.time(), "t-fffffff0", 1, "claude", OPUS,
+                                                        "claude:" + OPUS, "limit", time.time() + 3600))
+        decision = budget.admit(agent="claude", model=OPUS, kind="build", effort=None, override=False)
+        self.assertNotIn("fable", (decision["model"] or "").lower())
+        self.assertEqual(decision["wait"], "limit")
+        stalled = {"agent": "claude", "model": OPUS, "budget_key": "claude:claude-opus-*", "kind": "build",
+                   "node_id": "master", "profile": "fleet"}
+        self.assertNotIn(FABLE, [s["model"] for s in handoff.candidate_slots(stalled, budget.current_rules())])
+
+    def test_fix5_unknown_builder_model_excludes_the_whole_agent(self):
+        real = handoff.build_attempts
+        handoff.build_attempts = lambda _task_id: [("claude", None)]
+        try:
+            slots = handoff.rank_slots("review", (), {"id": "t-00000000", "node_id": "master"})
+        finally:
+            handoff.build_attempts = real
+        self.assertNotIn("claude", {s["agent"] for s in slots})
+
+    def test_fix5_excluded_models(self):
+        slots = handoff.rank_slots("build", (), None, exclude_models=[("claude", SONNET)])
+        self.assertNotIn(SONNET, {s["model"] for s in slots})
+        self.assertTrue(slots)
 
 
 # ---------- ranking and allocation ----------
@@ -534,6 +735,41 @@ class PipelineStallTests(StallBase):
         self.assertEqual((current["state"], current["build_task"], current["round"]), ("building", new, p["round"]))
         self.assertTrue(any("stalled" in (h.get("note") or "") for h in current["history"]))
         self.assertFalse(any("usage limit" in (h.get("note") or "") for h in current["history"]))
+
+    def start_pipeline(self, reviewer_model):
+        body = {"title": "Stall pipeline", "spec": "Build the greeting", "repo": "/repo", "gate": "pytest",
+                "mode": "auto-edit", "builder": {"agent": "claude", "model": OPUS}, "max_rounds": 3,
+                "reviewers": [{"kind": "agent", "agent": "claude", "model": reviewer_model}]}
+        r = self.c.post("/api/pipelines", json=body, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    def test_fix5_a_stalled_pipeline_build_never_goes_to_its_reviewer(self):
+        p = self.start_pipeline(SONNET)
+        first = p["build_task"]
+        self.age(first)
+        self.set_jobs(job(first, alive=False))
+        self.sweep()
+
+        async def polled():
+            await controller.poll_pipeline(p["id"])
+        self.c.portal.call(polled)
+        [new] = self.children(first)
+        self.assertNotEqual(tasks.get_task(new)["model"], SONNET)  # Sonnet would be first otherwise
+
+    def test_must_a_stalled_pipeline_review_is_left_running_with_an_alert(self):
+        p = self.start_pipeline(FABLE)
+        review = self.running(model=SONNET)
+        with db() as c:
+            c.execute("UPDATE pipelines SET reviews=? WHERE id=?",
+                      (json.dumps({"0": {"task_id": review["id"], "status": "pending"}}), p["id"]))
+        self.set_jobs(job(review["id"], alive=False), job(p["build_task"]))
+        self.sweep()
+        self.sweep()
+        self.assertEqual(tasks.get_task(review["id"])["state"], "working")
+        self.assertFalse(self.posts(review["id"], "cancel"))
+        self.assertEqual(len(self.events(review["id"], "task.stall_alert")), 1)
+        self.assertIn("task.stall_alert", [a["type"] for a in live.alerts() if a["task_id"] == review["id"]])
 
 
 if __name__ == "__main__":

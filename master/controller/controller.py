@@ -1884,8 +1884,12 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 return
             if handoff.stall_failure(build):
                 # Part E 12.13: under the pipeline lock (pipeline -> work item -> task). Not a fix round.
+                # The pipeline's reviewers never become its builder (independence, Part E 12.13).
+                reviewers = [(r.get("agent"), r.get("model")) for r in p["reviewers"]
+                             if r.get("kind") == "agent" and r.get("agent")]
                 result = await handoff.handle_handoff(
-                    build["id"], "interrupted" if build["state"] == "interrupted" else "stalled")
+                    build["id"], "interrupted" if build["state"] == "interrupted" else "stalled",
+                    exclude_models=reviewers)
                 if result["action"] in ("handoff", "wait", "left", "escalated"):
                     await _pipeline_step_unlocked(p, {"type": "build_stalled", **result})
                 elif not tasks.get_task(build["id"]).get("resolution"):

@@ -8,7 +8,9 @@ pushed in a heartbeat; never a node file), then responds:
 - overrun: an alert only; the runner's own kill stays the hard stop.
 
 Lock order as Part C: the stop holds only the task lock; the reroute takes the work-item lock, then the task lock.
-Pipeline-owned tasks are only stopped here; the pipeline poll hands them on under its own lock (12.13).
+Pipeline-owned builds are only stopped here (never nudged); the pipeline poll hands them on under its own lock
+(12.13). Pipeline-owned reviews are never stopped: the pipeline would read a killed review as a finished one, so a
+stalled review raises a task.stall_alert for the owner instead.
 """
 import json
 import time
@@ -32,7 +34,9 @@ OVERRUN_SHARE = 0.8
 NUDGE_TEXT = ("You have made no progress for {minutes} min. Report your status and continue, or stop and summarize "
               "what is done and what is left.")
 
-CPU_SEEN: dict[str, float] = {}  # task id -> the job's CPU seconds at the last look
+# task id -> [(cpu_s, report time), ...]: the job's CPU seconds in the last distinct runner reports (newest last)
+CPU_SEEN: dict[str, list[tuple[float, float]]] = {}
+CPU_REPORTS = 2  # CPU must be flat over at least this many distinct reports before a job counts as idle
 
 
 def reset_state() -> None:
@@ -53,11 +57,31 @@ def idle_after(task: dict) -> float:
     return min(max(0.25 * job_minutes(task) * 60, IDLE_MIN), IDLE_MAX)
 
 
+def report_time(node: dict) -> float:
+    """When the controller last received the runner's /health report (polled or pushed); 0 when never."""
+    return max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0])
+
+
 def runner_age(node: dict, now: float) -> float | None:
-    seen = max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0])
+    seen = report_time(node)
     if not seen:
         return None
     return now - seen + (node.get("runner_age_s") or 0)
+
+
+def cpu_flat(task_id: str, cpu_s, reported: float) -> bool:
+    """Record this report's CPU seconds and say whether CPU stayed flat over the last CPU_REPORTS distinct reports.
+    The sweep runs more often than reports arrive, so a report is never compared with itself; without enough
+    reports there is no evidence of idleness (False). A runner that doesn't report CPU leaves idle_s to decide."""
+    if not isinstance(cpu_s, (int, float)) or isinstance(cpu_s, bool):
+        return True
+    samples = CPU_SEEN.setdefault(task_id, [])
+    if not samples or samples[-1][1] != reported:
+        samples.append((float(cpu_s), reported))
+        del samples[:-CPU_REPORTS]
+    if len(samples) < CPU_REPORTS:
+        return False
+    return samples[-1][0] <= samples[0][0]
 
 
 def _verdict(kind: str, detail: str, **extra) -> dict:
@@ -81,7 +105,9 @@ def classify(task: dict, node: dict | None, now: float) -> dict:
         return _verdict("unknown", "the runner doesn't report jobs")
     elapsed = now - started
     overrun = elapsed > OVERRUN_SHARE * job_minutes(task) * 60
-    if tasks.UNREACHABLE_POLLS.get(task["id"], 0) >= UNREACHABLE_AFTER:
+    failing_since = tasks.UNREACHABLE_SINCE.get(task["id"])
+    if (tasks.UNREACHABLE_POLLS.get(task["id"], 0) >= UNREACHABLE_AFTER and failing_since is not None
+            and report_time(node) > failing_since):  # /health answered after the job polls began failing
         return _verdict("unreachable", f"the runner answered /health but not for this job "
                                        f"{tasks.UNREACHABLE_POLLS[task['id']]} times in a row", overrun=overrun)
     job = next((j for j in jobs if isinstance(j, dict) and j.get("id") == task["id"]), None)
@@ -90,16 +116,13 @@ def classify(task: dict, node: dict | None, now: float) -> dict:
     if job.get("state") == "running" and job.get("alive") is False and job.get("gate_alive") is not True:
         return _verdict("dead", "the runner says running but neither the agent nor the gate process is alive",
                         overrun=overrun)
-    idle_s, cpu_s = job.get("idle_s"), job.get("cpu_s")
-    previous = CPU_SEEN.get(task["id"])
-    if isinstance(cpu_s, (int, float)):
-        CPU_SEEN[task["id"]] = cpu_s
-    grew = previous is not None and isinstance(cpu_s, (int, float)) and cpu_s > previous
+    idle_s = job.get("idle_s")
+    flat = cpu_flat(task["id"], job.get("cpu_s"), report_time(node))
     threshold = idle_after(task)
     if handoff.stall_record(task).get("nudged_at"):
         threshold /= 2  # after the nudge, a further idle_after / 2 (5.2)
     alive = job.get("alive") is True or job.get("gate_alive") is True
-    if alive and isinstance(idle_s, (int, float)) and idle_s >= threshold and not grew:
+    if alive and isinstance(idle_s, (int, float)) and idle_s >= threshold and flat:
         return _verdict("idle", f"no output, file or CPU activity for {int(idle_s // 60)} min", overrun=overrun,
                         idle_s=idle_s)
     return _verdict("ok", "active", overrun=overrun, idle_s=idle_s)
@@ -111,25 +134,29 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
     """Under the task lock (12.6): cancel, then read the job the runner returns. A job that already exited is
     settled as the poll would; otherwise the task becomes failed(stalled), never cancelled. Without the runner's
     confirmation that the process is gone it is escalated instead (12.9). With `nudge`, one resume on the same
-    session follows. Returns "gone" | "settled" | "settled_failed" | "escalated" | "nudged" | "stopped"."""
+    session follows; the stop before it is quiet (no task.failed event, a "nudged" usage row).
+    Returns "gone" | "retry" | "working" | "settled" | "settled_failed" | "escalated" | "nudged" | "stopped"."""
     async with tasks._locks[task_id]:
         task = tasks.get_task(task_id)
         if task["state"] != "working":
             return "gone"
         try:
             job = await tasks.runner_call(tasks.node_of(task), "POST", f"/jobs/{task_id}/cancel")
-        except HTTPException:
+        except HTTPException as exc:
+            if getattr(exc, "transport", False):
+                return "retry"  # the runner didn't answer at all (restarting?): leave the task, try next pass
             job = None
         job = job if isinstance(job, dict) else None
         state = (job or {}).get("state")
         if job and state not in ("running", "cancelled", "lost"):
             new = tasks.outcome(task, job)
-            if new != "working":
-                fields = tasks.job_fields(job)
-                if tasks.transition(task, {"working"}, new, **fields):
-                    tasks.record_usage(task_id)
-                    return "settled_failed" if new in ("failed", "interrupted") else "settled"
-                return "gone"
+            if new == "working":
+                return "working"  # the agent exited and its gate still runs: cancel killed nothing; leave it
+            fields = tasks.job_fields(job)
+            if tasks.transition(task, {"working"}, new, **fields):
+                tasks.record_usage(task_id)
+                return "settled_failed" if new in ("failed", "interrupted") else "settled"
+            return "gone"
         confirmed = state in ("cancelled", "lost")
         record = handoff.stall_record(task)
         record.update(stopped_at=now)
@@ -140,9 +167,10 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
                   "stall": json.dumps(record)}
         if job and isinstance(job.get("usage"), dict):
             fields["usage"] = json.dumps(job["usage"])
-        if not tasks.transition(task, {"working"}, "failed", **fields):
+        quiet = nudge and confirmed  # a nudge isn't a failure: task.nudged / task.nudge_held say what happened
+        if not tasks.transition(task, {"working"}, "failed", quiet=quiet, **fields):
             return "gone"
-        tasks.record_usage(task_id)
+        tasks.record_usage(task_id, "nudged" if quiet else None)
         CPU_SEEN.pop(task_id, None)
         if not confirmed:
             emit(task_id, "task.escalated", {"title": task["title"], "node": task["node_id"],
@@ -157,6 +185,8 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
             await tasks.resume(tasks.get_task(task_id), NUDGE_TEXT.format(minutes=minutes), [])
         except HTTPException as exc:  # admission deferred or refused it, or the runner failed: reroute instead
             emit(task_id, "task.nudge_held", {"title": task["title"], "reason": str(exc.detail)[:300]})
+            emit(task_id, "task.failed", {"title": task["title"], "from": "working", "node": task["node_id"],
+                                          "agent": task["agent"]})  # now it really is a failed run
             return "stopped"
         emit(task_id, "task.nudged", {"title": task["title"], "idle_min": minutes})
         return "nudged"
@@ -164,6 +194,15 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
 
 async def respond(task: dict, verdict: dict, now: float) -> str:
     record = handoff.stall_record(task)
+    if handoff.pipeline_review(task["id"]):
+        # Never stopped: the pipeline would take a killed review for a finished one. An alert, once per stall kind.
+        if record.get("alerted") != verdict["kind"]:
+            record["alerted"] = verdict["kind"]
+            handoff.save_stall(task["id"], record)
+            emit(task["id"], "task.stall_alert", {"title": task["title"], "node": task["node_id"],
+                                                  "kind": verdict["kind"], "detail": verdict["detail"],
+                                                  "reason": "a pipeline review is left running for the owner"})
+        return "alerted"
     owned = handoff.pipeline_owned(task["id"])
     nudge = (verdict["kind"] == "idle" and task["agent"] != "ollama" and bool(task.get("session_id"))
              and not record.get("nudged_at") and not owned)
@@ -231,8 +270,11 @@ async def sweep(now: float | None = None) -> None:
     for task_id in waiting:
         try:
             task = tasks.get_task(task_id)
-            if not handoff.stall_record(task).get("waiting") or handoff.pipeline_owned(task_id):
+            record = handoff.stall_record(task)
+            if not record.get("waiting") or handoff.pipeline_owned(task_id):
                 continue
+            if (record.get("retry_at") or 0) > now:
+                continue  # backing off
             await handoff.handle_handoff(task_id, "interrupted" if task["state"] == "interrupted" else "stalled",
                                          now=now)
         except Exception as exc:

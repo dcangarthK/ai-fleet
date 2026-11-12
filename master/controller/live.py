@@ -476,11 +476,12 @@ def machine_row(node: dict, now: float) -> dict:
 
 ALERT_TYPES = ("task.awaiting_approval", "task.blocked", "task.failed", "budget.limit", "budget.rules_invalid",
                "budget.limit_unrecognised", "node.swap_high", "node.disk_low", "node.runner_offline",
-               "task.escalated", "task.overrun")  # Part E: a stall left for the owner; a run past 80% of its time
+               "task.escalated", "task.overrun", "task.stall_alert")  # Part E: a stall left for the owner; a run past 80% of its time
 
 
 TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.awaiting_approval": "awaiting_approval",
-                    "task.escalated": "failed", "task.overrun": "working"}
+                    "task.escalated": "failed", "task.overrun": "working",
+                    "task.stall_alert": "working"}
 
 
 def _task_alert_open(c, task_id: str | None, kind: str) -> bool:

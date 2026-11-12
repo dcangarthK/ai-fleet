@@ -33,6 +33,8 @@ METRICS = {"mem_total_gb": 48.0, "mem_used_gb": 20.0, "swap_used_gb": 0.5, "disk
 class LiveBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._poll = tasks.POLL_SECONDS
+        tasks.POLL_SECONDS = 0  # the app's own task poll stays off; tests call recover/poll_task for a tick
         fresh_loop_state()
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
@@ -49,6 +51,7 @@ class LiveBase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        tasks.POLL_SECONDS = cls._poll
         FakeRunner.agents["codex"] = None
         FakeRunner.profiles = None
         FakeRunner.health_extra = {}

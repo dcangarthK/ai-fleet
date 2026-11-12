@@ -735,10 +735,8 @@ def get_budget_hold() -> dict:
 def put_budget_hold(body: BudgetHold, request: Request) -> dict:
     """Admin only (it sits under auth.ADMIN_PATHS' /api/budget/rules): the owner freezes or releases one account.
     Placement then moves nothing onto or off it (Part G req 9)."""
-    current = budget.held_accounts()
-    wanted = current | {body.account} if body.hold else current - {body.account}
     try:
-        saved = budget.set_hold(sorted(wanted), getattr(request.state, "actor", "local"))
+        saved = budget.set_hold(body.account, body.hold, getattr(request.state, "actor", "local"))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     events.emit(None, "budget.hold_changed", {"account": body.account, "hold": body.hold, "version": saved["version"],

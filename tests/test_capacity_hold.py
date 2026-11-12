@@ -88,7 +88,7 @@ class RestartCapTests(CapacityBase):
 
 class HoldTests(CapacityBase):
     def tearDown(self):
-        budget.set_hold([], "test")
+        budget.replace_hold([], "test")
         super().tearDown()
 
     def test_hold_column_migration_is_idempotent(self):
@@ -107,20 +107,20 @@ class HoldTests(CapacityBase):
         for good in ("claude/spare", "claude@m1/fleet", "codex/main"):
             self.assertTrue(budget.valid_hold_key(good), good)
         with self.assertRaises(ValueError):
-            budget.set_hold(["nonsense"], "owner")
+            budget.replace_hold(["nonsense"], "owner")
         with self.assertRaises(ValueError):
-            budget.set_hold("claude/spare", "owner")
+            budget.replace_hold("claude/spare", "owner")
 
     def test_set_hold_is_a_new_version_and_survives_a_rules_save(self):
         before = budget.rules_row()["version"]
-        saved = budget.set_hold(["claude/spare", "claude/spare"], "owner")
+        saved = budget.replace_hold(["claude/spare", "claude/spare"], "owner")
         self.assertEqual(saved["version"], before + 1)
         self.assertEqual(budget.held_accounts(), {"claude/spare"})
         self.put_rules(rules())  # the owner edits other rules: hold carries forward
         self.assertEqual(budget.held_accounts(), {"claude/spare"})
         restored = budget.rules_row()
         self.assertEqual(json.loads(restored["hold"]), ["claude/spare"])
-        budget.set_hold([], "owner")
+        budget.replace_hold([], "owner")
         self.assertEqual(budget.held_accounts(), set())
 
     def test_a_rules_body_cannot_set_hold(self):
@@ -135,18 +135,18 @@ class HoldTests(CapacityBase):
         free = b if c["account"] != "claude/spare" else a
         target = free["account"]
         self.free(free)
-        budget.set_hold([target], "owner")
+        budget.replace_hold([target], "owner")
         self.assertIsNone(capacity.choose_move(tasks.get_task(c["id"]), usage.now()))
         self.assertEqual(self.tick(), [])
         self.assertEqual(tasks.get_task(c["id"])["account"], c["account"])
-        budget.set_hold([], "owner")  # released: the same move now happens
+        budget.replace_hold([], "owner")  # released: the same move now happens
         self.assertEqual(self.tick(), [c["id"]])
 
     def test_nothing_moves_off_a_held_account(self):
         self.mode("live")
         a, b, c = self.queued_behind_busy_accounts()
         self.free(b if c["account"] != "claude/spare" else a)
-        budget.set_hold([c["account"]], "owner")
+        budget.replace_hold([c["account"]], "owner")
         self.assertIsNone(capacity.choose_move(tasks.get_task(c["id"]), usage.now()))
         self.assertEqual(self.tick(), [])
         self.assertEqual(tasks.get_task(c["id"])["account"], c["account"])
@@ -158,14 +158,47 @@ class HoldTests(CapacityBase):
         ranked = tasks.get_task(c["id"])
         slot = capacity.choose_move(ranked, usage.now())
         self.assertIsNotNone(slot)
-        budget.set_hold([slot["account"]], "owner")
+        budget.replace_hold([slot["account"]], "owner")
         self.assertFalse(self.c.portal.call(capacity._apply_move, c["id"], slot, "test", ranked))
         self.assertEqual(tasks.get_task(c["id"])["account"], c["account"])
 
 
+class HoldDeltaTests(CapacityBase):
+    def tearDown(self):
+        budget.replace_hold([], "test")
+        super().tearDown()
+
+    def test_deltas_add_and_remove_one_account(self):
+        budget.set_hold("claude/a", True, "owner")
+        budget.set_hold("claude/b", True, "owner")
+        self.assertEqual(budget.held_accounts(), {"claude/a", "claude/b"})
+        self.assertEqual(budget.set_hold("claude/a", False, "owner")["hold"], ["claude/b"])
+        with self.assertRaises(ValueError):
+            budget.set_hold("nonsense", True, "owner")
+
+    def test_concurrent_deltas_lose_no_update(self):
+        import threading
+        names = [f"claude/acct{i}" for i in range(8)]
+        errors = []
+
+        def hold(name):
+            try:
+                budget.set_hold(name, True, "owner")
+            except Exception as exc:  # reported below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hold, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(budget.held_accounts(), set(names))
+
+
 class HoldEverywhereTests(CapacityBase):
     def tearDown(self):
-        budget.set_hold([], "test")
+        budget.replace_hold([], "test")
         super().tearDown()
 
     def accounts(self, task):
@@ -175,19 +208,19 @@ class HoldEverywhereTests(CapacityBase):
         a = self.build()
         free = self.accounts(a)
         self.assertTrue(free, "a free spare slot is a candidate before the hold")
-        budget.set_hold(sorted(free), "owner")
+        budget.replace_hold(sorted(free), "owner")
         self.assertEqual(self.accounts(a), set())
 
     def test_handoff_off_a_held_account_has_no_candidates(self):
         a = self.build()
         self.assertTrue(self.accounts(a))
-        budget.set_hold([a["account"]], "owner")
+        budget.replace_hold([a["account"]], "owner")
         self.assertEqual(self.accounts(a), set())
 
     def test_the_handoff_apply_step_refuses_a_held_account(self):
         a = self.build()
         slot = handoff.candidate_slots(tasks.get_task(a["id"]), budget.current_rules())[0]
-        budget.set_hold([slot["account"]], "owner")  # held after the slot was chosen
+        budget.replace_hold([slot["account"]], "owner")  # held after the slot was chosen
         got = self.c.portal.call(handoff._claim_to_insert, tasks.get_task(a["id"]), slot, budget.current_rules(),
                                  usage.now())
         self.assertEqual(got["action"], "none")

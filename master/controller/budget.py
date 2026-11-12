@@ -619,20 +619,36 @@ def held_accounts(conn=None, report: bool = True) -> set[str]:
     return keys
 
 
-def set_hold(accounts, author: str) -> dict:
-    """The owner's freeze list, as a new rules version (same body, new hold). Only the owner's admin route may call it."""
-    if not isinstance(accounts, list) or not all(valid_hold_key(a) for a in accounts):
-        raise ValueError("hold must be a list of account keys like claude/spare")
+def _write_hold(change, author: str) -> dict:
+    """One BEGIN IMMEDIATE: read the latest hold, apply `change(current set) -> new set`, insert the new version. Two
+    concurrent writers serialise, so neither loses the other's update."""
     now = time.time()
     with db() as c:
         ensure_hold_column(c)
         c.execute("BEGIN IMMEDIATE")
         latest = c.execute("SELECT version, body FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+        current = held_accounts(c, report=False)
+        wanted = sorted(change(current))
         version = (latest["version"] if latest else 0) + 1
         body = latest["body"] if latest else json.dumps(DEFAULT_RULES)
         c.execute("INSERT INTO budget_rules (version, body, author, created_at, hold) VALUES (?,?,?,?,?)",
-                  (version, body, author, now, json.dumps(sorted(set(accounts)))))
-    return {"version": version, "hold": sorted(set(accounts)), "author": author, "created_at": now}
+                  (version, body, author, now, json.dumps(wanted)))
+    return {"version": version, "hold": wanted, "author": author, "created_at": now}
+
+
+def set_hold(account, hold: bool, author: str) -> dict:
+    """The owner's freeze of one account (a delta, applied to the stored list inside one transaction). Only the
+    owner's admin route may call it."""
+    if not valid_hold_key(account):
+        raise ValueError("hold needs an account key like claude/spare")
+    return _write_hold(lambda cur: cur | {account} if hold else cur - {account}, author)
+
+
+def replace_hold(accounts, author: str) -> dict:
+    """Replace the whole freeze list (tests, and the owner's bulk reset)."""
+    if not isinstance(accounts, list) or not all(valid_hold_key(a) for a in accounts):
+        raise ValueError("hold must be a list of account keys like claude/spare")
+    return _write_hold(lambda _cur: set(accounts), author)
 
 
 def seed_rules() -> None:

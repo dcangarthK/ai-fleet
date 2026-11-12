@@ -5,8 +5,13 @@
 #   .\onboard.ps1 -AllowRoot C:\code -AllowRoot D:\repos
 #   .\onboard.ps1 -ScanOnly                    just rescan and republish (runs hourly after onboarding)
 param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(),
-      [string]$FleetDir = "", [string]$Enroll = "", [string]$Master = "")
+      [string]$FleetDir = "", [string]$Enroll = "", [string]$EnrollFile = "", [switch]$EnrollPrompt,
+      [string]$Master = "")
 $ErrorActionPreference = "Stop"
+# Prefer -EnrollPrompt (asks, input hidden) or -EnrollFile PATH: a code given as -Enroll VALUE stays in the
+# process command line and PowerShell history.
+$EnrollRequested = [bool]($Enroll -or $EnrollFile -or $EnrollPrompt)
+$EnrollCode = ""
 $AllowRootsSet = $PSBoundParameters.ContainsKey("AllowRoot")
 if (-not $FleetDir) { $FleetDir = if ($env:FLEET_DIR) { $env:FLEET_DIR } else { Join-Path $env:ProgramData "ai-fleet" } }
 $InfoPort = 11435
@@ -33,20 +38,28 @@ $TS = "$env:ProgramFiles\Tailscale\tailscale.exe"
 $OllamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
 function TailnetIp { if (Test-Path $TS) { ((& $TS ip -4) | Select-Object -First 1).Trim() } else { "" } }
 
-function Ensure-Tailscale {
+function Ensure-TailscaleConnection {
   if (-not (Test-Path $TS)) {
     Say "Installing Tailscale"
     winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
   }
-  $tags = try { ((& $TS status --json) | ConvertFrom-Json).Self.Tags } catch { @() }
+  $status = try { (& $TS status --json) | ConvertFrom-Json } catch { $null }
+  if ($EnrollRequested -and $null -ne $status -and @($status.Self.Tags) -contains "tag:llm-node") {
+    throw "This machine is already tagged tag:llm-node; remove the tag before enrollment so it can reach the master."
+  }
+  if ($null -eq $status -or $status.BackendState -ne "Running") {
+    Say "Joining the tailnet (log in if a URL appears)"
+    & $TS up
+    if ($LASTEXITCODE -ne 0) { throw "Tailscale sign-in failed" }
+  }
+}
+
+function Ensure-WorkerTag {
+  $tags = try { @(((& $TS status --json) | ConvertFrom-Json).Self.Tags) } catch { @() }
   if (-not ($tags -contains "tag:llm-node")) {
-    Say "Joining the tailnet as tag:llm-node (log in if a URL appears)"
-    # No --reset: keep the machine's existing Tailscale settings (routes, DNS, exit node).
-    & $TS up --advertise-tags=tag:llm-node
-    if ($LASTEXITCODE -ne 0) {
-      Write-Host "Tailscale wants existing non-default flags repeated. Run the command it suggests above, keeping --advertise-tags=tag:llm-node, then re-run."
-      exit 1
-    }
+    Say "Advertising tag:llm-node after enrollment"
+    & $TS set --advertise-tags=tag:llm-node
+    if ($LASTEXITCODE -ne 0) { throw "Could not advertise tag:llm-node" }
   }
 }
 
@@ -3197,7 +3210,7 @@ if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
   if ($token) {
     $script:RunnerTokenValue = $token
     $nodeName = $env:COMPUTERNAME.ToLower()
-    if (-not $Enroll) {
+    if (-not $EnrollRequested) {
       Write-Host "Runner token (shown once). On the master run: printf '%s\n' '$token' | uv run --script master/controller/controller.py runner-token set '$nodeName'"
     }
   } else {
@@ -3211,8 +3224,22 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $admin) { Write-Host "Run this in an elevated PowerShell (Run as administrator)."; exit 1 }
 if (-not (Have winget)) { Write-Host "winget is required (App Installer from the Microsoft Store)."; exit 1 }
 
+if ($EnrollRequested) {  # resolve the code first: a bad file or no terminal stops before anything changes
+  if (-not $Master) { throw "-Master is required with -Enroll, -EnrollFile or -EnrollPrompt" }
+  if ($EnrollFile) {
+    if (-not (Test-Path -LiteralPath $EnrollFile)) { throw "-EnrollFile ${EnrollFile}: no such file" }
+    $EnrollCode = (Get-Content -LiteralPath $EnrollFile -Raw).Trim()
+  } elseif ($EnrollPrompt) {
+    $secure = Read-Host -AsSecureString "Console enrollment code"
+    $EnrollCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+  } else {
+    Write-Warning "The enrollment code was passed on the command line, so it is visible in the process list and PowerShell history. Next time use -EnrollPrompt or -EnrollFile PATH."
+    $EnrollCode = $Enroll
+  }
+  if (-not $EnrollCode) { throw "The enrollment code is empty" }
+}
 Say "AI fleet onboarding: $env:COMPUTERNAME, Windows, $(RamGB)GB RAM, $(GpuGB)GB GPU"
-Ensure-Tailscale
+Ensure-TailscaleConnection
 $ip = TailnetIp
 if (-not $ip) { Write-Host "No tailnet IP: is Tailscale signed in?"; exit 1 }
 Configure-Ollama $ip
@@ -3220,13 +3247,14 @@ Say "Scanning for LLMs, engines and agents"
 Scan $ip
 Install-Services $ip
 Install-Runner $ip
-if ($Enroll) {
-  if (-not $Master) { throw "-Master is required with -Enroll" }
+if ($EnrollRequested) {
   if (-not $RunnerTokenValue) { throw "Runner token was not created; enrollment cannot complete" }
-  $body = @{ code = $Enroll; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
+  $body = @{ code = $EnrollCode; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
   Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd('/') + "/api/enroll/complete") -ContentType "application/json" -Body $body | Out-Null
   $RunnerTokenValue = ""
+  $EnrollCode = ""
   Write-Host "Enrollment completed; approve this pending node in the console."
 }
+Ensure-WorkerTag
 Say "Done"
 Write-Host "This node will show as 'pending' in the master dashboard within ~30s. Approve it there, then assign roles."

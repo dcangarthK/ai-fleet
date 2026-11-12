@@ -3708,8 +3708,9 @@ PY
 # POST {code, hostname, runner_token} to the master. Neither secret is ever in a process's argv: the code
 # reaches the JSON encoder on its stdin (printf is a builtin), the encoder reads the token from its 0600 file,
 # and curl reads the body from stdin.
-# Must run while this machine can reach the master's https port: the tailnet policy lets your own
-# (untagged) devices reach tag:master:8443, but not tag:llm-node machines.
+# Must run while this machine can reach the master's https port. The tailnet policy lets both your own devices
+# and tag:llm-node workers reach tag:master:8443, but a machine is tagged only after enrolment succeeds, so a
+# failed enrolment leaves it untagged and retryable.
 ENROLL_BODY_PY='import json, sys
 host, token_file = sys.argv[1:]
 code = sys.stdin.readline().strip()
@@ -3748,8 +3749,8 @@ print_manual_registration() {
   echo "             (it asks for the token with input hidden)"
 }
 
-# Enrollment did not complete: stop while this machine is still untagged, so it can still reach the master.
-# Tagging it tag:llm-node first would make a retry impossible (the policy blocks tagged nodes from :8443).
+# Enrollment did not complete: stop while this machine is still untagged, so a failed enrolment never leaves a
+# tag:llm-node machine that the master has not accepted (workers reach :8443 only for heartbeats).
 enroll_stop() {
   echo
   if [ "${1:-}" = tagged ]; then

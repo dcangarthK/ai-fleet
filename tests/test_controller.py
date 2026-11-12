@@ -282,11 +282,20 @@ class ControllerTests(unittest.TestCase):
         with db() as c:
             c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
 
+    def drop_dmr_fixture_rows(self, catalog_id):
+        # The shared database must look as it did before the test: no dmr role, assignment or catalog row.
+        with db() as c:
+            c.execute("DELETE FROM assignments WHERE role='dmr-test'")
+            c.execute("DELETE FROM roles WHERE name='dmr-test'")
+            c.execute("DELETE FROM node_models WHERE catalog_id=?", (catalog_id,))
+            c.execute("DELETE FROM model_catalog WHERE id=?", (catalog_id,))
+
     def test_dmr_catalog_assignment_and_role_task_keep_engine_identity(self):
         added = self.c.post("/api/models", json={"reference": "fake-model:1b", "engine": "dmr",
                                                   "display_name": "Fake DMR"}, headers=W)
         self.assertEqual(200, added.status_code, added.text)
         dmr = added.json()
+        self.addCleanup(self.drop_dmr_fixture_rows, dmr["id"])
         self.assertEqual("dmr", dmr["engine"])
         listed = [m for m in self.c.get("/api/models").json() if m["reference"] == "fake-model:1b"]
         self.assertEqual(["dmr"], [m["engine"] for m in listed if m["id"] == dmr["id"]])

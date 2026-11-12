@@ -988,6 +988,24 @@ class AlertTests(LiveBase):
 
 
 class SweepTests(LiveBase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        # These tests write polled_at/heartbeat_at straight into the db and then call sweep_once. The app's own node
+        # poll (controller.loop, every FLEET_POLL_SECONDS=0.3 s in tests) rewrites those columns and can land between
+        # the write and the sweep. Stop that one background task; /api/refresh still ticks on demand.
+        async def stop_node_poll():
+            mine = [t for t in asyncio.all_tasks() if t.get_coro().__qualname__ == "loop"
+                    and getattr(t.get_coro(), "cr_code", None) is not None
+                    and t.get_coro().cr_code.co_filename == controller.loop.__code__.co_filename]
+            for task in mine:
+                task.cancel()
+            await asyncio.gather(*mine, return_exceptions=True)
+            return len(mine)
+        cls.stopped_polls = cls.c.portal.call(stop_node_poll)
+        assert cls.stopped_polls == 1, cls.stopped_polls
+
     def node_ages(self, heartbeat_age, poll_age):
         now = time.time()
         with db() as c:

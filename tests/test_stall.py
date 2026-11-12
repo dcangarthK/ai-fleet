@@ -805,6 +805,10 @@ class PipelineStallTests(StallBase):
         self.sweep()
 
         async def polled():
+            # The app's own pipeline loop polls this pipeline too; wait out a poll in flight (it holds the lock and
+            # makes a second poll skip), then poll, exactly as the sibling test above does.
+            async with controller._pipeline_locks.setdefault(p["id"], asyncio.Lock()):
+                pass
             await controller.poll_pipeline(p["id"])
         self.c.portal.call(polled)
         [new] = self.children(first)

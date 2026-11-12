@@ -120,7 +120,7 @@ export function NodeDetailPage() {
 
   const hw = node.inventory?.hardware ?? {};
   const recent = (tasks.data ?? []).filter((t) => t.node_id === node.id).slice(0, 10);
-  const time = (usage.data ?? []).filter((u) => u.node_id === node.id);
+  const time = (usage.data?.rows ?? []).filter((u) => u.node_id === node.id);
   const roles = (fleet.data?.assignments ?? []).filter((r) => r.node_id === node.id);
   const r = node.runner;
 

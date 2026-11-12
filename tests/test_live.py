@@ -323,6 +323,44 @@ class PresenceTests(LiveBase):
         presence.SESSIONS["s-24"]["last_seen"] -= 16 * 60
         self.assertTrue(next(s for s in self.live()["orchestrator"] if s["session"] == "s-24")["stale"])
 
+    def restart(self):
+        """What a controller restart does to memory: everything in presence is gone until it is loaded again."""
+        presence.SESSIONS.clear()
+        presence.WAITS.clear()
+        presence.LAST_WAIT.clear()
+        presence.forget_loaded()
+
+    def test_presence_survives_a_restart_as_stale_since_t(self):
+        """Req 8 (dashboard truth): last known presence is persisted and shown stale until a request refreshes it."""
+        self.c.get("/api/fleet", headers=self.H)
+        seen = presence.SESSIONS["orch-1"]["last_seen"]
+        self.restart()
+        [s] = self.live()["orchestrator"]
+        self.assertEqual((s["session"], s["model"], s["account_label"]), ("orch-1", "claude-opus-5-5", "spare"))
+        self.assertTrue(s["stale"])
+        self.assertAlmostEqual(s["stale_since"], seen, delta=1)
+        self.assertIsNone(s["waiting_on"])
+        self.c.get("/api/fleet", headers=self.H)
+        [s] = self.live()["orchestrator"]
+        self.assertFalse(s["stale"])
+        self.assertIsNone(s["stale_since"])
+
+    def test_restored_presence_is_not_refreshed_by_other_sessions(self):
+        self.c.get("/api/fleet", headers=self.H)
+        self.restart()
+        self.c.get("/api/fleet", headers={"X-Fleet-Session": "orch-9"})
+        by = {s["session"]: s for s in self.live()["orchestrator"]}
+        self.assertTrue(by["orch-1"]["stale"])
+        self.assertFalse(by["orch-9"]["stale"])
+
+    def test_evicted_sessions_are_not_restored(self):
+        for i in range(25):
+            self.c.get("/api/fleet", headers={"X-Fleet-Session": f"s-{i}"})
+        self.restart()
+        sessions = self.live()["orchestrator"]
+        self.assertEqual(len(sessions), 20)
+        self.assertNotIn("s-0", {s["session"] for s in sessions})
+
     def test_open_wait_is_shown_then_the_last_wait(self):
         t = self.ok(agent="claude", model=SONNET, kind="draft")
 

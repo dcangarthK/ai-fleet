@@ -185,6 +185,14 @@ export interface UsageRow {
   seconds: number;
 }
 
+/** GET /api/usage: the window it covers, and per node and agent counts; `failed` is unsettled failures only. */
+export interface UsageResponse {
+  window_days: number;
+  since: number;
+  until: number;
+  rows: UsageRow[];
+}
+
 export interface FleetEvent {
   id: number;
   ts: number;

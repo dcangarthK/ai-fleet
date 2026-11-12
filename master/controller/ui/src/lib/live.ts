@@ -10,6 +10,8 @@ export interface Session {
   account_label: string | null;
   last_seen: number;
   stale: boolean;
+  /** When a stale session was last seen: a restored one has not been seen since the controller restarted. */
+  stale_since?: number | null;
   waiting_on: string[] | null;
   last_wait: { ids: string[]; ago_s: number } | null;
 }
@@ -157,7 +159,8 @@ const short = (model: string | null | undefined): string =>
 /** "Orchestrator (opus 5.5, configured; spare), last seen 2m ago, waiting on t-1". */
 export function presenceText(s: Session, now = Date.now() / 1000): string {
   const who = [s.model ? `${short(s.model)}, configured` : null, s.account_label].filter(Boolean).join("; ");
-  const parts = [`Orchestrator${who ? ` (${who})` : ""}`, `last seen ${ago(s.last_seen, now)}`];
+  const seen = s.stale && s.stale_since ? `stale since ${clockTime(s.stale_since)}` : `last seen ${ago(s.last_seen, now)}`;
+  const parts = [`Orchestrator${who ? ` (${who})` : ""}`, seen];
   if (s.waiting_on?.length) parts.push(`waiting on ${s.waiting_on.join(", ")}`);
   else if (s.last_wait) parts.push(`last waited on ${s.last_wait.ids.join(", ")} ${duration(s.last_wait.ago_s)} ago`);
   return parts.join(", ");

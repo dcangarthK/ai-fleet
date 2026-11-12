@@ -1,6 +1,6 @@
 # Spec: capacity-driven placement (Part G)
 
-Status: draft v2, 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
+Status: draft v4 (usage watcher, leader continuity), v3 (Claude usage source), v2 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
 merged into main, together with the open fixes. Depends on Part E's `rank_slots` and stall handling, and on Part F
 requirements 6 (one limit helper) and 11 (Codex limits from Codex).
 
@@ -27,7 +27,11 @@ tier order and the independence rules that already exist. Fable never builds, fi
      - `usage` = `{window: "5h"|"weekly", used_percent, resets_at, source, observed_at}`.
    - Sources:
      - Codex: the newest `rate_limits` record in its session logs (Part F requirement 11).
-     - Claude: the usage the CLI reports (statusline or `/usage` data). Where none is available, `source: "inferred"` comes from limit failures.
+     - Claude: the newest `rate_limit_event` in the runner's stream-json job logs (`~/.ai-fleet/jobs/<id>/events.jsonl`,
+       keyed by the job's `profile`): `rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}`
+       (utilization is 0–1; `observed_at` = read time or file mtime, since the event has no timestamp). A
+       `status:"rejected"` event gives an exact `resets_at` and never clears a limit. No event, or older than 30
+       minutes: `source: "inferred"`/stale. Source found by research task t-77a287f5.
    - Stale usage (older than 30 minutes) is labelled stale and is never used to clear a limit.
 2. **Limits follow live usage.** A model is limited only while live usage says so, or while a limit failure is
    newer than the last fresh usage record. Fresh data showing headroom clears the limit automatically, so no owner
@@ -57,10 +61,29 @@ tier order and the independence rules that already exist. Fable never builds, fi
    with its reason. Each one counts in the spend report.
 9. **Owner override.** The Budget page can freeze placement per account (`hold`). Nothing moves onto or off a held
    account. `budget_override` stays owner-only.
+10. **Usage watcher and timed queue.** A watcher reads live usage (requirement 1) for every account and model key.
+    - When an account nears its limit (default 90% of the 5h or weekly window), new work is not placed there.
+    - If any account or model has headroom, eligible queued tasks move there (requirement 3), cheapest capable
+      first, within budget rules.
+    - When every eligible model is near or at its limit, tasks are queued with `not_before` = the earliest reset
+      time of an eligible model and a target model, so nothing fails or spins. The plan is shown on Live
+      ("waiting for <model> at <time>").
+    - At the reset the queue drains automatically in priority order.
+11. **Controller continuity (leader).** The orchestration itself survives limits.
+    - The controller keeps a `leader` role: the model session that delegates, reviews results and starts next
+      steps. Its pending plan (next steps per work item) is stored in fleet.db, not only in a chat session.
+    - If the leader's account is limited, or the leader session stops, the controller assigns the leader role to
+      the next account/model with capacity (orchestrator-capable: Opus or Sonnet; never Fable, never local), and
+      starts it with the stored plan and a short state brief.
+    - If no capable model has capacity, the leader resumes at the earliest reset (requirement 10) and continues
+      delegation, builds, reviews, gates and merges from the stored plan.
+    - Every leader change is an event on Live (`leader.assigned {from, to, reason}`). Owner-only actions (approve,
+      unblock, push, budget override) stay with the owner whoever leads.
 
 ## 3a. Safety constraints (from spec review t-fcd07719)
-- **Claude usage source is unverified.** Find a real, readable source before building requirement 1 for Claude.
-  Until then Claude usage is `source: "inferred"` only, and inferred data never clears a limit.
+- **Claude usage source (verified, t-77a287f5).** Stream-json `rate_limit_event` (requirement 1). Only an account with
+  a running job reports fresh data; an idle account goes stale, and stale or inferred data never clears a limit. The
+  statusline is not used (unverified under `-p`).
 - **Shadow mode first.** Requirements 1–3 first run in shadow mode: they record what they would decide, and act
   only once the logged decisions match what the orchestrator would have done.
 - **Idempotent with recovery.** A move or re-queue is one compare-and-set on the task row
@@ -100,13 +123,17 @@ tier order and the independence rules that already exist. Fable never builds, fi
 - **Self-heal:**
   - A fake service restarts and verifies once.
   - A second failure within 15 minutes alerts and stops.
+- **Usage watcher:** with every account at 95% (fake usage), a new task queues with `not_before` = earliest reset and
+  starts after it with a fake clock; with one account free, it moves there.
+- **Leader:** the leader account goes limited mid-plan; a new leader starts on another account with the stored plan
+  and continues the next step; with none free, it resumes at the reset. Never Fable.
 - **Gate and watcher:** the gate passes, and the Haiku watcher confirms on Live that moves and restarts show with reasons.
 
 ## 6. Delivery
 | Step | Who |
 |---|---|
 | Spec review | Sonnet, low effort |
-| Build | fleet Sonnet. Order: req 1 (shadow), req 2, req 3 (shadow, then live, with a real move test), req 4, reqs 5–6, req 7, req 9; req 8 events throughout |
+| Build | fleet Sonnet. Order: req 1 (shadow), req 2, req 3 (shadow, then live, with a real move test), req 4, reqs 5–6, req 7, req 9, req 10 (shadow, then live), req 11; req 8 events throughout |
 | Review | Codex `gpt-5.6-terra`, medium effort (placement touches admission, so it is design-sensitive) |
 | Final | Fable, delta green light |
 | Check | Haiku watcher pass, plus a real migration test: queue on a limited account and watch it move |

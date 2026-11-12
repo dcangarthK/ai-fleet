@@ -1936,19 +1936,42 @@ def set_ceiling(node: str, m: ModeIn) -> dict:
 
 
 @router.get("/api/usage")
-def usage(days: int = 1) -> list[dict]:
-    """Tasks and agent run time per node and agent (time waiting on humans isn't counted)."""
+def usage(days: int = 1) -> dict:
+    """Tasks and agent run time per node and agent (time waiting on humans isn't counted), for tasks created in the
+    stated window [since, until] (`window_days` days back from now). `failed` counts unsettled failures only: a failed
+    or interrupted task that is settled (resolution done_elsewhere, handed_off, dismissed, resolved_by; a retry; or a
+    work item that merged) is not a failure. Settled is decided by display_status/live_display (docs/SPEC-dashboard-truth
+    req 1), the same helpers every other page uses."""
     now = time.time()
+    since = now - days * 86400
     with db() as c:
-        rows = c.execute("""SELECT node_id, agent, COUNT(*) AS tasks,
+        rows = [dict(r) for r in c.execute("""SELECT node_id, agent, COUNT(*) AS tasks,
                                    SUM(state='working') AS running,
-                                   SUM(state IN ('failed','interrupted')) AS failed,
+                                   0 AS failed,
                                    CAST(SUM(COALESCE(agent_seconds, 0)
                                             + CASE WHEN state='working' THEN ? - COALESCE(run_started_at, ?) ELSE 0 END)
                                         AS INTEGER) AS seconds
                             FROM tasks WHERE created_at >= ? GROUP BY node_id, agent ORDER BY tasks DESC""",
-                         (now, now, now - days * 86400)).fetchall()
-    return [dict(r) for r in rows]
+                         (now, now, since)).fetchall()]
+        by_key = {(r["node_id"], r["agent"]): r for r in rows}
+        candidates = c.execute("SELECT * FROM tasks WHERE created_at >= ? AND state IN ('failed','interrupted')",
+                               (since,)).fetchall()
+        merged_roots: dict[str, bool] = {}
+        unsettled = []
+        for row in candidates:
+            root = task_root(c, row["id"])
+            if root not in merged_roots:
+                outcome = c.execute("SELECT outcome FROM tasks WHERE id=?", (root,)).fetchone()["outcome"]
+                try:
+                    merged_roots[root] = (json.loads(outcome) or {}).get("kind") == "merged" if outcome else False
+                except (TypeError, ValueError):
+                    merged_roots[root] = False
+            if not merged_roots[root]:
+                unsettled.append(row)
+    for row in unsettled:
+        if task_view(row)["display"]["tone"] not in ("resolved", "muted"):
+            by_key[(row["node_id"], row["agent"])]["failed"] += 1
+    return {"window_days": days, "since": since, "until": now, "rows": rows}
 
 
 @router.get("/api/events")

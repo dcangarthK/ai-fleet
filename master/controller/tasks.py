@@ -27,6 +27,7 @@ from events import changed, emit, events_after, events_newest, last_event_id, sn
 import budget
 import policy as fleet_policy
 import presence
+import usage as capacity_usage
 import skills as fleet_skills
 from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
     CHAIN_LINKS, FAILURE_STATES, HANDOFF_KINDS, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, RUNNING, clock, display_status,
@@ -158,7 +159,7 @@ NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
-                 "age_s", "codex_rate_limits"}
+                 "age_s", "codex_rate_limits", "capacity"}
 
 
 MAX_HEALTH_JOBS = 32
@@ -199,6 +200,8 @@ def clean_health(body: dict) -> dict:
     out = {k: v for k, v in body.items() if k in HEALTH_FIELDS}
     if "codex_rate_limits" in out:
         out["codex_rate_limits"] = budget.clean_codex_rate_limits(out["codex_rate_limits"])
+    if "capacity" in out:  # Part G 1: observed_at is on this controller's clock (the runner's age_s, not its time)
+        out["capacity"] = capacity_usage.clean_capacity(out["capacity"], time.time())
     jobs = clean_jobs(body.get("jobs")) if "jobs" in body else None
     if jobs is not None:
         out["jobs"] = jobs
@@ -825,8 +828,11 @@ async def try_start(task: dict) -> bool:
                    engine=task.get("engine") or "ollama")
     why = why or temporary_reason(node, task["policy"])
     wait = None
+    held_until = task.get("not_before")  # Part G req 4: a limit failure waits for its reset
+    if not why and held_until and capacity_usage.now() < held_until:
+        wait, why = "limit", task.get("error") or f"waiting for the usage limit reset at {budget.clock(held_until)}"
     if not why:
-        wait, why = budget.start_wait(task)
+        wait, why = budget.start_wait(task, capacity_usage.now())
     if why:
         fields = {}
         if task.get("error") != why:
@@ -836,6 +842,9 @@ async def try_start(task: dict) -> bool:
         if fields:
             update(task["id"], **fields)
         return False
+    if held_until and (task.get("runs") or 0) >= 1:  # a re-queued limit failure continues its own session
+        import capacity
+        return await capacity.restart_requeued(task)
     # The lease: claimed only on the node this check was for; a re-placement in between wins (12.5).
     if not transition(task, {"queued"}, "starting", where_node=task["node_id"], error=None, budget_wait=None):
         return False
@@ -1041,6 +1050,8 @@ async def poll_loop() -> None:
                 ids = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state='working'")]
                 finished = {r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('done','cancelled')")}
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
+            import capacity
+            await capacity.tick()
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens
@@ -1080,6 +1091,7 @@ class TaskIn(BaseModel):
     stage: str | None = None
     independence: str | None = None
     independence_reason: str | None = None
+    pin: bool = False  # Part G: never move this queued task to another account or model
 
     @field_validator("prompt")
     @classmethod
@@ -1404,7 +1416,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     waiver = check_independence(t, kind, agent, model, node, pipeline, slot["profile"] if slot else "fleet")
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
-              "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated}
+              "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
+              "pin": bool(t.pin), "model_pinned": bool(t.model)}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})

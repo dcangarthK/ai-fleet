@@ -12,6 +12,7 @@ import re
 import time
 
 from store import db
+import usage
 
 # "test" (docs/SPEC-live-monitor.md 6): a test pass on someone else's build; never seeded for Fable (CLAUDE.md rule 0)
 KINDS = ("build", "fix", "review", "re_review", "final_review", "security_review", "merge", "benchmark", "check",
@@ -751,6 +752,44 @@ def codex_records() -> dict[str, dict]:
     return out
 
 
+def usage_records() -> dict[str, dict]:
+    """{account: {"agent", "windows": {"5h"|"weekly": {used_percent, resets_at, observed_at, source}}, "rejected_until",
+    "slots_free"}} from the approved runners' `capacity` (Part G 1), plus Codex's own rate_limits record for a Codex
+    account that reports no capacity. The newest record per account wins."""
+    with db() as c:
+        rows = c.execute("SELECT id, runner FROM nodes WHERE status='approved' AND runner IS NOT NULL").fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        try:
+            runner = json.loads(row["runner"]) or {}
+        except (ValueError, TypeError):
+            continue
+        profiles = runner.get("profiles") if isinstance(runner.get("profiles"), dict) else {}
+        for entry in runner.get("capacity") if isinstance(runner.get("capacity"), list) else []:
+            if not isinstance(entry, dict) or entry.get("agent") not in PAID_AGENTS:
+                continue
+            labels = {e.get("id"): e.get("label") for e in profiles.get(entry["agent"]) or [] if isinstance(e, dict)}
+            label = labels.get(entry.get("profile"))
+            account = account_key(entry["agent"], row["id"], entry.get("profile"), label if isinstance(label, str) else None)
+            windows = {w["window"]: {k: w[k] for k in ("used_percent", "resets_at", "observed_at", "source")}
+                       for w in entry.get("usage") or [] if isinstance(w, dict) and "observed_at" in w}
+            rec = {"agent": entry["agent"], "windows": windows, "rejected_until": entry.get("rejected_until"),
+                   "slots_free": entry.get("slots_free"), "node": row["id"]}
+            old = out.get(account)
+            if old is None or max([w["observed_at"] for w in windows.values()] or [0]) >= max(
+                    [w["observed_at"] for w in old["windows"].values()] or [0]):
+                out[account] = rec
+    for account, rec in codex_records().items():
+        if account in out and out[account]["windows"]:
+            continue
+        windows = {name: {"used_percent": rec[src]["used_percent"], "resets_at": rec[src]["resets_at"],
+                          "observed_at": rec.get("seen_at") or 0, "source": "rollout"}
+                   for src, name in (("primary", "5h"), ("secondary", "weekly")) if rec.get(src)}
+        out[account] = {"agent": "codex", "windows": windows, "rejected_until": None,
+                        "slots_free": (out.get(account) or {}).get("slots_free")}
+    return out
+
+
 def rate_limit_until(record: dict, now: float) -> float | None:
     """When Codex is free again: the latest reset among windows that are used up and whose reset is still ahead."""
     ends = [w["resets_at"] for w in (record.get("primary"), record.get("secondary"))
@@ -758,7 +797,7 @@ def rate_limit_until(record: dict, now: float) -> float | None:
     return max(ends) if ends else None
 
 
-def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
+def limit_snapshot(rules: dict, now: float, account: str | None = None, live: bool | None = None) -> dict:
     """The breaker reads what each run itself ended with (agent_usage), never the task's current state: cancelling,
     completing or resuming a limited task changes the task but not the fact that its run hit the limit.
 
@@ -787,7 +826,24 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     rows = [r for r in rows if not (r["agent"] == "codex" and r["failure_reason"] == "limit"
                                     and (rec := records.get(r["account"] or account))
                                     and rec.get("seen_at") and r["ended_at"] <= rec["seen_at"])]
+    # Part G 2: live usage. A fresh record with headroom clears older limit failures of its account; a fresh record
+    # at 100% (or a rejected event) limits it. Stale or missing data changes nothing. Shadow mode (the default)
+    # leaves the snapshot as it was; capacity.tick logs what live mode would do.
+    live_ends: dict[str, float] = {}
+    if (usage.is_live() if live is None else live):
+        recs = usage_records()
+        verdicts = {owner: usage.verdict(rec, now) for owner, rec in recs.items()
+                    if account is None or owner == account}
+        cleared = {owner: v["observed_at"] for owner, v in verdicts.items() if v["state"] == "headroom"}
+        rows = [r for r in rows if not (r["failure_reason"] == "limit" and (r["account"] or account) in cleared
+                                        and r["ended_at"] <= cleared[r["account"] or account])]
+        for owner, v in verdicts.items():
+            if v["state"] == "limited":
+                agent = recs[owner]["agent"]
+                live_ends[agent] = max(v["until"], live_ends.get(agent, 0))
     state = limit_state(rows, now, rules.get("limit_scope", "auto"), rules)
+    for agent, until in live_ends.items():
+        state["accounts"][agent] = max(until, state["accounts"].get(agent, 0))
     ends = [until for owner, rec in records.items() if (account is None or owner == account)
             and (until := rate_limit_until(rec, now))]
     if ends:

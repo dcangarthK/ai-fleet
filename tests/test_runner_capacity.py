@@ -30,12 +30,19 @@ class ClaudeUsage(Base):
     def write_job(self, job_id, profile, lines, age_s=0, agent="claude"):
         folder = self.m.jobs_dir / job_id
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "state.json").write_text(json.dumps({"id": job_id, "agent": agent, "profile": profile,
-                                                       "state": "exited"}))
         path = folder / "events.jsonl"
         path.write_text("\n".join(json.dumps(x) if isinstance(x, dict) else x for x in lines) + "\n")
         stamp = time.time() - age_s
         os.utime(path, (stamp, stamp))
+        # The runner stamps rate_limit.observed_at when it reads the event live; mirror that from the newest event.
+        found = None
+        for line in lines:
+            if isinstance(line, dict):
+                found = self.m._rate_limit_from_event(line) or found
+        state = {"id": job_id, "agent": agent, "profile": profile, "state": "exited"}
+        if found:
+            state["rate_limit"] = {**found, "observed_at": stamp}
+        (folder / "state.json").write_text(json.dumps(state))
 
     def usage(self, profile="fleet"):
         return {e["profile"]: e for e in self.m.capacity_report() if e["agent"] == "claude"}.get(profile)
@@ -48,7 +55,7 @@ class ClaudeUsage(Base):
         self.assertAlmostEqual(by["weekly"]["used_percent"], 50.0)
         self.assertEqual((by["5h"]["resets_at"], by["weekly"]["resets_at"]), (1763000000, 1763500000))
         self.assertEqual(by["5h"]["source"], "stream-json")
-        self.assertLess(by["5h"]["age_s"], 5)  # observed_at = the file's mtime
+        self.assertLess(by["5h"]["age_s"], 5)  # observed_at = the live read time stored in the job meta
 
     def test_each_profile_has_its_own_usage_and_the_newest_job_wins(self):
         self.write_job("j-old", "spare", [event(five=0.9)], age_s=7200)

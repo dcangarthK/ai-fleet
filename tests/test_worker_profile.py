@@ -184,5 +184,35 @@ class Filter(unittest.TestCase):
         self.assertIsNone(quiet_bash.hook_output({"tool_name": "Read", "tool_input": {"command": "unittest"}}))
 
 
+class RunnerWiring(unittest.TestCase):
+    """Part H batch 2: the runner's profile mapping and caps agree with the worker files and the controller."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("runner_wiring", os.path.join(ROOT, "nodes", "runner.py"))
+        cls.runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.runner)
+
+    def test_every_mapped_profile_has_a_settings_file(self):
+        for kind, profile in self.runner.LEAN_PROFILE_KIND.items():
+            self.assertTrue(os.path.isfile(os.path.join(W, "settings-%s.json" % profile)), kind)
+        self.assertEqual(self.runner.lean_profile_kind("merge"), "build")  # everything else builds
+        self.assertIsNone(self.runner.lean_profile_kind(None))
+
+    def test_runner_caps_match_the_controllers(self):
+        sys.path.insert(0, ROOT)
+        sys.path.insert(0, os.path.join(ROOT, "master", "controller"))
+        try:
+            from master.controller import tokens
+        except ImportError as exc:  # the controller's dependencies are not installed here
+            self.skipTest(str(exc))
+        self.assertEqual(self.runner.DEFAULT_TOKEN_CAPS, tokens.DEFAULT_CAPS)
+
+    def test_runner_wiring_uses_the_profile_module(self):
+        module = self.runner.lean_module()
+        self.assertEqual(module.LAUNCH_ARGS, wprofile.LAUNCH_ARGS)
+
+
 if __name__ == "__main__":
     unittest.main()

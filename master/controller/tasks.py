@@ -50,8 +50,8 @@ NEEDS_APPROVAL = {"supervised", "full"}
 AGENTS = {"claude", "codex", "ollama"}
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 ACTIVE = {"queued", "awaiting_approval", "starting", "working"}
-SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled"}
-RESUMABLE = {"review", "failed", "blocked", "interrupted"}
+SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled", "capped"}  # capped: Part H, not a failure
+RESUMABLE = {"review", "failed", "blocked", "interrupted", "capped"}
 
 router = APIRouter()
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -788,6 +788,8 @@ async def start(task: dict) -> None:
         if extra.get("base_branch"):
             body.update(base_branch=extra["base_branch"], source_job=extra.get("source_job"))
     if support:
+        if task.get("kind"):
+            body["kind"] = task["kind"]  # picks the runner's lean profile and caps (Part H)
         if task.get("effort"):
             body["effort"] = task["effort"]
         if isinstance(extra.get("tools"), list):  # an empty list is "no tools", not "unrestricted"
@@ -881,6 +883,8 @@ def outcome(task: dict, job: dict) -> str:
         return "working"
     if state == "cancelled":
         return "cancelled"
+    if state == "capped":
+        return "capped"  # hit its turn/context cap (Part H 3.2): settled, with a handoff summary; not a failure
     if state == "lost":
         return "interrupted"
     if job.get("denials") and task["mode"] != "read-only":

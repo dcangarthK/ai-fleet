@@ -703,6 +703,8 @@ JOB_REQUEST_KEYS = {
     "effort", "tools", "max_turns",
     # account pools and limit handoff (docs/SPEC-limit-handoff.md 3.1, 4.3)
     "profile", "base_branch", "source_job",
+    # Part H: the task kind picks the lean worker profile and the turn/context caps
+    "kind",
 }
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PROFILE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -717,10 +719,66 @@ PUBLIC_JOB_KEYS = (
     "id", "agent", "engine", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
     "gate", "runs", "instructions", "policy_hash", "usage", "num_turns", "limits_applied", "error",
-    "profile", "account_label", "group_gone",
+    "profile", "account_label", "group_gone", "kind", "cap",
 )
 
 DMR_DEFAULT_URL = "http://127.0.0.1:12434/engines/v1"
+
+# Part H batch 2 (docs/SPEC-token-budget.md 3.1, 3.2): lean worker profile and per-kind caps.
+WORKER_DIR = Path(__file__).resolve().parent / "worker"
+LEAN_PROFILE_KIND = {"build": "build", "fix": "fix", "review": "review", "re_review": "review",
+                     "final_review": "review", "security_review": "review", "test": "test"}
+# Same shape and defaults as master/controller/tokens.py DEFAULT_CAPS; FLEET_TOKEN_CAPS overrides per kind.
+DEFAULT_TOKEN_CAPS = {
+    "build": {"turns": 120, "context": 150_000},
+    "fix": {"turns": 120, "context": 150_000},
+    "review": {"turns": 30, "context": 100_000},
+    "re_review": {"turns": 15},
+    "test": {"turns": 20},
+}
+STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"
+
+
+def lean_enabled():
+    return os.environ.get("FLEET_LEAN_PROFILE", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def lean_profile_kind(kind):
+    """The worker profile for a task kind; None when the task has no kind (a direct job keeps the old launch)."""
+    if not isinstance(kind, str) or not kind:
+        return None
+    return LEAN_PROFILE_KIND.get(kind, "build")
+
+
+def lean_module():
+    """nodes/worker/profile.py, or None when the worker files are not beside this runner."""
+    path = WORKER_DIR / "profile.py"
+    if not path.is_file():
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fleet_worker_profile", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def token_caps(kind):
+    """{turns, context} caps for a task kind (any key may be missing); {} for no caps."""
+    if not isinstance(kind, str) or not kind:
+        return {}
+    caps = {name: dict(values) for name, values in DEFAULT_TOKEN_CAPS.items()}
+    try:
+        supplied = json.loads(os.environ.get("FLEET_TOKEN_CAPS") or "null")
+    except ValueError:
+        supplied = None
+    if isinstance(supplied, dict):
+        for name, values in supplied.items():
+            if isinstance(name, str) and isinstance(values, dict):
+                caps[name] = {k: v for k, v in values.items()
+                              if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
+    if kind in caps:
+        return caps[kind]
+    return caps.get(LEAN_PROFILE_KIND.get(kind, "build"), {})
 
 
 def loopback_base_url(value):
@@ -1976,46 +2034,32 @@ class JobManager:
         except (AttributeError, ValueError):
             return None
 
-    def _last_rate_limit_event(self, path):
-        """The newest stream-json `rate_limit_event` in one job log, as {windows: {"5h"|"weekly": {used_percent,
-        resets_at}}, status, rejected_until}; None when there is none. Only numbers are kept, never a line of the
+    def _rate_limit_from_event(self, event):
+        """One stream-json `rate_limit_event` as {windows: {"5h"|"weekly": {used_percent, resets_at}}, status,
+        rejected_until}; None when it is not one or holds nothing usable. Only numbers are kept, never a line of the
         log. utilization is 0-1 (spec Part G 1), reported here as a percent."""
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - 512 * 1024))  # events are appended: the end holds the newest
-                lines = handle.read().decode("utf-8", "replace").splitlines()
-        except OSError:
+        info = event.get("rate_limit_info") if isinstance(event, dict) and event.get("type") == "rate_limit_event" else None
+        if not isinstance(info, dict):
             return None
-        for line in reversed(lines):
-            if '"rate_limit_event"' not in line:
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            info = event.get("rate_limit_info") if isinstance(event, dict) and event.get("type") == "rate_limit_event" else None
-            if not isinstance(info, dict):
-                continue
-            windows = {}
-            raw = info.get("unifiedWindows") if isinstance(info.get("unifiedWindows"), dict) else {}
-            for source, name in (("five_hour", "5h"), ("seven_day", "weekly")):
-                w = raw.get(source)
-                used = w.get("utilization") if isinstance(w, dict) else None
-                reset = self._epoch(w.get("resetsAt")) if isinstance(w, dict) else None
-                if isinstance(used, (int, float)) and not isinstance(used, bool) and 0 <= used <= 1 and reset is not None:
-                    windows[name] = {"used_percent": round(used * 100.0, 3), "resets_at": reset}
-            rejected = self._epoch(info.get("resetsAt")) if info.get("status") == "rejected" else None
-            if windows or rejected:
-                return {"windows": windows, "status": info.get("status"), "rejected_until": rejected}
+        windows = {}
+        raw = info.get("unifiedWindows") if isinstance(info.get("unifiedWindows"), dict) else {}
+        for source, name in (("five_hour", "5h"), ("seven_day", "weekly")):
+            w = raw.get(source)
+            used = w.get("utilization") if isinstance(w, dict) else None
+            reset = self._epoch(w.get("resetsAt")) if isinstance(w, dict) else None
+            if isinstance(used, (int, float)) and not isinstance(used, bool) and 0 <= used <= 1 and reset is not None:
+                windows[name] = {"used_percent": round(used * 100.0, 3), "resets_at": reset}
+        rejected = self._epoch(info.get("resetsAt")) if info.get("status") == "rejected" else None
+        if windows or rejected:
+            return {"windows": windows, "status": info.get("status"), "rejected_until": rejected}
         return None
 
     def claude_usage(self, max_files=60):
-        """{profile: {windows, rejected_until, observed_at}}: the newest `rate_limit_event` per Claude profile in the
-        job logs (jobs/<id>/events.jsonl, the profile from the job's own state.json). The event has no timestamp, so
-        `observed_at` is the log's modification time. Only an account with a recent job has data; an idle one goes
-        stale on the controller (Part G 3a)."""
+        """{profile: {windows, rejected_until, observed_at}}: the newest `rate_limit_event` per Claude profile.
+        The event has no timestamp, so the runner stamps `observed_at` when it reads the event line live from the
+        stream (`_watch_stream`) and keeps it in the job's meta (`rate_limit`); the log's mtime is never used (it made
+        an old event look fresh, Part G review). Only an account with a recent job has data; an idle one goes stale on
+        the controller (Part G 3a)."""
         files = []
         try:
             folders = list(self.jobs_dir.iterdir())
@@ -2023,21 +2067,23 @@ class JobManager:
             return {}
         for folder in folders:
             try:
-                files.append(((folder / "events.jsonl").stat().st_mtime, folder))
+                files.append(((folder / "state.json").stat().st_mtime, folder))
             except OSError:
                 continue
         files.sort(key=lambda item: item[0], reverse=True)
         newest = {}
-        for mtime, folder in files[:max_files]:
+        for _mtime, folder in files[:max_files]:
             state = read_json(folder / "state.json", {})
             if not isinstance(state, dict) or state.get("agent") != "claude":
                 continue
+            found = state.get("rate_limit")
+            at = found.get("observed_at") if isinstance(found, dict) else None
+            if not isinstance(at, (int, float)) or isinstance(at, bool):
+                continue  # no live observation recorded for this job
             profile = state.get("profile") if isinstance(state.get("profile"), str) and state.get("profile") else "fleet"
-            if profile in newest:
-                continue  # newest log first: this profile already has its record
-            found = self._last_rate_limit_event(folder / "events.jsonl")
-            if found:
-                newest[profile] = {**found, "observed_at": mtime}
+            if profile not in newest or at > newest[profile]["observed_at"]:
+                newest[profile] = {"windows": found.get("windows") or {}, "status": found.get("status"),
+                                   "rejected_until": found.get("rejected_until"), "observed_at": at}
         return newest
 
     def capacity_report(self):
@@ -2192,6 +2238,7 @@ class JobManager:
         current = data[offset:].decode("utf-8", errors="replace").split("\n")
         job["usage"], job["num_turns"] = self._usage(job, current)
         job["error"] = self._codex_error(job, current)
+        job["max_turns_hit"] = self._hit_max_turns(current)
         for line in lines:
             try:
                 event = json.loads(line)
@@ -2256,20 +2303,174 @@ class JobManager:
                     # The monitor thread normally does this; if it is gone (crashed, or not restarted), a poll must.
                     self._timeout(job)
                 return
-            job["state"] = "exited"
+            # Parse first: the state must change once, so a poll never sees `exited` for a run that is `capped`.
+            self._parse_events_safe(job)
             job["exit_code"] = exit_code
             job["ended_at"] = now()
-            self._parse_events_safe(job)
+            if job.pop("max_turns_hit", False):
+                # The CLI's own --max-turns ended the run: a cap, not a failure (spec Part H 3.2).
+                self._mark_capped(job, {"reason": "max_turns", "limit": job.get("max_turns"),
+                                        "turns": job.get("num_turns"), "stop": "cli"})
+            else:
+                job["state"] = "exited"
             self._save(job)
+            if job["state"] == "capped":
+                return
             if exit_code == 0 and job.get("gate"):
                 self._start_gate(job)
             elif job.get("gate"):
                 job["gate"]["state"] = "skipped"
                 self._save(job)
 
+    @staticmethod
+    def _hit_max_turns(lines):
+        """True when the run's own `result` event ended it with subtype error_max_turns (the CLI's --max-turns)."""
+        for text in lines:
+            if '"error_max_turns"' not in text:
+                continue
+            try:
+                event = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result" and event.get("subtype") == "error_max_turns":
+                return True
+        return False
+
+    def _mark_capped(self, job, cap):
+        """Settle a job as `capped` (Part H 3.2): not a failure. The handoff summary (the model's last text) is saved
+        to handoff.md in the job dir and becomes the job result. The worktree is left as it is, so uncommitted work
+        stays for the next session."""
+        summary = self._last_assistant_text(job)
+        if summary:
+            words = summary.split()
+            if len(words) > 300:
+                summary = " ".join(words[:300])
+            try:
+                (self._job_dir(job) / "handoff.md").write_text(summary + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        job.update({"state": "capped", "cap": cap, "ended_at": job.get("ended_at") or now(),
+                    "result": trim(summary or job.get("result") or "capped before any summary was written")})
+        if job.get("gate"):
+            job["gate"]["state"] = "skipped"
+
+    def _last_assistant_text(self, job):
+        """The text of the last assistant message with text in this run's stream; "" when there is none."""
+        try:
+            data = (self._job_dir(job) / "events.jsonl").read_bytes()
+        except OSError:
+            return ""
+        offset = job.get("events_offset") or 0
+        found = ""
+        for line in data[offset if isinstance(offset, int) and 0 <= offset <= len(data) else 0:].decode(
+                "utf-8", "replace").split("\n"):
+            if '"assistant"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            message = event.get("message") if isinstance(event, dict) and event.get("type") == "assistant" else None
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) \
+                        and block["text"].strip():
+                    found = block["text"].strip()
+        return found
+
+    def _watch_stream(self, job, st):
+        """Read the new lines of events.jsonl as the job writes them (Part H 3.2; Part G review MED). Counts assistant
+        turns by unique message.id, tracks the context size of the last turn, and stamps `rate_limit.observed_at`
+        with the time the event line was read here, never the file's mtime. Returns the cap hit, or None."""
+        try:
+            with open(self._job_dir(job) / "events.jsonl", "rb") as handle:
+                handle.seek(st["pos"])
+                chunk = handle.read()
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        st["pos"] += len(chunk)
+        data = st["buf"] + chunk
+        *lines, st["buf"] = data.split(b"\n")
+        caps = st["caps"]
+        for raw in lines:
+            if b'"assistant"' not in raw and b'"rate_limit_event"' not in raw and b'"user"' not in raw:
+                continue
+            try:
+                event = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "rate_limit_event":
+                found = self._rate_limit_from_event(event)
+                if found:
+                    job["rate_limit"] = {**found, "observed_at": time.time()}
+                    st["dirty"] = True
+            elif kind == "assistant":
+                message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                mid = message.get("id")
+                if isinstance(mid, str) and mid not in st["ids"]:
+                    st["ids"].add(mid)
+                    job["turns_seen"] = len(st["ids"])
+                usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                context = sum(v for v in (usage.get("input_tokens"), usage.get("cache_read_input_tokens"),
+                                          usage.get("cache_creation_input_tokens"))
+                              if isinstance(v, int) and not isinstance(v, bool))
+                if st["cap"] is None:
+                    if caps.get("turns") and len(st["ids"]) >= caps["turns"]:
+                        st["cap"] = {"reason": "turns", "limit": caps["turns"], "turns": len(st["ids"])}
+                    elif caps.get("context") and context >= caps["context"]:
+                        st["cap"] = {"reason": "context", "limit": caps["context"], "context": context,
+                                     "turns": len(st["ids"])}
+            elif kind == "user" and st["cap"] is not None:
+                return st["cap"]  # the turn that hit the cap has finished its tool calls
+        return None
+
+    def _cap_stop(self, job, cap):
+        """Stop a job at its cap after the current turn and settle it `capped`. The prompt arrives on a file, so the
+        session cannot take the stop instruction (STOP_INSTRUCTION); it is terminated after the current turn and
+        its last text kept as the summary."""
+        with self.lock:
+            if job.get("state") != "running":
+                return
+            pid = job.get("pid")
+            if self._group_ok(job):
+                try:
+                    self._kill_group(pid, force=False)
+                except ProcessLookupError:
+                    pass
+                except (OSError, subprocess.SubprocessError) as exc:
+                    self.audit("kill_failed", "%s: cap stop failed: %s" % (job.get("id"), error_line(exc)))
+                job["group_gone"] = self._wait_group_gone(pid, 2.0)
+                if not job["group_gone"]:
+                    self._reap_group(job)
+            else:
+                self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
+            self._parse_events_safe(job)
+            job.pop("max_turns_hit", None)
+            job["exit_code"] = None
+            self._mark_capped(job, {**cap, "stop": "terminated"})
+            self._save(job)
+
     def _start_monitor(self, job, process=None):
         def monitor():
             deadline = self._deadline(job)
+            offset = job.get("events_offset")
+            watch = {"pos": offset if isinstance(offset, int) and offset >= 0 else 0, "buf": b"", "ids": set(),
+                     "cap": None, "dirty": False,
+                     "caps": token_caps(job.get("kind")) if job.get("agent") == "claude" else {}}
+
+            def observe(allow_cap=True):
+                try:
+                    cap = self._watch_stream(job, watch)
+                    if watch["dirty"]:
+                        watch["dirty"] = False
+                        self._save(job)
+                    if cap is not None and allow_cap and job.get("state") == "running":
+                        self._cap_stop(job, cap)
+                except Exception as exc:
+                    self.audit("monitor_error", "%s: watch: %s" % (job.get("id"), error_line(exc)))
 
             def alive():
                 return process.poll() is None if process is not None else process_alive(job.get("pid"))
@@ -2294,12 +2495,18 @@ class JobManager:
                     errors += 1
                     if errors == 1 or errors % 150 == 0:
                         self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
+                observe()
+                if job.get("state") != "running":
+                    return
                 time.sleep(0.2)
             if process is not None:
                 try:
                     process.wait(timeout=5)
                 except (OSError, subprocess.SubprocessError):
                     pass
+            observe(False)  # lines written just before the exit (a short job's rate_limit_event)
+            if job.get("state") != "running":
+                return
             # The wrapper writes its code immediately before exiting; allow that write to land.
             for _ in range(20):
                 try:
@@ -2655,6 +2862,7 @@ class JobManager:
                 # the requested profile id: what every run of this job (resumes too) uses for its environment
                 "profile_id": profile_entry["id"] if profile_entry else None,
                 "base_branch": base_branch, "source_job": source["id"] if source else None,
+                "kind": body.get("kind") if isinstance(body.get("kind"), str) else None,
                 "timeout_minutes": min(self.max_job_minutes,
                                        policy.get("limits", {}).get("task_minutes", self.max_job_minutes)),
             }
@@ -2668,6 +2876,27 @@ class JobManager:
                 self._save(job)
                 raise HttpError(500, "could not start agent")
             return self.public(job)
+
+    def _lean_args(self, job):
+        """Part H 3.1: launch args of the lean worker profile (settings rendered into the job dir with the absolute
+        quiet_bash path, an empty MCP config, no user settings/skills). [] when off, kindless, or the worker files
+        are missing from this install (the old launch)."""
+        profile = lean_profile_kind(job.get("kind"))
+        if profile is None or not lean_enabled():
+            return []
+        try:
+            module = lean_module()
+            template = WORKER_DIR / ("settings-%s.json" % profile)
+            if module is None or not template.is_file() or not (WORKER_DIR / "mcp-empty.json").is_file():
+                return []
+            rendered = self._job_dir(job) / "settings.json"
+            rendered.write_text(module.render_settings(template.read_text(encoding="utf-8"),
+                                                       str(WORKER_DIR / "quiet_bash.py")), encoding="utf-8")
+            return [*module.LAUNCH_ARGS, "--settings", str(rendered),
+                    "--mcp-config", str(WORKER_DIR / "mcp-empty.json")]
+        except Exception as exc:
+            self.audit("lean_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+            return []
 
     def _command(self, job, prompt, allowed_tools, resume):
         agent = job["agent"]
@@ -2708,6 +2937,7 @@ class JobManager:
                 cmd += ["--disallowedTools", ",".join(denied)]
             if job.get("model"):
                 cmd += ["--model", job["model"]]
+            cmd += self._lean_args(job)
             return cmd  # prompt arrives on stdin
         if agent == "codex":
             sandbox = "read-only" if mode in ("read-only", "supervised") else "workspace-write"
@@ -2774,6 +3004,8 @@ class JobManager:
         raw = open(events_path, "ab", buffering=0)
         env = self.agent_env(job["agent"], os.environ.copy(), job.get("profile_id"))
         env["PATH"] = agent_search_path()
+        if job["agent"] == "claude" and job.get("kind"):
+            env["FLEET_JOB_DIR"] = str(job_dir)  # quiet_bash saves full test output here
         try:
             if os.name == "nt":
                 # Keeping command arguments out of the batch file avoids quoting prompts twice.

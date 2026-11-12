@@ -971,12 +971,13 @@ class FailoverTests(LiveBase):
         stale = tasks.get_task(t["id"])  # try_start's snapshot, taken before the move
         self.assertTrue(live.replace(stale, time.time()))
         self.assertEqual(self.get(t["id"])["node_id"], "master")
-        original = tasks.node_of
+        original, original_eligible = tasks.node_of, tasks.eligible
         tasks.node_of = lambda task: original(stale)  # the start still believes the old node
+        tasks.eligible = lambda *a, **k: None  # eligibility passes, so only the conditional claim can refuse
         try:
             started = self.c.portal.call(tasks.try_start, stale)
         finally:
-            tasks.node_of = original
+            tasks.node_of, tasks.eligible = original, original_eligible
         self.assertFalse(started)  # the lease holds on the node it was checked for
         self.assertEqual(self.get(t["id"])["state"], "queued")
         self.assertEqual(self.get(t["id"])["node_id"], "master")

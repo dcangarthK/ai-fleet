@@ -199,8 +199,19 @@ class Heartbeats(unittest.TestCase):
         self.assertEqual(len(calls), 3)  # three failed beats, and the loop kept going
 
     def test_health_report_survives_jobs_added_while_it_iterates(self):
-        import inspect
-        self.assertIn("list(manager.jobs.values())", inspect.getsource(runner.health_report))
+        from unittest import mock
+        manager = mock.MagicMock()
+        manager.metrics = None
+        manager.jobs = {"a": {"state": "running"}}
+        manager.profiles.return_value = {}
+        manager.gate_profiles = []
+        manager.min_battery_pct = 20
+        manager.refresh.side_effect = lambda job: manager.jobs.setdefault(f"j{len(manager.jobs)}", {"state": "done"})
+        power = {"on_battery": False, "battery_pct": None}
+        with mock.patch.object(runner, "find_agents", return_value={}), \
+                mock.patch.object(runner, "system_power", return_value=power):
+            report = runner.health_report(manager)  # a live dict view would raise "changed size during iteration"
+        self.assertEqual(report["running"], 1)
 
     def test_jitter_stays_within_bounds(self):
         beat = runner.Heartbeat(FakeManager(), "t", dict)

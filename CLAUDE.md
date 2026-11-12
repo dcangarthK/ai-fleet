@@ -99,6 +99,9 @@ machines and alerts.
 Known traps that have cost gate rounds. Check each before you commit:
 - Changed `nodes/runner.py`? Run `python3 nodes/build.py` to re-embed it in `onboard.sh` / `onboard.ps1`,
   and commit both. `test_onboard` fails otherwise.
+- Merging a branch that touched `nodes/onboard.sh` / `onboard.ps1`? Those embed the runner. Take main's copy
+  (`git checkout main -- nodes/onboard.sh nodes/onboard.ps1`), then re-run `nodes/build.py`. Never keep an
+  old branch's copy: it silently drops newer onboarding changes.
 - Tests run one file per process (see each test file's docstring and `scripts/gate.sh`). Don't diagnose failures
   from a combined run.
 - Don't run the gate yourself. The runner runs `fleet-gate` once after you finish.

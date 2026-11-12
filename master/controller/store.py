@@ -117,6 +117,8 @@ MIGRATIONS = {
               # Live (docs/SPEC-live-monitor.md): display-only stage, a work item's descriptive chain (root only),
               # an advisory independence waiver, and how to place the task again on failover (12.6)
               "stage": "TEXT", "chain": "TEXT", "independence": "TEXT", "placement": "TEXT",
+              # Part F 5: why a task re-queues another (retry|handoff|reroute|requeue)
+              "link_reason": "TEXT",
               # Part E (docs/SPEC-stall-reroute.md 5.1, 12): the stall record, JSON {kind, since, last_activity_at,
               # detail, nudged_at, escalated, waiting, overrun_at}
               "stall": "TEXT"},

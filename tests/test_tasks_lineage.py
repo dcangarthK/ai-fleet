@@ -469,6 +469,34 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(post(parent_id=parent["id"], link="sideways").status_code, 400)
         self.assertEqual(post(link="retry").status_code, 400)
 
+    def test_replaces_links_the_new_task_and_hands_off_the_old_one(self):
+        """Part F 5: `replaces` sets parent_id and link=retry, records link_reason, resolves the old task handed_off."""
+        old = self.task(title="Old attempt")
+        self.fail(old["id"])
+        new = self.task(title="Replacement", replaces=old["id"], link_reason="reroute")
+        self.assertEqual((new["parent_id"], new["link"], new["link_reason"]), (old["id"], "retry", "reroute"))
+        settled = self.get(old["id"])
+        self.assertEqual(settled["resolution"]["kind"], "handed_off")
+        self.assertEqual(settled["resolution"]["task_id"], new["id"])
+        self.assertEqual(settled["resolution"]["link"], "retry")
+        self.assertTrue(settled["display"]["label"].startswith("Handed off"), settled["display"])
+        self.assertEqual(self.task(replaces=self.fail(self.task()["id"])["id"])["link_reason"], "requeue")
+
+    def test_replaces_validation(self):
+        post = lambda **kw: self.c.post("/api/tasks", json={"agent": "claude", "prompt": "x"} | kw, headers=W)  # noqa: E731
+        self.assertEqual(post(replaces="t-nope").status_code, 400)
+        self.assertEqual(post(link_reason="retry").status_code, 400)
+        old = self.task()
+        self.fail(old["id"])
+        self.assertEqual(post(replaces=old["id"], link_reason="sideways").status_code, 400)
+        self.assertEqual(post(replaces=old["id"], link="review").status_code, 400)
+        self.assertEqual(self.get(old["id"])["resolution"], None)  # refused requests leave it alone
+        self.task(replaces=old["id"])
+        self.assertEqual(post(replaces=old["id"]).status_code, 409)  # already handed off
+        running = self.task()
+        FakeRunner.jobs[running["id"]].update(state="running")
+        self.assertEqual(post(replaces=running["id"]).status_code, 409)
+
     def test_check_tasks_are_hidden_and_need_no_parent(self):
         check = self.task(link="check", title="Availability check")
         self.assertTrue(check["hidden"])

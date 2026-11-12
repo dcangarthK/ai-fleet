@@ -1050,6 +1050,9 @@ async def poll_loop() -> None:
 
 # ---------- API ----------
 
+REPLACE_REASONS = ("retry", "handoff", "reroute", "requeue")
+
+
 class TaskIn(BaseModel):
     agent: str
     prompt: str
@@ -1063,6 +1066,8 @@ class TaskIn(BaseModel):
     node: str | None = None
     parent_id: str | None = None
     link: str | None = None  # why this task exists relative to parent_id: retry, resume, review, fix, merge, check
+    replaces: str | None = None  # a task this one re-queues: parent_id/link=retry are set from it, it is handed_off
+    link_reason: str | None = None  # with replaces: retry, handoff, reroute or requeue (default requeue)
     role: str | None = None
     policy: dict | None = None
     skills: list[str] = Field(default_factory=list)
@@ -1277,6 +1282,23 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         t.mode = "full"
     if t.gate and rank(t.mode) < rank("auto-edit"):
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
+    if t.link_reason is not None and not t.replaces:
+        raise HTTPException(400, "link_reason needs replaces")
+    if t.replaces:
+        # Part F 5: a task made in place of another is a retry of it; the old one settles as handed_off.
+        if t.link_reason is not None and t.link_reason not in REPLACE_REASONS:
+            raise HTTPException(400, f"link_reason must be one of {list(REPLACE_REASONS)}")
+        if t.parent_id and t.parent_id != t.replaces or t.link not in (None, "retry"):
+            raise HTTPException(400, "replaces sets parent_id and link itself")
+        with db() as c:
+            old = c.execute("SELECT state, resolution FROM tasks WHERE id=?", (t.replaces,)).fetchone()
+        if not old:
+            raise HTTPException(400, f"unknown task {t.replaces} to replace")
+        if old["state"] in RUNNING:
+            raise HTTPException(409, f"{t.replaces} is still {old['state']}; stop it before replacing it")
+        if old["resolution"]:
+            raise HTTPException(409, f"{t.replaces} is already resolved")
+        t.parent_id, t.link = t.replaces, "retry"
     if t.link is not None and t.link not in LINKS:
         raise HTTPException(400, f"link must be one of {list(LINKS)}")
     if t.link and t.link != "check" and not t.parent_id:
@@ -1446,9 +1468,16 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             "profile": slot["profile"] if slot else "fleet", "account_label": slot["label"] if slot else None,
             "account": account, "stage": t.stage, "independence": json.dumps(waiver) if waiver else None,
             "placement": json.dumps(placed),
+            "link_reason": (t.link_reason or "requeue") if t.replaces and index == 0 else None,
         }
         with db() as c:
             c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+            if t.replaces and index == 0:
+                resolution = json.dumps({"kind": "handed_off", "task_id": task_id, "link": "retry",
+                                         "reason": row["link_reason"], "agent": agent, "model": model, "at": now})
+                if c.execute("UPDATE tasks SET resolution=?, updated_at=? WHERE id=? AND resolution IS NULL",
+                             (resolution, now, t.replaces)).rowcount != 1:
+                    raise HTTPException(409, f"{t.replaces} was resolved meanwhile")  # rolls back the insert
             if model:
                 c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id IN "
                           "(SELECT id FROM model_catalog WHERE reference=?)",

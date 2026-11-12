@@ -790,8 +790,22 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     state = limit_state(rows, now, rules.get("limit_scope", "auto"), rules)
     ends = [until for owner, rec in records.items() if (account is None or owner == account)
             and (until := rate_limit_until(rec, now))]
-    if ends:
-        state["accounts"]["codex"] = max(ends + [state["accounts"].get("codex", 0)])
+    scope = rules.get("limit_scope", "auto")
+    for owner, rec in records.items():
+        if account is not None and owner != account:
+            continue
+        until = rate_limit_until(rec, now)
+        if not until:
+            continue
+        # Under "auto" Codex is limited per model: the record belongs to the model that account last ran
+        # (it carries none itself). Only with no known model, or scope "account", is it account-wide.
+        last = max((r for r in rows if r["agent"] == "codex" and r["model"] and (r["account"] or account) == owner),
+                   key=lambda r: r["ended_at"] or 0, default=None)
+        if scope == "auto" and last:
+            ident = last.get("budget_identity") or identity("codex", last["model"])
+            state["models"][ident] = max(until, state["models"].get(ident, 0))
+        else:
+            state["accounts"]["codex"] = max(until, state["accounts"].get("codex", 0))
     # Past the daily hard token budget, a model behaves as limited until local midnight.
     midnight = local_midnight(now) + 86400
     for key, entry in rules.get("models", {}).items():

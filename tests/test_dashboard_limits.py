@@ -130,6 +130,24 @@ class OneHelperTests(LimitBase):
                  "ended_at": now - 5, "state": "failed"}]
         self.assertEqual(budget.limit_state(rows, now, "auto")["accounts"], {})
 
+    def test_auto_scope_keys_a_codex_record_to_the_model_it_ran(self):
+        """Codex final review HIGH: an exhausted rate_limits record limits only the model the account last ran."""
+        entry = budget.DEFAULT_RULES["models"]["codex"]  # one rules key per model: models of one key share a limit
+        self.set_rules(**{"models__codex:gpt-5.6-terra": dict(entry), "models__codex:gpt-5.6-sol": dict(entry)})
+        now = time.time()
+        with db() as c:
+            for ts, model in ((now - 300, "gpt-5.6-sol"), (now - 60, "gpt-5.6-terra")):
+                c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,account) "
+                          "VALUES (?,?,?,?,?,?,?,?)", (ts, f"t-ok{time.time_ns()}", 1, "codex", model,
+                                                       budget.identity("codex", model), "ok", CODEX_ACCOUNT))
+        self.runner_reports(record(window(100.0, 1800, 300), window(10.0, 400000, 10080), now))
+        state = budget.limit_snapshot(budget.current_rules(), now, CODEX_ACCOUNT)
+        self.assertNotIn("codex", state["accounts"])
+        self.assertIn("codex:gpt-5.6-terra", state["models"])
+        self.assertNotIn("codex:gpt-5.6-sol", state["models"])
+        self.assertEqual(self.admission(CODEX_ACCOUNT, "codex", "gpt-5.6-terra", "final_review"), "limit")
+        self.assertIsNone(self.admission(CODEX_ACCOUNT, "codex", "gpt-5.6-sol", "final_review"))
+
     def test_a_stored_model_scope_is_migrated_once_to_auto(self):
         import json
         with db() as c:

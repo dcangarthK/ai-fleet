@@ -30,9 +30,9 @@ def run_real_engine(base_url, model):
         if not catalog["reachable"]:
             raise unittest.SkipTest("real engine is absent: " + str(catalog.get("error")))
         available = {item["reference"] for item in catalog["models"]}
-        model = next((candidate for candidate in (model, "llama3.2:latest") if candidate in available), None)
+        model = next((candidate for candidate in (model,) if candidate in available), None)
         if not model:
-            raise unittest.SkipTest("real models are absent: qwen2.5-coder:14b and llama3.2:latest")
+            raise unittest.SkipTest("real models are absent: qwen2.5:3b (ollama pull qwen2.5:3b)")
 
         os.environ["FLEET_DB"] = str(root / "fleet.db")
         os.environ["FLEET_DIR"] = str(fleet)

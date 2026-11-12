@@ -10,7 +10,7 @@ class RealEngineIntegration(unittest.TestCase):
         from tests.real_engine_harness import run_real_engine
         result = run_real_engine(
             os.environ.get("FLEET_REAL_ENGINE_URL", "http://127.0.0.1:11434/v1"),
-            os.environ.get("FLEET_REAL_ENGINE_MODEL", "qwen2.5-coder:14b"),
+            os.environ.get("FLEET_REAL_ENGINE_MODEL", "qwen2.5:3b"),
         )
         self.assertEqual("done", result["state"], result)
         self.assertTrue(result["result"].strip(), result)

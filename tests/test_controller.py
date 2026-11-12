@@ -278,20 +278,27 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(master["status"], "approved")
         self.assertEqual(master["effective_ceiling"], "auto-edit")
 
+    def drop_task(self, task_id):
+        with db() as c:
+            c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
     def test_dmr_catalog_assignment_and_role_task_keep_engine_identity(self):
         added = self.c.post("/api/models", json={"reference": "fake-model:1b", "engine": "dmr",
                                                   "display_name": "Fake DMR"}, headers=W)
         self.assertEqual(200, added.status_code, added.text)
         dmr = added.json()
         self.assertEqual("dmr", dmr["engine"])
-        same_name = [m for m in self.c.get("/api/models").json() if m["reference"] == "fake-model:1b"]
-        self.assertEqual({"ollama", "dmr"}, {m["engine"] for m in same_name})
+        listed = [m for m in self.c.get("/api/models").json() if m["reference"] == "fake-model:1b"]
+        self.assertEqual(["dmr"], [m["engine"] for m in listed if m["id"] == dmr["id"]])
+        self.assertNotEqual("fake-model:1b", dmr["id"], "dmr ids are namespaced apart from plain ollama names")
         assigned = self.c.post("/api/roles", json={"role": "dmr-test", "node": "master",
                                                      "model": "fake-model:1b", "catalog_id": dmr["id"]}, headers=W)
         self.assertEqual(200, assigned.status_code, assigned.text)
         role = next(a for a in assigned.json()["assignments"] if a["role"] == "dmr-test")
         self.assertEqual("dmr", role["engine"])
         task = self.task(agent="ollama", model="fake-model:1b", role="dmr-test", mode="read-only")
+        # Don't leave recent use of the shared fake model behind: the retention test counts idle models.
+        self.addCleanup(self.drop_task, task["id"])
         sent = [b for p, b in FakeRunner.calls if p == "/jobs" and b["id"] == task["id"]][0]
         self.assertEqual(("dmr", "dmr"), (task["engine"], sent["engine"]))
         bad = self.c.post("/api/tasks", json={"agent": "ollama", "engine": "unknown",

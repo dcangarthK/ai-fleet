@@ -739,6 +739,15 @@ def parse_docker_model_ls(output):
     """Parse Docker's JSON-lines model list; malformed rows are contained and unknown fields stay null."""
     models = []
     for line in (output or "").splitlines():
+        if line.strip() and not line.lstrip().startswith("{"):
+            # Real `docker model ls` prints a table: "MODEL NAME  PARAMETERS ... MODEL ID  CREATED  SIZE".
+            fields = line.split()
+            if len(fields) < 3 or fields[0] == "MODEL" or not re.match(r"^[\w.\-]+(/[\w.\-]+)*(:[\w.\-]+)?$", fields[0]):
+                continue
+            digest = next((f for f in fields[1:] if re.fullmatch(r"[0-9a-f]{12}", f)), None)
+            models.append({"engine": "dmr", "reference": fields[0], "digest": digest,
+                           "size": None, "warm": "unknown", "warm_source": None})
+            continue
         try:
             row = json.loads(line)
         except (TypeError, ValueError):
@@ -784,7 +793,7 @@ class OpenAIEngine:
                     models.append({"engine": "dmr", "reference": reference, "digest": None,
                                    "size": None, "warm": "unknown", "warm_source": None})
             cli_models = parse_docker_model_ls(
-                self.docker_run(["docker", "model", "ls", "--format", "json"], timeout=3))
+                self.docker_run(["docker", "model", "ls"], timeout=3))
             known = {item["reference"] for item in models}
             models.extend(item for item in cli_models if item["reference"] not in known)
             value = {"engine": "dmr", "reachable": True, "models": models,

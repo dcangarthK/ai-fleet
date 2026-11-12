@@ -29,8 +29,12 @@ class FakeResponse:
         return self.body
 
 
+FIXTURES = ROOT / "tests" / "fixtures" / "dmr"
+
+
 class FakeOpenAIEngine:
     calls = []
+    use_fixture = False
 
     @classmethod
     def urlopen(cls, request, timeout=None):
@@ -40,6 +44,8 @@ class FakeOpenAIEngine:
         body = json.loads(request.data) if request.data else None
         cls.calls.append((request.get_method(), request.full_url, body))
         if request.full_url.endswith("/models"):
+            if cls.use_fixture:
+                return FakeResponse(json.loads((FIXTURES / "models.json").read_text()))
             return FakeResponse({"data": [{"id": "ai/qwen3:latest"}, {"id": "shared-name"}]})
         if request.full_url.endswith("/chat/completions"):
             return FakeResponse({"choices": [{"message": {"role": "assistant",
@@ -52,6 +58,7 @@ class EngineAdapterTests(unittest.TestCase):
 
     def setUp(self):
         FakeOpenAIEngine.calls = []
+        FakeOpenAIEngine.use_fixture = False
         mocked = patch.object(runner.urllib.request, "urlopen", FakeOpenAIEngine.urlopen)
         mocked.start()
         self.addCleanup(mocked.stop)
@@ -95,6 +102,20 @@ class EngineAdapterTests(unittest.TestCase):
              "warm": "unknown", "warm_source": None},
         ], runner.parse_docker_model_ls(output))
         self.assertEqual([], runner.parse_docker_model_ls(None))
+
+    def test_real_dmr_fixtures_models_endpoint_and_docker_table(self):
+        FakeOpenAIEngine.use_fixture = True
+        manager = self.manager({"engines": {"dmr": {"enabled": True, "base_url": self.base_url}}})
+        table = (FIXTURES / "docker_model_ls.txt").read_text()
+        for adapter in manager.engine_adapters.values():
+            adapter.docker_run = lambda *_a, **_k: table
+        catalog = manager.engine_catalog()["dmr"]
+        self.assertTrue(catalog["reachable"])
+        self.assertEqual(["ai/deepseek-r1-distill-llama", "ai/gemma3:4B-Q4_0"],
+                         [m["reference"] for m in catalog["models"]])
+        parsed = runner.parse_docker_model_ls(table)
+        self.assertEqual([("ai/deepseek-r1-distill-llama", "88795a9b69fc"), ("ai/gemma3:4B-Q4_0", "11951c7273a7")],
+                         [(m["reference"], m["digest"]) for m in parsed])
 
     def test_dmr_job_uses_openai_chat_endpoint_and_unknown_engine_is_refused(self):
         manager = self.manager({"engines": {"dmr": {"enabled": True, "base_url": self.base_url}}})

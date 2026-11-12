@@ -976,9 +976,10 @@ def local_engine(agent: str, model: str | None, role: str | None, node: str | No
         if role and candidates and requested not in candidates:
             raise HTTPException(400, f"role {role} is assigned to {candidates}, not {requested}")
         return requested
-    if len(candidates) > 1:
+    # Omitted engine means ollama (SPEC-networking §14.1), so a same-named dmr model never changes old callers.
+    if len(candidates) > 1 and "ollama" not in candidates:
         raise HTTPException(400, f"model {model} exists on several engines; specify engine")
-    return candidates[0] if candidates else "ollama"
+    return "ollama" if "ollama" in candidates or not candidates else candidates[0]
 
 
 @router.get("/api/tasks")

@@ -28,7 +28,7 @@ capture dmr-listener "$DMR_LSOF" -nP -iTCP:12434 -sTCP:LISTEN
 
 listener="$DMR_FIXTURE_DIR/dmr-listener.stdout"
 if [ -s "$listener" ]; then
-  addresses=$(awk 'NR > 1 {print $(NF-1)}' "$listener")
+  addresses=$(awk '$1 != "COMMAND" {print $(NF-1)}' "$listener")
   while IFS= read -r address; do
     [ -n "$address" ] || continue
     case "$address" in

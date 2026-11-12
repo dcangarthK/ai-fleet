@@ -149,6 +149,20 @@ class ScriptsParse(OnboardHarness):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("FAIL", result.stdout)
 
+    def test_dmr_smoke_check_passes_on_real_loopback_fixtures(self):
+        fx = ROOT / "tests" / "fixtures" / "dmr"
+        tool = {}
+        for name, fixture in (("lsof", "lsof_12434.txt"), ("docker", "docker_model_ls.txt"), ("curl", "models.json")):
+            path = self.tmp / ("fake-" + name)
+            path.write_text(f"#!/bin/sh\ncat '{fx / fixture}'\n")
+            path.chmod(0o755)
+            tool[name] = str(path)
+        result = subprocess.run([BASH, str(ROOT / "nodes" / "check_dmr.sh")], capture_output=True, text=True,
+                                env=self.env(DMR_LSOF=tool["lsof"], DMR_DOCKER=tool["docker"],
+                                             DMR_CURL=tool["curl"], DMR_FIXTURE_DIR=str(self.tmp / "fx2")))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+
 
 class RunnerPolicy(OnboardHarness):
     def configure(self, ram=16, pre=None, extra="", **env):

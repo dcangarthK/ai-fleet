@@ -292,6 +292,10 @@ class MigrationTests(unittest.TestCase):
 class LegacyRowTests(unittest.TestCase):
     """Failed rows stored before lineage have no failure_reason; the read path derives it."""
 
+    @classmethod
+    def setUpClass(cls):
+        store.init_db()  # self-contained: the read path queries the tasks table, which another class may not have made
+
     def view(self, **kw):
         base = {"id": "old", "parent_id": None, "title": "Old", "agent": "claude", "state": "failed", "denials": "[]",
                 "gate_result": None, "policy": "{}", "skills": "[]", "approved_tools": "[]", "exit_code": 1,

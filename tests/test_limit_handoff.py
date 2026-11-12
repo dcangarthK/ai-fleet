@@ -22,7 +22,17 @@ import redaction
 import tasks
 from store import db
 
-CLAUDE_LIMIT = "You've hit your 5-hour limit · resets 7:30pm (Africa/Johannesburg)"
+def _later_today(zone=None):
+    """A clock time later today (two hours ahead, at most 11:59 pm): a reset time that has passed is never rolled
+    to tomorrow, so a fixed time would make these fixtures fail once it is past."""
+    import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.datetime.now(ZoneInfo(zone) if zone else None)
+    soon = min(now + datetime.timedelta(hours=2), now.replace(hour=23, minute=59, second=0, microsecond=0))
+    return f"{soon.hour % 12 or 12}:{soon.minute:02d} {'AM' if soon.hour < 12 else 'PM'}"
+
+
+CLAUDE_LIMIT = f"You've hit your 5-hour limit · resets {_later_today('Africa/Johannesburg')} (Africa/Johannesburg)"
 AUTH_FAIL = "Invalid API key · Please run /login"
 OPUS, SONNET, FABLE = "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"
 PROFILES = {"claude": [{"id": "fleet", "label": "owner-max", "ready": True},
@@ -968,7 +978,7 @@ class PipelineTests(HandoffBase):
         current = self.pass_build(p)
         review = current["reviews"]["0"]["task_id"]
         self.assertEqual(self.get(review)["agent"], "codex")
-        self.limit(review, text="You've hit your usage limit. Try again at 7:30 PM.")
+        self.limit(review, text=f"You've hit your usage limit. Try again at {_later_today()}.")
         self.poll(p)
         current = self.pipeline(p)
         self.assertEqual(current["state"], "review_waiting")

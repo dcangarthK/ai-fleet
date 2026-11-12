@@ -171,8 +171,13 @@ class VerdictTests(StallBase):
     def test_fix2_first_look_is_not_idle_and_a_report_is_never_compared_with_itself(self):
         t = self.running()
         self.set_jobs(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
-        self.assertEqual(self.verdict(t["id"])["kind"], "ok")  # no previous report: no evidence
-        self.assertEqual(self.verdict(t["id"])["kind"], "ok")  # the same report again (a faster sweep) proves nothing
+        # The runner is polled in the background, so a fresh self.master() between two calls can be a NEW report
+        # (a later polled_at) and make the second look "idle". Classify both times against one frozen node row:
+        # that is the same report, however fast the sweep runs.
+        node, now = self.master(), time.time()
+        task = tasks.get_task(t["id"])
+        self.assertEqual(stall.classify(task, node, now)["kind"], "ok")  # no previous report: no evidence
+        self.assertEqual(stall.classify(task, node, now)["kind"], "ok")  # the same report again proves nothing
         self.assertEqual(len(stall.CPU_SEEN[t["id"]]), 1)
         self.new_report(job(t["id"], idle_s=31 * 60, cpu_s=5.0))
         self.assertEqual(self.verdict(t["id"])["kind"], "idle")

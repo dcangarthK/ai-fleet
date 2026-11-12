@@ -93,7 +93,7 @@ export const readyForReview = (tasks: Task[]): Task[] =>
 
 export function outcomeLabel(o: Outcome | null | undefined): string | null {
   if (!o) return null;
-  if (o.kind === "merged") return `Merged ${(o.commit ?? "").slice(0, 7)}`.trim();
+  if (o.kind === "merged") return o.commit ? `Merged · ${o.commit.slice(0, 7)}` : "Merged";
   return o.kind === "done" ? "Done" : "Abandoned";
 }
 

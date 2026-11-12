@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LIVE_POLL_MS, accountTone, alertText, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass,
-  stageChip, workerText, type Account, type Machine, type QueueRow, type Session, type Worker,
+  stageChip, stageTitle, workerText, type Account, type Machine, type QueueRow, type Session, type Worker,
 } from "./live";
 
 const NOW = new Date(2026, 10, 11, 21, 0).getTime() / 1000;
@@ -72,6 +72,18 @@ describe("stage strips", () => {
     expect(stageChip({ stage: "review", state: "failed", count: 1 }).className).toBe("stage stage-failed");
     expect(stageChip({ stage: "merge", state: "next", count: 0 }).label).toBe("merge");
     expect(stageChip({ stage: "review", state: "superseded" }).className).toBe("stage stage-superseded");
+  });
+  it("colours a stage by the controller's tone, so a settled attempt is never red", () => {
+    const settled = { stage: "build", state: "failed" as const,
+      display: { tone: "resolved" as const, label: "Done elsewhere · ec2ab20" } };
+    expect(stageChip(settled).className).toBe("stage stage-tone-resolved");
+    expect(stageChip({ ...settled, display: { tone: "muted", label: "Cancelled" } }).className).toBe("stage stage-tone-muted");
+    expect(stageChip({ ...settled, display: { tone: "attention", label: "Failed: error" } }).className).toBe("stage stage-tone-attention");
+    expect(stageTitle(settled)).toBe("build: Done elsewhere · ec2ab20");
+    const cancelled = { stage: "cancelled", state: "superseded" as const, display: { tone: "muted" as const, label: "Cancelled" } };
+    expect(stageChip(cancelled).className).toBe("stage stage-tone-muted");
+    expect(stageTitle(cancelled)).toBe("cancelled: Cancelled");
+    expect(stageTitle({ stage: "next", state: "next" })).toBe("next: next");
   });
 });
 

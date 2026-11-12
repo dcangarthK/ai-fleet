@@ -18,7 +18,7 @@ RESOLUTION_KINDS = ("resolved_by", "dismissed", "done_elsewhere", "handed_off")
 HANDOFF_KINDS = ("handing_off", "handed_off")
 OUTCOME_KINDS = ("merged", "done", "abandoned")
 FAILURE_STATES = {"failed", "blocked", "interrupted", "cancelled"}
-RUNNING = {"queued": "Queued", "starting": "Working", "working": "Working"}
+RUNNING = {"queued": "Queued", "starting": "Starting", "working": "Working"}
 # A successful attempt linked like this continues the work of the attempt it follows.
 CHAIN_LINKS = {"retry", "resume", "fix"}
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
@@ -162,20 +162,20 @@ def display_status(task: dict, tz: datetime.tzinfo | None = None, now: float | N
     if state in RUNNING:
         return {"tone": "running", "label": RUNNING[state]}
     if state == "awaiting_approval":
-        return {"tone": "attention", "label": "Needs your approval"}
+        return {"tone": "attention", "label": "Blocked: needs approval"}
     resolution = _json(task.get("resolution")) or {}
     kind = resolution.get("kind")
+    # Rows 2-5 of the matrix (docs/SPEC-dashboard-truth.md 2.1): settled outcomes beat the raw state.
     if kind == "resolved_by":
-        return {"tone": "resolved", "label": f"Resolved by {resolution.get('title') or resolution.get('task_id') or 'a later attempt'}"}
+        return {"tone": "muted", "label": f"Superseded by {resolution.get('task_id') or resolution.get('title') or 'a later attempt'}"}
     if kind == "done_elsewhere":
-        commit = f" ({resolution['commit']})" if resolution.get("commit") else ""
-        return {"tone": "resolved", "label": f"Done elsewhere by {resolution.get('by') or 'someone'}{commit}"}
+        commit = f" · {resolution['commit']}" if resolution.get("commit") else ""
+        return {"tone": "resolved", "label": f"Done elsewhere{commit}"}
     if kind == "dismissed":
         return {"tone": "muted", "label": "Dismissed"}
     if kind == "handed_off":
-        to = resolution.get("model") or resolution.get("agent") or "another agent"
-        account = f" ({resolution['label']})" if resolution.get("label") else ""
-        return {"tone": "resolved", "label": f"Handed off to {to}{account}"}
+        to = resolution.get("task_id") or resolution.get("model") or resolution.get("agent") or "another agent"
+        return {"tone": "resolved", "label": f"Handed off → {to}"}
     if kind == "handing_off":
         return {"tone": "running", "label": "Handing off"}
     reason = task.get("failure_reason")
@@ -186,11 +186,11 @@ def display_status(task: dict, tz: datetime.tzinfo | None = None, now: float | N
             resets = task.get("resets_at")
             if resets:
                 if resets <= now:
-                    return {"tone": "attention", "label": f"Limit reset at {clock(resets, tz)}: resume or dismiss"}
+                    return {"tone": "attention", "label": "Limit cleared: resume or hand off"}
                 return {"tone": "paused", "label": f"Paused: limit, resets {clock(resets, tz)}"}
             ended = task.get("ended_at")
             if ended and now - ended > LIKELY_RESET_SECONDS:
-                return {"tone": "attention", "label": "Usage limit (likely reset): resume or dismiss"}
+                return {"tone": "attention", "label": "Limit cleared: resume or hand off"}
             return {"tone": "paused", "label": "Paused: usage limit"}
         if state == "interrupted" or reason == "interrupted":
             return {"tone": "attention", "label": "Interrupted"}

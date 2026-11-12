@@ -105,6 +105,57 @@ class OneHelperTests(LimitBase):
         self.assertIsNone(self.resource_until(SPARE_ACCOUNT, self.SONNET_KEY))
         self.assertIsNone(self.admission(SPARE_ACCOUNT, "claude", SONNET, "draft"))
 
+    FABLE_KEY = "claude:claude-fable-*"
+
+    def test_default_scope_makes_a_claude_limit_account_wide_everywhere(self):
+        """Opus review HIGH 2: one fleet Sonnet limit shows Opus and Fable limited on all four endpoints."""
+        self.set_rules()  # the default limit_scope
+        self.assertEqual(budget.DEFAULT_RULES["limit_scope"], "auto")
+        self.limit_row(FLEET_ACCOUNT, "claude", SONNET)
+        for key in (self.SONNET_KEY, self.OPUS_KEY, self.FABLE_KEY):
+            seen = {self.status_until(key), self.fleet_until(key)}
+            self.assertEqual(len(seen), 1, (key, seen))
+            until, scope = seen.pop()
+            self.assertIsNotNone(until, key)
+            self.assertEqual(scope, "account", key)
+            self.assertAlmostEqual(self.resource_until(FLEET_ACCOUNT, key), until, delta=1)
+        self.assertIsNotNone(self.live_until(FLEET_ACCOUNT))
+        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", OPUS, "build"), "limit")
+        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", "claude-fable-5-2", "review"), "limit")
+        self.assertIsNone(self.admission(SPARE_ACCOUNT, "claude", OPUS, "build"))
+
+    def test_auto_scope_leaves_codex_per_model(self):
+        now = time.time()
+        rows = [{"agent": "codex", "model": "gpt-5.6-terra", "failure_reason": "limit", "resets_at": now + 600,
+                 "ended_at": now - 5, "state": "failed"}]
+        self.assertEqual(budget.limit_state(rows, now, "auto")["accounts"], {})
+
+    def test_a_stored_model_scope_is_migrated_once_to_auto(self):
+        import json
+        with db() as c:
+            version = c.execute("SELECT COALESCE(MAX(version),0) FROM budget_rules").fetchone()[0] + 1
+            c.execute("DELETE FROM budget_rules WHERE author='migration:limit_scope'")
+            c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (?,?,?,?)",
+                      (version, json.dumps(rules(limit_scope="model")), "owner", time.time()))
+        budget.seed_rules()
+        self.assertEqual(budget.current_rules()["limit_scope"], "auto")
+        history = [h for h in budget.rules_history() if h["author"] == "migration:limit_scope"]
+        self.assertEqual(len(history), 1)
+        budget.seed_rules()  # runs once: an owner's later explicit "model" is kept
+        self.set_rules(limit_scope="model")
+        budget.seed_rules()
+        self.assertEqual(budget.current_rules()["limit_scope"], "model")
+
+    def test_the_marker_is_written_even_when_nothing_needed_migrating(self):
+        with db() as c:
+            c.execute("DELETE FROM budget_rules WHERE author='migration:limit_scope'")
+        self.set_rules(limit_scope="auto")
+        budget.seed_rules()  # first run of the check: body already "auto", marker still written
+        self.assertEqual(len([h for h in budget.rules_history() if h["author"] == "migration:limit_scope"]), 1)
+        self.set_rules(limit_scope="model")  # the owner's later choice
+        budget.seed_rules()  # a restart
+        self.assertEqual(budget.current_rules()["limit_scope"], "model")
+
     def test_model_scope_limits_only_that_key_everywhere(self):
         self.set_rules(limit_scope="model")
         self.limit_row(FLEET_ACCOUNT, "claude", OPUS)

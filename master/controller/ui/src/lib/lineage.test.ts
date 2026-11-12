@@ -48,14 +48,14 @@ describe("timeline", () => {
       "Sonnet task · Paused: limit, resets 2:30 PM",
       "resumed · Ready for review",
       "Fable 5.2 review · Ready for review",
-      "merged ec2ab20",
+      "merged · ec2ab20",
     ]);
     expect(timelineText(attempts, null)).toBe(
       "Sonnet task · Paused: limit, resets 2:30 PM → resumed · Ready for review → Fable 5.2 review · Ready for review");
   });
   it("uses the agent when there is no model and labels outcomes", () => {
     expect(timelineSteps([attempt({ agent: "codex", link: "retry" })], null)).toEqual(["codex retry · Ready for review"]);
-    expect(outcomeLabel({ kind: "merged", commit: "abc1234", at: 1 })).toBe("Merged abc1234");
+    expect(outcomeLabel({ kind: "merged", commit: "abc1234", at: 1 })).toBe("Merged · abc1234");
     expect(outcomeLabel({ kind: "done", at: 1 })).toBe("Done");
     expect(outcomeLabel({ kind: "abandoned", at: 1 })).toBe("Abandoned");
     expect(outcomeLabel(null)).toBeNull();
@@ -106,7 +106,7 @@ describe("needs-attention cap", () => {
     expect(isAttention(task({ state: "failed", hidden: true, display: { tone: "attention", label: "Failed" } }))).toBe(false);
   });
   it("keeps an expired limit in attention, not paused", () => {
-    const expired = task({ state: "failed", display: { tone: "attention", label: "Limit reset at 2:30 PM: resume or dismiss" } });
+    const expired = task({ state: "failed", display: { tone: "attention", label: "Limit cleared: resume or hand off" } });
     const sets = overviewSets([expired]);
     expect(sets.attention).toHaveLength(1);
     expect(sets.paused).toHaveLength(0);
@@ -119,7 +119,7 @@ describe("ready for review", () => {
       task({ id: "ok", state: "review", display: { tone: "ok", label: "Ready for review" } }),
       task({ id: "legacy", state: "review" }),
       task({ id: "dismissed", state: "review", display: { tone: "muted", label: "Dismissed" } }),
-      task({ id: "elsewhere", state: "review", display: { tone: "resolved", label: "Done elsewhere by Sonnet (ec2ab20)" } }),
+      task({ id: "elsewhere", state: "review", display: { tone: "resolved", label: "Done elsewhere · ec2ab20" } }),
       task({ id: "hidden", state: "review", hidden: true }),
       task({ id: "failed", state: "failed", display: { tone: "attention", label: "Failed" } }),
     ];

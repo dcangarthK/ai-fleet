@@ -60,6 +60,8 @@ export interface QueueRow {
 export interface Stage {
   stage: string;
   state: "done" | "current" | "next" | "failed" | "superseded";
+  /** The controller's label and tone for the stage's latest attempt (same as /api/work); absent for pipeline strips. */
+  display?: { tone: "running" | "ok" | "paused" | "attention" | "resolved" | "muted"; label: string } | null;
   count?: number;
   task_id?: string | null;
   agent?: string;
@@ -211,8 +213,15 @@ export function queueText(q: QueueRow): string {
 /** A stage chip: its class (current highlighted, failed red) and its label, with "×2" for a repeat. */
 export function stageChip(s: Stage): { className: string; label: string } {
   const repeat = (s.count ?? 0) > 1 ? ` ×${s.count}` : "";
-  return { className: `stage stage-${s.state}`, label: `${s.stage}${repeat}` };
+  // The colour follows the controller's tone when it sent one (settled attempts are never red); `state` is the
+  // fallback for pipeline strips, which have no attempt.
+  const className = s.display ? `stage stage-tone-${s.display.tone}` : `stage stage-${s.state}`;
+  return { className, label: `${s.stage}${repeat}` };
 }
+
+/** Tooltip for a stage: the controller's label, or the stage state when there is none. */
+export const stageTitle = (s: Stage): string =>
+  `${s.stage}: ${s.display?.label ?? s.state}${s.model ? ` (${s.model})` : ""}`;
 
 export function accountTone(a: Account): Tone {
   if (a.status.startsWith("limited")) return "bad";

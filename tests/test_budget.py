@@ -509,8 +509,7 @@ class BudgetApiTests(unittest.TestCase):
 
     def test_account_limit_skips_a_fallback_on_the_same_account(self):
         self.put_rules(rules(limits__on_limit="fallback"))
-        self.limited_codex(agent="claude", model="claude-opus-5-5")
-        self.limited_codex(agent="claude", model="claude-fable-5-2")
+        self.limited_codex(agent="claude", model="claude-opus-5-5")  # a Claude limit holds the whole account
         t = self.ok(agent="claude", model="claude-opus-5-5", kind="build", gate="pytest")
         self.assertEqual((t["agent"], t["model"], t["state"]), ("claude", "claude-opus-5-5", "queued"))
         self.assertIn("claude account limited", t["error"])
@@ -656,7 +655,7 @@ class BudgetApiTests(unittest.TestCase):
         self.limited_codex(agent="claude", model=None)  # a Claude task with no model hit its limit
         t = self.ok(agent="claude", kind="build", gate="pytest")
         self.assertEqual(t["state"], "queued")
-        self.assertRegex(t["error"], r"claude limited until \d{1,2}:\d\d [AP]M")
+        self.assertRegex(t["error"], r"claude (account )?limited until \d{1,2}:\d\d [AP]M")
         self.assertNotIn(t["id"], FakeRunner.jobs)
         self.assertEqual(t["budget_key"], "claude:*")
 

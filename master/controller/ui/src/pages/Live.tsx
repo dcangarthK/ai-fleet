@@ -8,7 +8,7 @@ import { LoadError, PageHead, Section } from "../components/bits";
 import { ago, duration } from "../lib/format";
 import { clockTime } from "../lib/budget";
 import {
-  accountTone, alertText, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
+  accountTone, alertText, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip, stageTitle,
   workerText, type Live, type Machine,
 } from "../lib/live";
 
@@ -175,8 +175,8 @@ function ChainsSection({ data }: { data: Live }) {
                 const body = <>{chip.label}</>;
                 return (
                   <li key={`${s.stage}-${i}`} className={chip.className} aria-current={s.state === "current" ? "step" : undefined}
-                      title={`${s.stage}: ${s.state}${s.model ? ` (${s.model})` : ""}`}>
-                    {s.task_id && s.state === "failed" ? <Link to={`/tasks?task=${s.task_id}`}>{body}</Link> : body}
+                      title={stageTitle(s)}>
+                    {s.task_id && (s.display ? s.display.tone === "attention" : s.state === "failed") ?<Link to={`/tasks?task=${s.task_id}`}>{body}</Link> : body}
                   </li>
                 );
               })}

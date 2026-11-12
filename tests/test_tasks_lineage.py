@@ -155,11 +155,11 @@ class DisplayStatusTests(unittest.TestCase):
 
     def test_running_and_queued(self):
         self.assertEqual(self.ds(state="queued"), {"tone": "running", "label": "Queued"})
-        self.assertEqual(self.ds(state="starting"), {"tone": "running", "label": "Working"})
+        self.assertEqual(self.ds(state="starting"), {"tone": "running", "label": "Starting"})
         self.assertEqual(self.ds(state="working"), {"tone": "running", "label": "Working"})
 
     def test_waiting_on_a_person(self):
-        self.assertEqual(self.ds(state="awaiting_approval"), {"tone": "attention", "label": "Needs your approval"})
+        self.assertEqual(self.ds(state="awaiting_approval"), {"tone": "attention", "label": "Blocked: needs approval"})
         self.assertEqual(self.ds(state="blocked", failure_reason="denied"),
                          {"tone": "attention", "label": "Blocked: needs approval"})
 
@@ -174,14 +174,14 @@ class DisplayStatusTests(unittest.TestCase):
         self.assertEqual(before, {"tone": "paused", "label": "Paused: limit, resets 2:30 PM"})
         for now in (reset, reset + 3600):
             self.assertEqual(self.ds(failure_reason="limit", resets_at=reset, now=now),
-                             {"tone": "attention", "label": "Limit reset at 2:30 PM: resume or dismiss"})
+                             {"tone": "attention", "label": "Limit cleared: resume or hand off"})
 
     def test_limit_without_a_reset_time_is_likely_over_after_five_hours(self):
         ended = epoch(2026, 11, 11, 8, 0)
         young = self.ds(failure_reason="limit", ended_at=ended, now=ended + 4 * 3600)
         self.assertEqual(young, {"tone": "paused", "label": "Paused: usage limit"})
         old = self.ds(failure_reason="limit", ended_at=ended, now=ended + 5 * 3600 + 1)
-        self.assertEqual(old, {"tone": "attention", "label": "Usage limit (likely reset): resume or dismiss"})
+        self.assertEqual(old, {"tone": "attention", "label": "Limit cleared: resume or hand off"})
         self.assertEqual(self.ds(failure_reason="limit", now=ended)["tone"], "paused")  # no ended_at: can't tell
 
     def test_other_failures(self):
@@ -193,9 +193,9 @@ class DisplayStatusTests(unittest.TestCase):
 
     def test_resolutions(self):
         resolved = {"kind": "resolved_by", "task_id": "t-2", "title": "The retry", "at": 1}
-        self.assertEqual(self.ds(resolution=resolved), {"tone": "resolved", "label": "Resolved by The retry"})
+        self.assertEqual(self.ds(resolution=resolved), {"tone": "muted", "label": "Superseded by t-2"})
         elsewhere = {"kind": "done_elsewhere", "by": "Sonnet 5.5", "commit": "ec2ab20", "at": 1}
-        self.assertEqual(self.ds(resolution=elsewhere), {"tone": "resolved", "label": "Done elsewhere by Sonnet 5.5 (ec2ab20)"})
+        self.assertEqual(self.ds(resolution=elsewhere), {"tone": "resolved", "label": "Done elsewhere · ec2ab20"})
         self.assertEqual(self.ds(resolution={"kind": "dismissed", "at": 1}), {"tone": "muted", "label": "Dismissed"})
         # dismissing a blocked task only mutes it; the state is still blocked
         self.assertEqual(self.ds(state="blocked", resolution={"kind": "dismissed", "at": 1}),
@@ -316,12 +316,12 @@ class LegacyRowTests(unittest.TestCase):
         self.assertEqual(v["resets_at"], epoch(2026, 11, 1, 14, 30))
         # that reset was days ago, so it asks for a decision instead of claiming to be paused
         self.assertEqual(v["display"]["tone"], "attention")
-        self.assertTrue(v["display"]["label"].startswith("Limit reset at"), v["display"])
+        self.assertEqual(v["display"]["label"], "Limit cleared: resume or hand off")
 
     def test_old_limit_failure_with_unreadable_reset_time(self):
         v = self.view(result="You've hit your limit. Please try again later.")
         self.assertEqual((v["failure_reason"], v["resets_at"]), ("limit", None))
-        self.assertEqual(v["display"]["label"], "Usage limit (likely reset): resume or dismiss")
+        self.assertEqual(v["display"]["label"], "Limit cleared: resume or hand off")
 
     def test_other_old_states(self):
         self.assertEqual(self.view(result="boom")["failure_reason"], "error")
@@ -486,7 +486,7 @@ class LineageApiTests(unittest.TestCase):
         resolved = self.get(first["id"])
         self.assertEqual(resolved["resolution"]["kind"], "resolved_by")
         self.assertEqual(resolved["resolution"]["task_id"], retry["id"])
-        self.assertEqual(resolved["display"], {"tone": "resolved", "label": "Resolved by Second go"})
+        self.assertEqual(resolved["display"], {"tone": "muted", "label": f"Superseded by {retry['id']}"})
         self.assertEqual(resolved["state"], "failed")  # the state machine is untouched
 
     def test_failed_review_is_not_resolved_by_a_later_build_step(self):
@@ -519,7 +519,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(len(item["attempts"]), 2)
         first, last = item["attempts"]
         self.assertEqual((first["id"], last["id"]), (t["id"], t["id"]))
-        self.assertEqual(first["display"]["tone"], "paused")
+        self.assertEqual(first["display"], {"tone": "muted", "label": "Resumed"})  # a resumed run is not "Paused"
         self.assertEqual(first["failure_reason"], "limit")
         self.assertEqual(last["display"]["label"], "Ready for review")
 
@@ -600,7 +600,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(r.json()["outcome"]["kind"], "merged")
         item = self.work_item(t["id"])
         self.assertEqual(item["outcome"]["commit"], "ec2ab20")
-        self.assertEqual(item["display"], {"tone": "ok", "label": "Merged ec2ab20"})
+        self.assertEqual(item["display"], {"tone": "ok", "label": "Merged · ec2ab20"})
         types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
         self.assertIn("task.outcome", types)
 
@@ -645,7 +645,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(item["title"], "Grouped work")
         self.assertEqual([a["id"] for a in item["attempts"]], [root["id"], retry["id"], review["id"]])
         self.assertEqual([a["link"] for a in item["attempts"]], [None, "retry", "review"])
-        self.assertEqual(item["attempts"][0]["display"]["label"], "Resolved by Grouped retry")
+        self.assertEqual(item["attempts"][0]["display"]["label"], f"Superseded by {retry['id']}")
         self.assertEqual(item["display"], item["attempts"][-1]["display"])
         for key in ("id", "title", "agent", "model", "link", "state", "display", "failure_reason", "started_at", "ended_at"):
             self.assertIn(key, item["attempts"][0])

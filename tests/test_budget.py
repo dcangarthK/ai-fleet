@@ -1026,7 +1026,7 @@ class PipelineBudgetTests(unittest.TestCase):
         sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
         self.assertEqual((sent["mode"], sent["worktree"], sent["cwd"]), ("read-only", False, "/w"))
         self.assertIsNone(sent["repo"])
-        self.assertIn("Review only the diff below.", sent["prompt"])
+        self.assertIn("Read only the changed files and their direct callers", sent["prompt"])
         self.assertNotIn("Read surrounding files here", sent["prompt"])
         self.assertEqual(tasks.get_task(rid)["kind"], "review")
         self.assertEqual(self.calls[0], ("local", "reviewer"))  # local first

@@ -1246,7 +1246,7 @@ Imported body.
             sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
             self.assertEqual((sent["repo"], sent["cwd"], sent["worktree"]), (None, "/w", False))
             self.assertEqual(sent["mode"], "read-only")
-            self.assertIn("Review only the diff below.", sent["prompt"])
+            self.assertIn("Read only the changed files and their direct callers", sent["prompt"])
             self.assertNotIn("Read surrounding files", sent["prompt"])
             self.assertIn('"verdict":"approve|request_changes|abstain"', sent["prompt"])
             self.assertIn('"expected":"","actual":""', sent["prompt"])

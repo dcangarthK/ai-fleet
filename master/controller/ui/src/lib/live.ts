@@ -92,6 +92,40 @@ export interface Account {
   status: string;
 }
 
+// /api/tokens (master/controller/tokens.py): per task turns, peak context, cache tokens, bars against the caps.
+export interface TokenRow {
+  task_id: string;
+  kind?: string;
+  model?: string;
+  turns: number;
+  peak_context: number;
+  turn1_context: number;
+  cache_read: number;
+  cache_write: number;
+  caps: { turns: number | null; context: number | null; turn1: number };
+  usage: { turns: number | null; context: number | null; turn1: number };
+  alerts: string[];
+}
+
+export interface TokenSpend {
+  by_kind: Record<string, TokenTotals>;
+  by_model: Record<string, TokenTotals>;
+}
+
+export interface TokenTotals {
+  tasks: number; turns: number; input: number; cache_read: number; cache_write: number; output: number;
+}
+
+export function barPercent(share: number | null): number {
+  return share === null ? 0 : Math.min(100, Math.round(share * 100));
+}
+
+export function tokenAlertText(alert: string): string {
+  if (alert === "turn1_context") return "turn-1 context over the 8k lean target";
+  const m = /^(\w+)_80_percent$/.exec(alert);
+  return m ? `${m[1]} past 80% of its cap` : alert;
+}
+
 export interface Activity {
   id: string;
   ts: number;

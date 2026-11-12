@@ -30,6 +30,7 @@ def _empty(job_id: str) -> dict[str, Any]:
         "turns": 0,
         "peak_context": 0,
         "turn1_context": 0,
+        "input": 0,
         "cache_read": 0,
         "cache_write": 0,
         "output": 0,
@@ -114,6 +115,7 @@ def parse_events(path: Path, job_id: str | None = None) -> dict[str, Any]:
         result["peak_context"] = max(result["peak_context"], context)
         if result["turns"] == 1:
             result["turn1_context"] = context
+        result["input"] += input_tokens
         result["cache_read"] += cache_read
         result["cache_write"] += cache_write
         result["output"] += _number(usage.get("output_tokens"))
@@ -150,6 +152,17 @@ def _kind(task_id: str) -> str | None:
     return kind if isinstance(kind, str) and kind else None
 
 
+def _model(task_id: str) -> str | None:
+    try:
+        from store import db
+        with db() as c:
+            row = c.execute("SELECT model FROM tasks WHERE id=?", (task_id,)).fetchone()
+    except Exception:
+        return None
+    model = row["model"] if row else None
+    return model if isinstance(model, str) and model else None
+
+
 def _row(path: Path) -> dict[str, Any]:
     task_id = path.parent.name
     row = parse_events(path, task_id)
@@ -157,8 +170,19 @@ def _row(path: Path) -> dict[str, Any]:
     row["task_id"] = task_id
     if kind is not None:
         row["kind"] = kind
+    model = _model(task_id)
+    if model is not None:
+        row["model"] = model
     alerts: list[str] = []
     caps = _caps().get(kind, {}) if kind else {}
+    # What Live draws the bars against: the task's caps and its share of each (None when the kind has no such cap).
+    row["caps"] = {"turns": caps.get("turns") or None, "context": caps.get("context") or None,
+                   "turn1": LEAN_TURN1_TARGET}
+    row["usage"] = {
+        "turns": round(row["turns"] / caps["turns"], 3) if caps.get("turns") else None,
+        "context": round(row["peak_context"] / caps["context"], 3) if caps.get("context") else None,
+        "turn1": round(row["turn1_context"] / LEAN_TURN1_TARGET, 3),
+    }
     for field, cap in caps.items():
         value = row["peak_context"] if field == "context" else row.get(field, 0)
         if cap and value >= cap * 0.8:
@@ -178,6 +202,31 @@ def _event_paths() -> list[Path]:
     if not jobs_dir.is_dir():
         return []
     return sorted(jobs_dir.glob("*/events.jsonl"))
+
+
+def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Spend report: tokens per kind and per model (input = fresh + cache read + cache write)."""
+    def blank() -> dict[str, int]:
+        return {"tasks": 0, "turns": 0, "input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+
+    by_kind: dict[str, dict[str, int]] = {}
+    by_model: dict[str, dict[str, int]] = {}
+    for row in rows:
+        fresh_and_cache = row.get("input", 0) + row.get("cache_read", 0) + row.get("cache_write", 0)
+        for table, key in ((by_kind, row.get("kind") or "unknown"), (by_model, row.get("model") or "unknown")):
+            entry = table.setdefault(key, blank())
+            entry["tasks"] += 1
+            entry["turns"] += row.get("turns", 0)
+            entry["input"] += fresh_and_cache
+            entry["cache_read"] += row.get("cache_read", 0)
+            entry["cache_write"] += row.get("cache_write", 0)
+            entry["output"] += row.get("output", 0)
+    return {"by_kind": by_kind, "by_model": by_model}
+
+
+@router.get("/api/tokens/summary")
+def tokens_summary(since: float | None = Query(default=None)) -> dict[str, Any]:
+    return summarise(tokens_since(since)["tasks"])
 
 
 @router.get("/api/tokens/{task_id}")

@@ -1396,6 +1396,8 @@ class PipelineRequest(BaseModel):
     require_trusted: bool = True
     trusted_roles: list[str] = Field(default_factory=list)
     bypass: bool = False
+    spec_sections: list[str] | None = None
+    spec_path: str | None = None
 
 
 def pipeline_view(row) -> dict:
@@ -1540,10 +1542,30 @@ async def role_review(role: str, spec: str, diff: str) -> tuple[str, str | None,
     return json.dumps({"verdict": verdict, "issues": issues}), ("; ".join(notes) or None), fallback
 
 
-# One instruction for every paid review (SPEC-paid-budget 3.4). The reviewer runs read-only in the build's worktree,
-# so a file it does open is current; it never gets the full diff *and* an invitation to read the tree.
-REVIEW_SCOPE = ("Review only the diff below. Read a file only when a line you need is ambiguous or outside the diff; "
-                "name each file you read. ")
+# One instruction for every paid review (SPEC-paid-budget 3.4, SPEC-token-budget 3.8). The reviewer runs read-only in
+# the build's worktree, so a file it does open is current. It gets the diff OR the file list plus the worktree path,
+# never both.
+REVIEW_SCOPE = ("Read only the changed files and their direct callers; do not explore the rest of the tree. "
+                "Name each file you read. ")
+REVIEW_PROMPT_CAP = 60 * 1024
+
+
+def _spec_block(spec: str, sections: list[str] | None, spec_path: str | None) -> str:
+    """Section numbers, not spec text, when the work item names them (SPEC-token-budget 3.8)."""
+    if sections:
+        where = f" in {spec_path}" if spec_path else ""
+        return f"SPEC: sections {', '.join(sections)}{where}. Read only those sections."
+    return f"SPEC:\n{spec}"
+
+
+def _change_block(diff: str, worktree: str | None, title: str = "DIFF", cap: int = REVIEW_PROMPT_CAP) -> str:
+    """The diff when it fits the prompt cap; otherwise the changed-file list and the worktree path (not both)."""
+    if len(diff.encode()) <= cap // 2:
+        return f"{title}:\n{diff}"
+    files = "\n".join(f"- {name}" for name in budget.changed_files(diff)) or "- (no file headers in the diff)"
+    where = worktree or "the current directory"
+    return (f"{title} NOT INLINED (too large for the prompt). Worktree: {where}. Changed files "
+            f"(read them there, and `git diff` per file when needed):\n{files}")
 
 
 def _hint_text(hints: list[dict] | None) -> str:
@@ -1558,16 +1580,20 @@ def _hint_text(hints: list[dict] | None) -> str:
     return "\n".join(lines)
 
 
-def review_prompt(spec: str, diff: str, branch: str | None = None, hints: list[dict] | None = None) -> str:
+def review_prompt(spec: str, diff: str, branch: str | None = None, hints: list[dict] | None = None,
+                  spec_sections: list[str] | None = None, spec_path: str | None = None,
+                  worktree: str | None = None) -> str:
     return (
         "Independently review the builder's change against the spec below. Do not edit anything. " + REVIEW_SCOPE +
         grounding.REVIEW_GUIDANCE + " Reply with JSON only using this schema: " +
         grounding.REVIEW_SCHEMA + _hint_text(hints) + "\n\n"
-        f"SPEC:\n{spec}\n\nDIFF:\n{diff}"
+        f"{_spec_block(spec, spec_sections, spec_path)}\n\n{_change_block(diff, worktree)}"
     )
 
 
-def re_review_prompt(spec: str, findings: list[dict], delta: str, hints: list[dict] | None = None) -> str:
+def re_review_prompt(spec: str, findings: list[dict], delta: str, hints: list[dict] | None = None,
+                     spec_sections: list[str] | None = None, spec_path: str | None = None,
+                     worktree: str | None = None) -> str:
     """Round 2+: the previous findings and only what changed since that review (SPEC-paid-budget 3.5)."""
     previous = "\n".join(f"- [{f.get('severity')}] {f.get('problem')}" + (f" ({f['file']})" if f.get("file") else "")
                          for f in findings) or "- (none recorded)"
@@ -1578,7 +1604,8 @@ def re_review_prompt(spec: str, findings: list[dict], delta: str, hints: list[di
         "Do not edit anything. " + REVIEW_SCOPE + grounding.REVIEW_GUIDANCE +
         " Reply with JSON only using this schema: " + grounding.REVIEW_SCHEMA + _hint_text(hints) +
         f"\n\nPREVIOUS FINDINGS:\n{previous}\n\nChanged since the last review:\n{files}"
-        f"\n\nSPEC:\n{spec}\n\nDIFF SINCE THE LAST REVIEW:\n{delta}"
+        f"\n\n{_spec_block(spec, spec_sections, spec_path)}\n\n"
+        + _change_block(delta, worktree, "DIFF SINCE THE LAST REVIEW")
     )
 
 
@@ -1745,7 +1772,9 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
                 save_pipeline(p)
                 return await _pipeline_step_unlocked(p, {"type": "review", "reviewer": index, "raw": "", "diff": diff,
                                                          "reason": "no change since last review"})
-            prompt = re_review_prompt(p["spec"], b["last_findings"], delta, hints)
+            prompt = re_review_prompt(p["spec"], b["last_findings"], delta, hints,
+                                      (b.get("spec_ref") or {}).get("sections"),
+                                      (b.get("spec_ref") or {}).get("path"), build.get("cwd"))
             kind = "re_review"  # every delta round, Codex's included; the security path is recorded below
             b["delta_reviews"] = b.get("delta_reviews", 0) + 1
             b["delta_bytes_saved"] = b.get("delta_bytes_saved", 0) + max(0, len(diff.encode()) - len(delta.encode()))
@@ -1763,7 +1792,9 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
     try:
         review_task = await tasks.create_task(tasks.TaskIn(
             agent=reviewer["agent"], model=reviewer.get("model"),
-            prompt=prompt or review_prompt(p["spec"], diff, build.get("branch"), hints),
+            prompt=prompt or review_prompt(p["spec"], diff, build.get("branch"), hints,
+                                          (b.get("spec_ref") or {}).get("sections"),
+                                          (b.get("spec_ref") or {}).get("path"), build.get("cwd")),
             title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"), worktree=False,
             node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
             origin_kind=origin_kind if kind == "re_review" else None,
@@ -2041,6 +2072,8 @@ async def create_pipeline(spec: PipelineRequest) -> dict:
     identifier, now = "p-" + secrets.token_hex(4), time.time()
     p, actions = pipeline_machine.start(p)
     p |= {"id": identifier, "created_at": now, "updated_at": now}
+    if p.get("spec_sections"):  # kept in the budget JSON: the pipelines table has no column for it
+        p.setdefault("budget", {})["spec_ref"] = {"sections": p["spec_sections"], "path": p.get("spec_path")}
     # Hold the pipeline's lock from the insert: otherwise the poll loop can see the new row (building, no build
     # task yet) and spawn a second builder while this request spawns the first.
     async with _pipeline_locks.setdefault(identifier, asyncio.Lock()):

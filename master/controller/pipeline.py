@@ -72,8 +72,16 @@ def new(spec: dict) -> dict:
         raise ValueError("bypass must be a boolean")
     if bypass and builder.get("agent") not in ("claude", "codex"):
         raise ValueError("only a Claude or Codex builder can skip permission prompts")
+    sections = spec.get("spec_sections")
+    if sections is not None and (not isinstance(sections, list)
+                                 or any(not isinstance(x, str) or not x.strip() for x in sections)):
+        raise ValueError("spec_sections must be a list of section numbers")
+    spec_path = spec.get("spec_path")
+    if spec_path is not None and not isinstance(spec_path, str):
+        raise ValueError("spec_path must be a string")
     mode = spec.get("mode", "auto-edit")
     return {
+        "spec_sections": [x.strip() for x in sections] if sections else None, "spec_path": spec_path or None,
         "title": spec.get("title", ""), "state": "building", "round": 1,
         "max_rounds": maximum, "spec": spec.get("spec", ""),
         "repo": spec.get("repo"), "gate": spec.get("gate"), "mode": mode,

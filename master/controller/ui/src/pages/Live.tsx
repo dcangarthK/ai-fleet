@@ -8,8 +8,8 @@ import { LoadError, PageHead, Section } from "../components/bits";
 import { ago, duration } from "../lib/format";
 import { clockTime } from "../lib/budget";
 import {
-  accountTone, alertText, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip, stageTitle,
-  workerText, type Live, type Machine,
+  accountTone, alertText, barPercent, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
+  stageTitle, tokenAlertText, workerText, type Live, type Machine, type TokenRow, type TokenSpend,
 } from "../lib/live";
 
 function useVisible(): boolean {
@@ -64,6 +64,7 @@ export function LivePage() {
           <PresenceSection data={data} now={now} showResolved={showResolved} onShowResolved={setShowResolved} />
           <AccountsSection data={data} />
           <WorkersSection data={data} now={now} phone={phone} />
+          <TokensSection />
           <ChainsSection data={data} />
           <QueueSection data={data} phone={phone} />
           <MachinesSection data={data} phone={phone} />
@@ -125,6 +126,48 @@ function AccountsSection({ data }: { data: Live }) {
           </div>
         ))}
       </div>
+    </Section>
+  );
+}
+
+function Bar({ label, value, share, cap }: { label: string; value: number; share: number | null; cap: number | null }) {
+  const pct = barPercent(share);
+  return (
+    <span className="small" title={cap ? `${value} of ${cap}` : `${value} (no cap)`}>
+      {label} {value}{cap ? `/${cap}` : ""}{" "}
+      <progress className={pct >= 80 ? "tone-bad" : undefined} max={100} value={pct} />
+    </span>
+  );
+}
+
+function TokensSection() {
+  const rows = useQuery({ queryKey: ["tokens"], queryFn: () => get<{ tasks: TokenRow[] }>(`/api/tokens?since=${Math.floor(Date.now() / 1000) - 86400}&limit=30`),
+    refetchInterval: 30000 });
+  const spend = useQuery({ queryKey: ["tokens-spend"], queryFn: () => get<TokenSpend>("/api/tokens/summary"),
+    refetchInterval: 60000 });
+  const tasks = rows.data?.tasks ?? [];
+  return (
+    <Section title="Token use" aside={`${tasks.length} tasks`}>
+      {tasks.length === 0 && <p className="empty panel">No task token logs yet.</p>}
+      <div className="live-rows">
+        {tasks.slice().reverse().map((t) => (
+          <div key={t.task_id} className="live-row">
+            <Link to={`/tasks?task=${t.task_id}`}><b>{t.kind ?? "task"} {t.task_id}</b></Link>
+            <Bar label="turns" value={t.turns} share={t.usage.turns} cap={t.caps.turns} />
+            <Bar label="peak ctx" value={t.peak_context} share={t.usage.context} cap={t.caps.context} />
+            <Bar label="turn-1" value={t.turn1_context} share={t.usage.turn1} cap={t.caps.turn1} />
+            <span className="small quiet">cache read {t.cache_read} · write {t.cache_write}</span>
+            {t.alerts.map((a) => <span key={a} className="state tone-bad">{tokenAlertText(a)}</span>)}
+          </div>
+        ))}
+      </div>
+      {spend.data && (["by_kind", "by_model"] as const).map((group) => (
+        <p key={group} className="small quiet">
+          tokens {group === "by_kind" ? "per kind" : "per model"}:{" "}
+          {Object.entries(spend.data[group]).map(([k, v]) =>
+            `${k} in ${v.input} · out ${v.output} (${v.tasks})`).join(" | ") || "none"}
+        </p>
+      ))}
     </Section>
   );
 }

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob"
+    ]
+  },
+  "enabledPlugins": {},
+  "promptSuggestionEnabled": false,
+  "autoDreamEnabled": false,
+  "awaySummaryEnabled": false,
+  "spinnerTipsEnabled": false,
+  "autoMemoryEnabled": false,
+  "env": {
+    "CLAUDE_CODE_GOAL_CHECKIN_MINUTES": "0"
+  }
+}

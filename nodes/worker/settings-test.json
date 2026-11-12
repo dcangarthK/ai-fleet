@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash"
+    ]
+  },
+  "enabledPlugins": {},
+  "promptSuggestionEnabled": false,
+  "autoDreamEnabled": false,
+  "awaySummaryEnabled": false,
+  "spinnerTipsEnabled": false,
+  "autoMemoryEnabled": false,
+  "env": {
+    "CLAUDE_CODE_GOAL_CHECKIN_MINUTES": "0"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{QUIET_BASH}}"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -34,6 +34,7 @@ class CpuParsing(unittest.TestCase):
         self.assertEqual(runner.group_cpu_seconds(100, run=lambda argv, timeout=3: out), 61.5)
         self.assertIsNone(runner.group_cpu_seconds(100, run=lambda argv, timeout=3: None))
         self.assertIsNone(runner.group_cpu_seconds(0, run=lambda argv, timeout=3: out))
+        self.assertEqual({100: 61.5, 200: 540.0}, runner.group_cpu_map(run=lambda argv, timeout=3: out))
 
 
 class Scan(unittest.TestCase):
@@ -54,6 +55,28 @@ class Scan(unittest.TestCase):
             self.assertEqual((100, False), (newest, capped))
             self.assertLess(count, 10)
 
+    def test_a_nested_symlink_to_a_directory_outside_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(os.path.realpath(d)) / "wt"
+            outside = Path(os.path.realpath(d)) / "outside"
+            (root / "sub").mkdir(parents=True)
+            (outside / "deep").mkdir(parents=True)
+            (outside / "deep" / "new").write_text("z")
+            os.symlink(outside, root / "sub" / "escape")
+            (root / "sub" / "a").write_text("x")
+            os.utime(root / "sub" / "a", (50, 50))
+            self.assertEqual((50, False), runner.scan_worktree(root, 1000)[::2])
+
+    def test_a_root_that_is_a_symlink_is_not_scanned(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = Path(os.path.realpath(d)) / "real"
+            real.mkdir()
+            (real / "f").write_text("x")
+            link = Path(os.path.realpath(d)) / "link"
+            os.symlink(real, link)
+            newest, count, capped = runner.scan_worktree(link, 1000)
+            self.assertEqual((0.0, 0, True), (newest, count, capped))
+
     def test_cap(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -65,7 +88,8 @@ class Scan(unittest.TestCase):
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        # a monitor thread may still be saving its job as the test ends
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.base = Path(os.path.realpath(self.temp.name))
         self.fleet = self.base / "fleet"
         self.fleet.mkdir()
@@ -157,6 +181,58 @@ class RootCause(Base):
         self.assertGreaterEqual(len(calls), 2)
         self.assertEqual("exited", job["state"])
 
+    def test_monitor_enforces_the_deadline_while_alive_keeps_raising(self):
+        m = self.manager()
+        started = runner.datetime.datetime.fromtimestamp(time.time() - 10).astimezone().isoformat()
+        job = self.add_job(m, pid=os.getpid(), started_at=started, run_started_at=started, timeout_minutes=0.01)
+
+        class Broken:
+            def poll(self):
+                raise OSError("poll broke")
+
+            def wait(self, timeout=None):
+                return 0
+
+        audits = []
+        with mock.patch.object(m, "_kill_group"), mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
+            m._start_monitor(job, Broken())
+            end = time.time() + 5
+            while time.time() < end and job["state"] == "running":
+                time.sleep(0.05)
+            self.assertEqual(("exited", 124), (job["state"], job.get("exit_code")))
+
+    def test_monitor_errors_are_rate_limited(self):
+        m = self.manager()
+        job = self.add_job(m, pid=os.getpid())  # far from its deadline
+
+        class Broken:
+            def poll(self):
+                raise OSError("poll broke")
+
+            def wait(self, timeout=None):
+                return 0
+
+        audits = []
+        with mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
+            m._start_monitor(job, Broken())
+            time.sleep(1.5)  # about 7 loop passes
+            job["state"] = "cancelled"  # ends the monitor
+            time.sleep(0.5)
+        self.assertEqual(1, len([a for a in audits if a[0] == "monitor_error"]))
+
+    def test_timeout_falls_back_to_killing_the_pid_when_the_group_kill_fails(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242)
+        audits = []
+        with mock.patch.object(m, "_kill_group", side_effect=PermissionError("nope")), \
+                mock.patch.object(runner, "process_alive", return_value=True), \
+                mock.patch.object(runner.os, "kill") as kill, \
+                mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
+            m._timeout(job)
+        kill.assert_called_once_with(4242, runner.signal.SIGKILL)
+        self.assertIn("kill_failed", [a[0] for a in audits])
+        self.assertEqual(("exited", 124), (job["state"], job["exit_code"]))
+
     def test_restart_with_a_poisoned_job_still_loads(self):
         m = self.manager()
         job = self.add_job(m)
@@ -173,7 +249,12 @@ class Activity(Base):
         self.clock = [1000.0]
         self.m.clock = lambda: self.clock[0]
         self.cpu = [0.0]
-        self.m.cpu_probe = lambda pid: self.cpu[0]
+        self.ps_calls = []
+
+        def probe():
+            self.ps_calls.append(1)
+            return {os.getpid(): self.cpu[0]}
+        self.m.cpu_probe = probe
         self.job = self.add_job(self.m, pid=os.getpid())
 
     def entry(self):
@@ -246,6 +327,26 @@ class Activity(Base):
         report = self.m.jobs_report()
         self.assertEqual(32, len(report))
         self.assertNotIn("done", [e["id"] for e in report])
+        self.assertEqual(1, len(self.ps_calls))  # one ps for all jobs, not one per job
+        self.assertEqual(41, len(self.m.activity))  # jobs beyond the reported 32 keep their records
+        self.tick(70)
+        self.m.jobs_report()
+        self.assertEqual(41, len(self.m.activity))
+        self.assertEqual(2, len(self.ps_calls))
+
+    def test_idle_of_a_job_beyond_the_cap_is_not_reset_when_it_enters_the_report(self):
+        self.job["started_at"] = "2999-01-01T00:00:00+00:00"  # sorts last
+        for i in range(32):
+            self.add_job(self.m, "r-%d" % i, pid=os.getpid(), started_at="2000-01-01T00:00:%02d+00:00" % i)
+        self.assertNotIn("j-1", [e["id"] for e in self.m.jobs_report()])
+        self.tick(500)
+        self.m.jobs["r-0"].update({"state": "exited"})  # frees a slot in the report
+        entry = [e for e in self.m.jobs_report() if e["id"] == "j-1"][0]
+        self.assertEqual(500, entry["idle_s"])
+
+    def test_jobs_entry_has_exactly_the_contract_keys(self):
+        self.assertEqual({"id", "state", "alive", "gate_alive", "idle_s", "activity_src", "cpu_s"},
+                         set(self.entry()))
 
     def test_health_report_carries_jobs(self):
         with mock.patch.object(runner, "find_agents", return_value={}), \

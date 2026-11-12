@@ -867,26 +867,39 @@ def parse_cpu_time(text):
     return int(days or 0) * 86400 + int(hours or 0) * 3600 + int(minutes) * 60 + float(seconds)
 
 
-def group_cpu_seconds(pgid, run=None):
-    """CPU seconds used so far by every process in a process group (`ps`, no psutil), or None if unknown."""
-    if not isinstance(pgid, int) or pgid <= 1 or os.name == "nt":
+def group_cpu_map(run=None):
+    """{pgid: CPU seconds so far, summed over the group} for every process, from one `ps` call (no psutil).
+    None if unknown."""
+    if os.name == "nt":
         return None
     out = (run or run_capped)(["ps", "-A", "-o", "pgid=,time="])
     if out is None:
         return None
-    total = 0.0
+    totals = {}
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[0] == str(pgid):
-            seconds = parse_cpu_time(parts[1])
-            if seconds is not None:
-                total += seconds
-    return total
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        seconds = parse_cpu_time(parts[1])
+        if seconds is not None:
+            totals[int(parts[0])] = totals.get(int(parts[0]), 0.0) + seconds
+    return totals
+
+
+def group_cpu_seconds(pgid, run=None):
+    """CPU seconds used so far by one process group, or None if unknown."""
+    if not isinstance(pgid, int) or pgid <= 1:
+        return None
+    totals = group_cpu_map(run)
+    return None if totals is None else totals.get(pgid, 0.0)
 
 
 def scan_worktree(root, cap):
     """(newest mtime, entries seen, capped) for a worktree. Never follows symlinks, so it cannot leave the root;
-    skips .git, node_modules, .venv and dist; stops after `cap` entries."""
+    skips .git, node_modules, .venv and dist; stops after `cap` entries. A root that is itself a symlink is not
+    scanned (reported as capped, so file activity is ignored)."""
+    if os.path.islink(root):
+        return 0.0, 0, True
     newest, count = 0.0, 0
     stack = [str(root)]
     while stack:
@@ -1189,7 +1202,7 @@ class JobManager:
         self.jobs = {}
         self.gate_threads = set()
         self.clock = time.time  # runner clock for idle_s; tests replace these three
-        self.cpu_probe = group_cpu_seconds
+        self.cpu_probe = group_cpu_map  # one call per jobs report: {pgid: cpu_s}
         self.scan_cap = SCAN_CAP
         self.activity = {}
         self.activity_lock = threading.Lock()
@@ -1430,9 +1443,11 @@ class JobManager:
     def _gate_alive(self, job):
         return job.get("id") in self.gate_threads
 
-    def _activity_of(self, job, now_s):
-        """Update and return the runtime activity record of a job. Idle time runs on the runner's clock."""
+    def _activity_of(self, job, now_s, cpus=None):
+        """Update and return the runtime activity record of a job. Idle time runs on the runner's clock.
+        `cpus` is the {pgid: cpu_s} map of this report (None if unknown). The worktree scan runs outside the lock."""
         job_id = job["id"]
+        scan_due = False
         with self.activity_lock:
             act = self.activity.get(job_id)
             if act is None:
@@ -1451,44 +1466,55 @@ class JobManager:
             if self._gate_alive(job):
                 touch("output")  # gate output counts as activity (12.2)
             cpu = None
-            if job.get("state") == "running":
-                try:
-                    cpu = self.cpu_probe(job.get("pid"))
-                except Exception:
-                    cpu = None
+            if job.get("state") == "running" and cpus is not None:
+                cpu = cpus.get(job.get("pid"), 0.0)
             if cpu is not None:
                 if act["cpu"] is not None and cpu - act["cpu"] >= CPU_GROWTH_MIN:
                     touch("cpu")
                 act["cpu"] = act["cpu_s"] = cpu
             if act["scan_at"] is None or now_s - act["scan_at"] >= SCAN_INTERVAL:
-                act["scan_at"] = now_s
-                try:
-                    newest, _count, capped = scan_worktree(job.get("cwd") or "", self.scan_cap)
-                except Exception:
-                    newest, capped = None, True
-                if not capped and newest is not None:
-                    if act["mtime"] is not None and newest > act["mtime"]:
-                        touch("files")
-                    act["mtime"] = max(newest, act["mtime"] or 0)
+                act["scan_at"] = now_s  # claimed: a concurrent report will not scan too
+                scan_due = True
+            result = dict(act)
+        if not scan_due:
+            return result
+        try:
+            newest, _count, capped = scan_worktree(job.get("cwd") or "", self.scan_cap)
+        except Exception:
+            newest, capped = None, True
+        with self.activity_lock:
+            act = self.activity.get(job_id)
+            if act is None:
+                return result
+            if not capped and newest is not None:
+                if act["mtime"] is not None and newest > act["mtime"]:
+                    act["last"], act["src"] = now_s, "files"
+                act["mtime"] = max(newest, act["mtime"] or 0)
             return dict(act)
 
     def jobs_report(self):
         """The "jobs" list of /health: running jobs and jobs whose gate still runs, at most JOBS_REPORT_MAX."""
         now_s = self.clock()
+        active = [(job, self._gate_alive(job)) for job in
+                  sorted(list(self.jobs.values()), key=lambda item: item.get("started_at") or "")]
+        active = [(job, gate) for job, gate in active if job.get("state") == "running" or gate]
+        cpus = None
+        if any(job.get("state") == "running" for job, _gate in active):
+            try:
+                cpus = self.cpu_probe()  # one `ps` for all jobs
+            except Exception:
+                cpus = None
         entries = []
-        for job in sorted(list(self.jobs.values()), key=lambda item: item.get("started_at") or ""):
-            gate = self._gate_alive(job)
-            if job.get("state") != "running" and not gate:
-                continue
-            act = self._activity_of(job, now_s)
-            cpu = act["cpu_s"]
-            entries.append({"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
-                            "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
-                            "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)})
-            if len(entries) >= JOBS_REPORT_MAX:
-                break
+        for job, gate in active:  # every active job keeps its record, even beyond the reported 32
+            act = self._activity_of(job, now_s, cpus)
+            if len(entries) < JOBS_REPORT_MAX:
+                cpu = act["cpu_s"]
+                entries.append({"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
+                                "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
+                                "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)})
+        keep = {job["id"] for job, _gate in active}
         with self.activity_lock:  # forget finished jobs
-            for job_id in [key for key in self.activity if key not in {e["id"] for e in entries}]:
+            for job_id in [key for key in self.activity if key not in keep]:
                 del self.activity[job_id]
         return entries
 
@@ -1834,16 +1860,25 @@ class JobManager:
                 return process.poll() is None if process is not None else process_alive(job.get("pid"))
 
             # An exception must never end this thread: it is what enforces max_job_minutes (t-253101a7).
+            errors = 0
             while job.get("state") == "running":
-                try:
-                    if not alive():
-                        break
-                    if time.time() >= deadline:
+                # The deadline comes first, in its own try, so a failing alive() can never hide it.
+                if time.time() >= deadline:
+                    try:
                         self._timeout(job)
                         if job.get("state") != "running":
                             return
-                except Exception as exc:
-                    self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
+                    except Exception as exc:
+                        errors += 1
+                        if errors == 1 or errors % 150 == 0:  # rate-limited: about every 30 s
+                            self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
+                try:
+                    if not alive():
+                        break
+                except Exception as exc:  # unknown: assume alive; refresh() still covers the deadline
+                    errors += 1
+                    if errors == 1 or errors % 150 == 0:
+                        self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
                 time.sleep(0.2)
             if process is not None:
                 try:
@@ -1873,10 +1908,16 @@ class JobManager:
         with self.lock:
             if job.get("state") != "running":
                 return
+            pid = job.get("pid")
             try:
-                self._kill_group(job.get("pid"))
-            except (OSError, subprocess.SubprocessError):
-                pass
+                self._kill_group(pid)
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.audit("kill_failed", "%s: group kill failed: %s" % (job.get("id"), error_line(exc)))
+                if pid and os.name != "nt" and process_alive(pid):  # fall back to the single process
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError as inner:
+                        self.audit("kill_failed", "%s: pid kill failed: %s" % (job.get("id"), error_line(inner)))
             self._parse_events_safe(job)
             message = "Job timed out after %s minutes" % job.get("timeout_minutes", self.max_job_minutes)
             job.update({"state": "exited", "exit_code": 124, "ended_at": now(),

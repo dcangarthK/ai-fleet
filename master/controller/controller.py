@@ -44,6 +44,7 @@ import grounding  # noqa: E402
 import handoff  # noqa: E402
 import live  # noqa: E402
 import leader  # noqa: E402
+import loopheal  # noqa: E402
 import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
@@ -1828,6 +1829,9 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
             save_pipeline(p)
         elif action["do"] == "message_build":
             await _message_build(p, action["text"])
+            if action.get("gate_bounce") and action["gate_bounce"].get("task_id") and p["state"] == "building":
+                loopheal.emit_bounce(action["gate_bounce"]["task_id"], action["gate_bounce"].get("title"),
+                                     action["gate_bounce"]["round"])
         elif action["do"] == "spawn_review":
             index = action["reviewer"]
             if p["state"] != "reviewing" or p["reviews"].get(str(index), {}).get("status") != "pending":
@@ -1942,7 +1946,8 @@ async def poll_pipeline(pipeline_id: str) -> None:
                     await _pipeline_step_unlocked(p, {"type": "build_limited", **result})
                 return
             if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped"):
-                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"]})
+                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"],
+                                                  **loopheal.gate_event(build)})
             return
         if p["state"] == "review_waiting":
             due = [r["waiting_until"] for r in p["reviews"].values() if r.get("waiting_until") is not None]

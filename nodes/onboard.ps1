@@ -317,6 +317,71 @@ DEFAULT_TOKEN_CAPS = {
     "test": {"turns": 20},
 }
 STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"
+_REFUSED_RE = re.compile(r"permission|denied|not allowed|requires approval|refus|haven't granted", re.I)
+
+
+class LoopDetector:
+    """Part G 5: a session that hits the same refused tool twice, or repeats the same step (same call or text, same
+    result) `turns` times in a row (default 3, FLEET_LOOP_TURNS), is looping. Fed from the job's stream-json events;
+    `found` becomes a cap dict `{"reason": "loop", ...}` once, and stays."""
+
+    def __init__(self, turns=None):
+        try:
+            self.turns = int(turns or os.environ.get("FLEET_LOOP_TURNS") or 3)
+        except ValueError:
+            self.turns = 3
+        self.turns = max(2, self.turns)
+        self.calls, self.refused, self.steps, self.found, self.cur = {}, {}, [], None, None
+
+    def _hit(self, kind, detail):
+        if self.found is None:
+            self.found = {"reason": "loop", "kind": kind, "detail": detail[:200]}
+
+    def _step(self, sig):
+        self.steps.append(sig)
+        del self.steps[:-self.turns]
+        if len(self.steps) == self.turns and len(set(self.steps)) == 1:
+            self._hit("no_progress", "%d identical steps in a row" % self.turns)
+
+    def _close(self):
+        """One whole turn (its text, each call and each call's result) is one step."""
+        cur, self.cur = self.cur, None
+        if cur:
+            self._step((tuple(cur["texts"]), tuple((self.calls[i][1], cur["results"].get(i)) for i in cur["calls"])))
+
+    def assistant(self, message):
+        mid = message.get("id")
+        if self.cur is None or mid is None or self.cur["mid"] != mid:
+            self._close()
+            self.cur = {"mid": mid, "texts": [], "calls": [], "results": {}}
+        content = message.get("content") if isinstance(message.get("content"), list) else []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                key = json.dumps([block.get("name"), block.get("input")], sort_keys=True, default=str)
+                self.calls[block["id"]] = (block.get("name") or "tool", key)
+                self.cur["calls"].append(block["id"])
+            elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                self.cur["texts"].append(block["text"].strip())
+
+    def tool_result(self, block):
+        name, key = self.calls.get(block.get("tool_use_id"), (None, None))
+        if name is None:
+            return
+        body = block.get("content")
+        text = body if isinstance(body, str) else json.dumps(body, default=str)
+        if block.get("is_error") and _REFUSED_RE.search(text or ""):
+            self.refused[key] = self.refused.get(key, 0) + 1
+            if self.refused[key] >= 2:
+                self._hit("refused_tool", "%s refused twice" % name)
+        cur = self.cur
+        if cur and block.get("tool_use_id") in cur["calls"]:
+            cur["results"][block["tool_use_id"]] = text
+            if all(i in cur["results"] for i in cur["calls"]):
+                self._close()
+
+
 CAP_STOP_SECONDS = 300  # the one resumed run that commits and writes the handoff
 
 
@@ -1922,10 +1987,11 @@ class JobManager:
         """Settle a job as `capped` (Part H 3.2): not a failure. The handoff summary (the model's last text) is saved
         to handoff.md in the job dir and becomes the job result. The worktree is left as it is, so uncommitted work
         stays for the next session."""
-        summary = self._last_assistant_text(job)
+        loop = cap.get("reason") == "loop"
+        summary = self._last_assistant_text(job, prefer_verdict=loop)
         if summary:
             words = summary.split()
-            if len(words) > 300:
+            if len(words) > 300 and not loop:  # a loop cut keeps the full text (it may hold a review verdict)
                 summary = " ".join(words[:300])
             try:
                 (self._job_dir(job) / "handoff.md").write_text(summary + "\n", encoding="utf-8")
@@ -1936,14 +2002,16 @@ class JobManager:
         if job.get("gate"):
             job["gate"]["state"] = "skipped"
 
-    def _last_assistant_text(self, job):
-        """The text of the last assistant message with text in this run's stream; "" when there is none."""
+    def _last_assistant_text(self, job, prefer_verdict=False):
+        """The text of the last assistant message with text in this run's stream; "" when there is none. With
+        `prefer_verdict` (a loop cut), the last text that parses as a review verdict wins over a later one."""
         try:
             data = (self._job_dir(job) / "events.jsonl").read_bytes()
         except OSError:
             return ""
         offset = job.get("events_offset") or 0
         found = ""
+        verdict = ""
         for line in data[offset if isinstance(offset, int) and 0 <= offset <= len(data) else 0:].decode(
                 "utf-8", "replace").split("\n"):
             if '"assistant"' not in line:
@@ -1958,7 +2026,14 @@ class JobManager:
                 if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) \
                         and block["text"].strip():
                     found = block["text"].strip()
-        return found
+                    if prefer_verdict and '"verdict"' in found:
+                        try:
+                            parsed = json.loads(found)
+                        except ValueError:
+                            parsed = None
+                        if isinstance(parsed, dict) and "verdict" in parsed:
+                            verdict = found
+        return verdict or found
 
     def _watch_stream(self, job, st):
         """Read the new lines of events.jsonl as the job writes them (Part H 3.2; Part G review MED). Counts assistant
@@ -1994,6 +2069,8 @@ class JobManager:
                     st["dirty"] = True
             elif kind == "assistant":
                 message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                if job.get("agent") == "claude":
+                    st.setdefault("loop", LoopDetector()).assistant(message)
                 mid = message.get("id")
                 if isinstance(mid, str) and mid not in st["ids"]:
                     st["ids"].add(mid)
@@ -2016,8 +2093,16 @@ class JobManager:
                 for block in message.get("content") if isinstance(message.get("content"), list) else []:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         st["pending"].discard(block.get("tool_use_id"))
+                        if job.get("agent") == "claude":
+                            st.setdefault("loop", LoopDetector()).tool_result(block)
+                if st["cap"] is None and st.get("loop") and st["loop"].found:
+                    st["cap"] = st["loop"].found
                 if st["cap"] is not None and not st["pending"]:
                     return st["cap"]  # every tool call of the turn that hit the cap has its result
+            if st["cap"] is None and st.get("loop") and st["loop"].found:
+                st["cap"] = st["loop"].found
+        if st["cap"] is not None and st["cap"].get("reason") == "loop" and not st["pending"]:
+            return st["cap"]  # a text-only loop has no tool result to wait for
         return None
 
     def _cap_stop(self, job, cap):
@@ -2045,7 +2130,7 @@ class JobManager:
             self._parse_events_safe(job)
         stop = "terminated"
         try:
-            if self._stop_run(job):
+            if cap.get("reason") != "loop" and self._stop_run(job):  # a loop is cut off: no resume
                 stop = "resumed"
         except Exception as exc:
             self.audit("cap_resume_failed", "%s: %s" % (job.get("id"), error_line(exc)))

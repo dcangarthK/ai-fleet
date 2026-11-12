@@ -242,6 +242,8 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         return p, []
     if kind == "build_limited":
         return _build_limited(p, event)
+    if kind == "build_stalled":
+        return _build_stalled(p, event)
     if kind == "review_limited" and p.get("state") == "reviewing":
         return _review_limited(p, event)
     if kind == "review_resume" and p.get("state") == "review_waiting":
@@ -293,6 +295,36 @@ def _build_limited(p: dict, event: dict) -> tuple[dict, list[dict]]:
         p["state"] = "escalated"
         _history(p, "escalated", note="build stopped at a usage limit and was left for the owner"
                  + (f": {event['reason']}" if event.get("reason") else ""))
+    return p, []
+
+
+def _build_stalled(p: dict, event: dict) -> tuple[dict, list[dict]]:
+    """The build stalled or was interrupted (docs/SPEC-stall-reroute.md 12.13). Not a gate-failure round: it uses
+    none of the fix rounds. A reroute is followed; waiting for a free slot keeps building; escalated or left for
+    the owner, the pipeline escalates."""
+    if p.get("state") != "building":
+        return p, []
+    action = event.get("action")
+    budget = p.setdefault("budget", {})
+    reason = event.get("reason") or "stalled"
+    if action == "handoff" and event.get("task_id"):
+        if p.get("build_task") == event["task_id"]:
+            return p, []
+        old = p.get("build_task")
+        p["build_task"] = event["task_id"]
+        budget.pop("waiting_build", None)
+        _history(p, "building", note=f"build {old} stalled; rerouted to {event['task_id']}",
+                 handoff_from=old, handoff_to=event["task_id"])
+        return p, []
+    if action == "wait":
+        if budget.get("waiting_build") == p.get("build_task"):
+            return p, []
+        budget["waiting_build"] = p.get("build_task")
+        _history(p, "building", note=f"build stalled; waiting for a free slot ({reason})")
+        return p, []
+    if action in ("escalated", "left"):
+        p["state"] = "escalated"
+        _history(p, "escalated", note=f"build stalled and was left for the owner: {reason}")
     return p, []
 
 

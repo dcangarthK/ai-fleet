@@ -1876,10 +1876,21 @@ async def poll_pipeline(pipeline_id: str) -> None:
             build = tasks.get_task(p["build_task"])
             moved = build.get("resolution") or {}
             if moved.get("kind") == "handed_off" and moved.get("task_id"):
-                await _pipeline_step_unlocked(p, {"type": "build_limited", "action": "handoff",
-                                                  "task_id": moved["task_id"]})
+                stalled = moved.get("reason") in handoff.STALL_REASONS
+                await _pipeline_step_unlocked(p, {"type": "build_stalled" if stalled else "build_limited",
+                                                  "action": "handoff", "task_id": moved["task_id"]})
                 return
             if moved.get("kind") == "handing_off":
+                return
+            if handoff.stall_failure(build):
+                # Part E 12.13: under the pipeline lock (pipeline -> work item -> task). Not a fix round.
+                result = await handoff.handle_handoff(
+                    build["id"], "interrupted" if build["state"] == "interrupted" else "stalled")
+                if result["action"] in ("handoff", "wait", "left", "escalated"):
+                    await _pipeline_step_unlocked(p, {"type": "build_stalled", **result})
+                elif not tasks.get_task(build["id"]).get("resolution"):
+                    # Nothing can hand it on (an older runner): as before Part E, the build round ends here.
+                    await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"]})
                 return
             if handoff.limit_failure(build):
                 # Under the pipeline lock, through the ordered path: pipeline -> work item -> task.

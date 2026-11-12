@@ -88,8 +88,36 @@ def _item(task_id: str) -> list[dict]:
 
 
 def handoffs_in_chain(task_id: str) -> int:
-    """Handoffs made in this work item so far. A handoff attempt that failed to sign in doesn't count."""
-    return sum(1 for t in _item(task_id) if _extra(t).get("source_job") and not auth_failure(t))
+    """Limit handoffs made in this work item so far. A handoff attempt that failed to sign in doesn't count, nor
+    does a stall reroute (counted apart, docs/SPEC-stall-reroute.md 12.10)."""
+    return sum(1 for t in _item(task_id)
+               if _extra(t).get("source_job") and not _extra(t).get("stall_reason") and not auth_failure(t))
+
+
+def stall_handoffs_in_chain(task_id: str) -> int:
+    """Stall reroutes made in this work item so far (12.10)."""
+    return sum(1 for t in _item(task_id) if _extra(t).get("stall_reason"))
+
+
+def stall_failure(task: dict) -> bool:
+    """A run that a stall reroute may hand on (12.3): interrupted (its process was lost), or failed(stalled)."""
+    return task.get("state") == "interrupted" or (task.get("state") == "failed"
+                                                  and task.get("failure_reason") == "stalled")
+
+
+def stall_record(task: dict) -> dict:
+    value = task.get("stall")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def save_stall(task_id: str, record: dict) -> None:
+    with db() as c:
+        c.execute("UPDATE tasks SET stall=? WHERE id=?", (json.dumps(record), task_id))
 
 
 def resolved_model(task: dict) -> tuple[str, str | None]:
@@ -138,9 +166,57 @@ def _offline(node: dict) -> bool:
     return node.get("status") != "approved" or tasks.runner_offline(node) is not None  # one rule (live monitor 12.2)
 
 
+def known_models(rules: dict) -> dict[tuple[str, str], str | None]:
+    """Concrete paid (agent, model) names the controller has evidence for, newest first, each with its rules key:
+    what runs reported or tasks named, then the rules' own concrete fallback targets. Nothing is guessed."""
+    with db() as c:
+        found = [(r[0], r[1], r[2] or 0) for r in c.execute(
+            "SELECT agent, model, ts FROM agent_usage WHERE model IS NOT NULL AND agent IN ('claude','codex') "
+            "ORDER BY ts DESC LIMIT 300")]
+        found += [(r[0], r[1], r[2] or 0) for r in c.execute(
+            "SELECT agent, model, created_at FROM tasks WHERE model IS NOT NULL AND agent IN ('claude','codex') "
+            "ORDER BY created_at DESC LIMIT 300")]
+    found.sort(key=lambda item: -item[2])
+    pairs = [(agent, model) for agent, model, _ts in found]
+    for targets in ((rules.get("limits") or {}).get("fallbacks") or {}).values():
+        for target in targets or []:
+            agent, _, model = str(target).partition(":")
+            pairs.append((agent, model))
+    out: dict[tuple[str, str], str | None] = {}
+    for agent, model in pairs:
+        if (agent, model) not in out and isinstance(model, str) and budget.CONCRETE_MODEL_RE.fullmatch(model):
+            out[(agent, model)] = budget.match_key(rules, agent, model)
+    return out
+
+
+def concrete_model(rules: dict, agent: str, key: str, node_id: str, profile: str, known: dict,
+                   defaults: dict | None = None) -> str | None:
+    """The concrete model a slot's rules key would run: the key itself when it names one, else the node's reported
+    default (fleet profile only), else the newest known model under that key. None when there's no evidence."""
+    _agent, sep, glob = key.partition(":")
+    if sep and glob and not any(ch in glob for ch in "*?"):
+        return glob
+    if profile == "fleet":
+        cache = defaults if defaults is not None else {}
+        if (agent, node_id) not in cache:
+            cache[(agent, node_id)] = budget.node_default_model(agent, node_id)
+        default = cache[(agent, node_id)]
+        if default and budget.match_key(rules, agent, default) == key:
+            return default
+    return next((model for (k_agent, model), k_key in known.items() if k_agent == agent and k_key == key), None)
+
+
+def allowed_kinds(agent: str, key: str, entry: dict) -> list[str]:
+    """The task kinds a paid slot may take: the rules' kinds, never `check` (paid models never run checks) and
+    never build, fix or test on Fable (rule 0, hard-coded)."""
+    return [k for k in budget.KINDS if k != "check" and budget.kind_allowed(entry, k)
+            and not budget.rule0_blocks(agent, key, k)]
+
+
 def resources(nodes: list[dict] | None = None, now: float | None = None) -> list[dict]:
     """One row per slot (node, agent, profile, model rule): free, busy n/max, limited until T, at budget, offline or
-    not signed in. Labels only, never directories."""
+    not signed in, with its tier, the kinds it may take, whether it is idle and the concrete model it would run
+    (Part E 12.14). Labels only, never directories. No probes: state the controller already holds."""
     now = time.time() if now is None else now
     rules = budget.current_rules()
     nodes = tasks.node_rows() if nodes is None else nodes
@@ -148,6 +224,8 @@ def resources(nodes: list[dict] | None = None, now: float | None = None) -> list
     snaps: dict = {}
     tokens = {key: budget.today_tokens(rules, key, now) for key in rules["models"]
               if key.split(":", 1)[0] in budget.PAID_AGENTS}
+    known = known_models(rules)
+    defaults: dict = {}
     rows = []
     for node in nodes:
         runner = node.get("runner") or {}
@@ -181,7 +259,11 @@ def resources(nodes: list[dict] | None = None, now: float | None = None) -> list
                                  # flagged after a sign-in failure: the owner clears it once signed in again
                                  "signed_out": bool(slot["signed_out"]),
                                  "running": running, "max": maximum, "until": until,
-                                 "kinds": list(entry.get("kinds") or ["*"]), "today_tokens": tokens.get(key, 0)})
+                                 "kinds": list(entry.get("kinds") or ["*"]), "today_tokens": tokens.get(key, 0),
+                                 "account": account, "tier": entry.get("tier"),
+                                 "allowed_kinds": allowed_kinds(agent, key, entry), "idle": state == "free",
+                                 "concrete_model": concrete_model(rules, agent, key, node["id"], slot["profile"],
+                                                                  known, defaults)})
     return rows
 
 
@@ -235,6 +317,89 @@ def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[d
     return out
 
 
+# The cheapest tier a kind starts at (the budget table: builds and fix rounds on Sonnet, final and security reviews
+# on a premium model). Cheaper tiers still qualify, after every tier at or above the floor.
+TIER_FLOOR = {"build": "standard", "fix": "standard", "test": "standard", "review": "standard",
+              "re_review": "standard", "final_review": "premium", "security_review": "premium"}
+TIER_ORDER = ("local",) + budget.TIERS
+
+
+def tier_rank(kind: str, tier: str | None) -> tuple[int, int]:
+    index = TIER_ORDER.index(tier) if tier in TIER_ORDER else len(TIER_ORDER)
+    floor = TIER_FLOOR.get(kind)
+    below = floor is not None and tier in budget.TIERS and budget.TIERS.index(tier) < budget.TIERS.index(floor)
+    return (1 if below else 0, index)
+
+
+def slot_identity(task: dict) -> tuple[str, str | None, str | None]:
+    """(agent, resolved model, account) a task ran on: the slot a stall reroute must not pick again."""
+    agent, model = resolved_model(task)
+    return agent, model, budget.task_account(task) if agent in budget.PAID_AGENTS else None
+
+
+def _ollama_slots(task: dict, nodes: list[dict], excluded: set) -> list[dict]:
+    """Other local models on the task's own node: a stalled Ollama task stays on free local models."""
+    node = next((n for n in nodes if n["id"] == task.get("node_id")), None)
+    if not node or _offline(node) or not ((node.get("runner") or {}).get("agents") or {}).get("ollama"):
+        return []
+    return [{"node": node["id"], "agent": "ollama", "profile": None, "label": None, "account": None, "model": model,
+             "key": None, "tier": "local", "state": "free", "running": 0, "max": None}
+            for model in node.get("models") or [] if isinstance(model, str)
+            and ("ollama", model, None) not in excluded and model != task.get("model")]
+
+
+def rank_slots(kind: str, exclude=(), task: dict | None = None, *, now: float | None = None,
+               nodes: list[dict] | None = None) -> list[dict]:
+    """Every slot that may take work of `kind` now, best first (docs/SPEC-stall-reroute.md 12.1). The one ranking
+    for stall reroutes and agent="auto"; the chosen slot then passes the same admission as any task.
+
+    Filters: the rules' kinds plus rule 0 (hard-coded), free concurrency, not limited, at budget, offline or signed
+    out, a concrete model on record, not an `exclude`d (agent, model, account), and for review and test kinds no
+    model that built the work item (`task["id"]`). With `task["node_id"]` only that node (the checkpoint branch
+    lives there). Order: tier (cheapest at or above the kind's floor first), then idle before busy, then a named
+    model rule before a catch-all. Cross-vendor is allowed; limits.fallbacks is not used."""
+    now = time.time() if now is None else now
+    rules = budget.current_rules()
+    nodes = tasks.node_rows() if nodes is None else nodes
+    task = task or {}
+    excluded = set(exclude)
+    excluded_keys = {(agent, budget.match_key(rules, agent, model) if agent in budget.PAID_AGENTS else model, account)
+                     for agent, model, account in excluded}
+    if task.get("agent") == "ollama":
+        return _ollama_slots(task, nodes, excluded)
+    if kind == "check":
+        return []  # checks never run on paid models
+    builders: list = []
+    if task.get("id") and kind in tasks.INDEPENDENT_KINDS:
+        builders = build_attempts(task["id"])
+    builder_keys = {budget.match_key(rules, agent, model) for agent, model in builders if model}
+    same_node = task.get("node_id")
+    ranked = []
+    for index, row in enumerate(resources(nodes=nodes, now=now)):
+        if same_node and row["node"] != same_node:
+            continue
+        if row["state"] not in ("free", "busy"):
+            continue
+        if row["max"] is not None and row["running"] >= row["max"]:
+            continue
+        model = row.get("concrete_model")
+        if not model or kind not in row["allowed_kinds"]:
+            continue
+        if budget.rule0_blocks(row["agent"], model, kind) or budget.rule0_blocks(row["agent"], row["model"], kind):
+            continue
+        if (row["agent"], model, row["account"]) in excluded or (row["agent"], row["model"], row["account"]) in excluded_keys:
+            continue
+        if (row["agent"], model) in builders or row["model"] in builder_keys:
+            continue
+        slot = {"node": row["node"], "agent": row["agent"], "profile": row["profile"], "label": row["label"],
+                "account": row["account"], "model": model, "key": row["model"], "tier": row["tier"],
+                "state": row["state"], "running": row["running"], "max": row["max"]}
+        ranked.append(((tier_rank(kind, row["tier"]), row["state"] != "free", row["model"].endswith(":*"), index),
+                       slot))
+    ranked.sort(key=lambda item: item[0])
+    return [slot for _order, slot in ranked]
+
+
 def same_slot(task: dict) -> dict:
     return {"node": task["node_id"], "agent": task["agent"], "profile": task.get("profile") or "fleet",
             "label": task.get("account_label"), "account": budget.task_account(task), "model": task.get("model"),
@@ -243,12 +408,18 @@ def same_slot(task: dict) -> dict:
 
 # ---------- the handoff prompt ----------
 
-def handoff_prompt(brief: str, previous: str, stat: str, report: str | None) -> str:
+def handoff_prompt(brief: str, previous: str, stat: str, report: str | None, reason: str | None = None,
+                   checkpointed: bool = True) -> str:
     """Original brief verbatim, what happened, the checkpoint's stat, the previous report as redacted untrusted
-    data, and what to do. No log tail (4.3 step 5)."""
-    parts = [brief.rstrip(), "",
-             f"A previous agent ({previous}) stopped at a usage limit. Its work is committed on this branch as the "
-             "latest checkpoint commit.", "", "Checkpoint (git show --stat):", (stat or "(no file changes)").rstrip()]
+    data, and what to do. No log tail (4.3 step 5). `reason` (a stall reroute, Part E 12.7) replaces "stopped at a
+    usage limit"; without a worktree there is no checkpoint to describe."""
+    why = f"stopped: {reason}" if reason else "stopped at a usage limit"
+    if checkpointed:
+        parts = [brief.rstrip(), "",
+                 f"A previous agent ({previous}) {why}. Its work is committed on this branch as the "
+                 "latest checkpoint commit.", "", "Checkpoint (git show --stat):", (stat or "(no file changes)").rstrip()]
+    else:
+        parts = [brief.rstrip(), "", f"A previous agent ({previous}) {why}. It had no worktree of its own to save."]
     if report and report.strip():
         clean = redaction.redact(report, strict=True)
         clean = re.sub(r"(?i)</?\s*previous_agent_report\s*>", "[tag removed]", clean)
@@ -424,14 +595,121 @@ async def _run_one(task_id: str, now: float) -> None:
 # ---------- the handoff sequence ----------
 
 async def after_settled(task_id: str) -> None:
-    """Called by the task poll (outside the task lock) when a task just failed."""
+    """Called by the task poll (outside the task lock) when a task just failed or was interrupted."""
     task = tasks.get_task(task_id)
     if auth_failure(task):
         flag_signed_out(task)
         return
+    if stall_failure(task):
+        if not pipeline_owned(task_id):  # a pipeline's own poll hands its build on (Part E 12.13)
+            await handle_handoff(task_id, "interrupted" if task["state"] == "interrupted" else "stalled")
+        return
     if not limit_failure(task) or pipeline_owned(task_id):
         return
     await handle_limit(task_id)
+
+
+# ---------- stall reroutes (docs/SPEC-stall-reroute.md 5.3, 12.7, 12.9, 12.10) ----------
+
+STALL_REASONS = ("stalled", "interrupted")
+NO_SLOT = "stalled; no free slot"
+
+
+def stall_text(task: dict, reason: str, record: dict, now: float) -> str:
+    """The reason for the checkpoint, the prompt and the new attempt: never "usage limit"."""
+    if reason == "interrupted" and not record.get("kind"):
+        return "the previous attempt was interrupted (its process was lost)"
+    start = task.get("started_at") or task.get("created_at") or now
+    minutes = max(0, int(((task.get("ended_at") or now) - start) // 60))
+    return f"the previous attempt stalled ({record.get('kind') or reason}) after {minutes} min"
+
+
+def escalate(task: dict, reason: str, now: float | None = None) -> dict:
+    """Not a new state (12.10): failed + stall.escalated + one task.escalated event (a red alert on Live). The
+    worktree is left untouched; nothing else runs for this task until the owner or orchestrator acts."""
+    now = time.time() if now is None else now
+    record = stall_record(tasks.get_task(task["id"]))
+    if record.get("escalated"):
+        return {"action": "escalated", "reason": record.get("escalated_reason"), "existing": True}
+    record.update(escalated=True, escalated_reason=reason[:300], escalated_at=now)
+    record.pop("waiting", None)
+    record.setdefault("kind", "interrupted" if task.get("state") == "interrupted" else "stalled")
+    save_stall(task["id"], record)
+    emit(task["id"], "task.escalated", {"title": task.get("title"), "node": task.get("node_id"), "reason": reason[:300]})
+    return {"action": "escalated", "reason": reason}
+
+
+def wait_for_slot(task: dict, reason: str, now: float | None = None) -> dict:
+    """The stall branch's own wait state (12.7), retried by every sweep pass (live.sweep_once)."""
+    record = stall_record(tasks.get_task(task["id"]))
+    if record.get("waiting") != reason:
+        record["waiting"] = reason[:300]
+        record.setdefault("kind", "interrupted" if task.get("state") == "interrupted" else "stalled")
+        record["waiting_since"] = time.time() if now is None else now
+        save_stall(task["id"], record)
+        emit(task["id"], "task.stall_waiting", {"title": task.get("title"), "reason": reason[:300]})
+    return {"action": "wait", "reason": reason}
+
+
+async def handle_handoff(task_id: str, reason: str = "limit", *, now: float | None = None) -> dict:
+    """Hand a task's work on. "limit" is Part C's path (handle_limit); "stalled" and "interrupted" are the stall
+    branch, which never schedules a wait for a reset and never speaks of a usage limit. Returns {"action":
+    "handoff", "task_id"} | {"action": "wait"|"left"|"escalated"|"none", "reason"}."""
+    if reason not in STALL_REASONS:
+        return await handle_limit(task_id, now=now)
+    now = time.time() if now is None else now
+    with db() as c:
+        root = task_root(c, task_id)
+    async with _item_locks[root]:
+        task = tasks.get_task(task_id)
+        if task.get("resolution"):
+            return {"action": "none", "reason": "already resolved"}
+        if not stall_failure(task):
+            return {"action": "none", "reason": f"task is {task['state']}"}
+        record = stall_record(task)
+        if record.get("escalated"):
+            return {"action": "escalated", "reason": record.get("escalated_reason"), "existing": True}
+        if record.get("left"):
+            return {"action": "left", "reason": record["left"], "existing": True}
+        rules = budget.current_rules()
+        if budget.on_task_stall(rules, task.get("kind")) != "reroute":
+            why = f"{task.get('kind') or 'this kind'} is left for you when it stalls"
+            record.update(left=why, kind=record.get("kind") or reason)
+            save_stall(task_id, record)
+            emit(task_id, "task.stall_left", {"title": task.get("title"), "reason": why})
+            return {"action": "left", "reason": why}
+        cap = int((rules.get("limits") or {}).get("max_stall_handoffs", 2))
+        if stall_handoffs_in_chain(task_id) >= cap:
+            return escalate(task, f"no stall reroutes left for this work item ({cap} used)", now)
+        try:
+            node = tasks.node_of(task)
+        except HTTPException as exc:
+            return escalate(task, str(exc.detail), now)
+        if not tasks.profile_support(node):
+            if reason == "interrupted" and not record:
+                return {"action": "none", "reason": "this node's runner can't hand off"}  # as before Part E
+            return escalate(task, "this node's runner can't checkpoint or hand off", now)
+        choices = rank_slots(task.get("kind") or "draft", [slot_identity(task)], task, now=now)
+        if not choices:
+            return wait_for_slot(task, NO_SLOT, now)
+        stall = {"reason": reason, "kind": record.get("kind"), "text": stall_text(task, reason, record, now)}
+        result = await _handoff(task, choices[0], rules, now, stall)
+        if result.get("moved_on"):
+            return result
+        if result["action"] != "handoff":
+            why = result.get("reason") or "handoff refused"
+            if why.startswith("checkpoint failed") or why == "no worktree to checkpoint":
+                return escalate(task, why, now)  # 12.9: never reroute without the saved work
+            return wait_for_slot(task, f"stalled; {why}", now)
+        record = stall_record(tasks.get_task(task_id))
+        record.pop("waiting", None)
+        record.update(rerouted_to=result["task_id"], kind=record.get("kind") or reason)
+        save_stall(task_id, record)
+        slot = choices[0]
+        emit(task_id, "task.rerouted", {"title": task.get("title"), "to": result["task_id"], "agent": slot["agent"],
+                                        "model": slot.get("model"), "label": slot.get("label") or slot.get("profile"),
+                                        "node": slot["node"], "reason": reason})
+        return result
 
 
 def flag_signed_out(task: dict) -> None:
@@ -496,23 +774,30 @@ async def handle_limit(task_id: str, *, now: float | None = None, slot: dict | N
         return result
 
 
-async def _handoff(task: dict, slot: dict, rules: dict, now: float) -> dict:
+def needs_checkpoint(task: dict) -> bool:
+    """A task with its own worktree has work to save; a read-only review of another task's worktree has none."""
+    return bool(task.get("worktree")) and bool(task.get("repo")) and not task.get("review_of")
+
+
+async def _handoff(task: dict, slot: dict, rules: dict, now: float, stall: dict | None = None) -> dict:
     """Claim, checkpoint, admit, create (4.3). The caller holds the work-item lock; this takes the task lock from
     the claim to the insert (lock order: work item, then task), so a resume in flight (which holds the task lock)
-    finishes first and can never erase the claim. Any failure undoes the claim."""
+    finishes first and can never erase the claim. Any failure undoes the claim. `stall` ({"reason", "text"}) makes
+    it a stall reroute (Part E 12.7): the reason goes in the checkpoint label, the prompt and the new attempt."""
     async with tasks._locks[task["id"]]:
         current = tasks.get_task(task["id"])
         if current["state"] not in ("failed", "interrupted") or current.get("resolution"):
             return {"action": "none", "moved_on": True, "reason": f"task is {current['state']}"
                     + (" and resolved" if current.get("resolution") else "")}
-        done = await _claim_to_insert(current, slot, rules, now)
+        done = await _claim_to_insert(current, slot, rules, now, stall)
     if done.get("action") == "none":
         return done
     new_id, checkpoint = done["task_id"], done["checkpoint"]
     new = tasks.get_task(new_id)
     emit(task["id"], "handoff.done", {"title": task["title"], "to": new_id, "model": slot.get("model"),
                                       "label": slot.get("label") or slot.get("profile"),
-                                      "excluded": checkpoint.get("excluded") or []})
+                                      "excluded": checkpoint.get("excluded") or [],
+                                      **({"reason": stall["reason"]} if stall else {})})
     emit(new_id, f"task.{new['state']}", {"title": new["title"], "node": new["node_id"], "agent": new["agent"],
                                           "mode": new["mode"]})
     if new["state"] == "queued":
@@ -521,22 +806,27 @@ async def _handoff(task: dict, slot: dict, rules: dict, now: float) -> dict:
     return {"action": "handoff", "task_id": new_id}
 
 
-async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float) -> dict:
+async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float, stall: dict | None = None) -> dict:
     """The claimed part of a handoff, under the task lock: {"action": "none", "reason"} or {"task_id", "checkpoint"}."""
     blob = claim(task["id"])
     if blob is None:
         return {"action": "none", "reason": "already claimed"}
     try:
         node = tasks.node_of(task)
-        if not task.get("worktree") or not task.get("repo"):
+        checkpointed = not stall or needs_checkpoint(task)
+        if checkpointed and (not task.get("worktree") or not task.get("repo")):
             unclaim(task["id"], blob)
             return {"action": "none", "reason": "no worktree to checkpoint"}
         previous = budget.identity(task["agent"], task.get("model"))
-        try:
-            checkpoint = await tasks.runner_call(node, "POST", f"/jobs/{task['id']}/checkpoint", {"label": previous})
-        except HTTPException as exc:
-            unclaim(task["id"], blob)
-            return {"action": "none", "reason": f"checkpoint failed: {exc.detail}"}
+        checkpoint: dict = {}
+        if checkpointed:
+            # The runner keeps letters, digits, '.', '_', ':', '/', ' ' and '-' of the label for its commit message.
+            label = f"{previous} {stall['reason']} {stall.get('kind') or ''}".strip() if stall else previous
+            try:
+                checkpoint = await tasks.runner_call(node, "POST", f"/jobs/{task['id']}/checkpoint", {"label": label})
+            except HTTPException as exc:
+                unclaim(task["id"], blob)
+                return {"action": "none", "reason": f"checkpoint failed: {exc.detail}"}
         # Admission: the same function as a new task, on the chosen slot only (no reroute, no override).
         failures = tasks.gate_failures(task["id"]) if task.get("kind") in (rules.get("effort_ladder") or {}) else 0
         try:
@@ -556,15 +846,16 @@ async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float) -> d
             return {"action": "none", "reason": held["reason"]}
         brief_id, brief = _brief(task)
         report = task.get("result")
-        prompt = handoff_prompt(brief, previous, checkpoint.get("stat") or "", report)
+        reason_text = stall["text"] if stall else None
+        prompt = handoff_prompt(brief, previous, checkpoint.get("stat") or "", report, reason_text, checkpointed)
         hard = int(rules["prompt"]["hard_max_kb"] * 1024)
         prompt = budget.strip_prompt(prompt, rules["prompt"])["text"]
         if len(prompt.encode()) > hard:
-            prompt = handoff_prompt(brief, previous, checkpoint.get("stat") or "", None)
+            prompt = handoff_prompt(brief, previous, checkpoint.get("stat") or "", None, reason_text, checkpointed)
         if len(prompt.encode()) > hard:
             unclaim(task["id"], blob)
             return {"action": "none", "reason": "the handoff prompt is over the hard size limit"}
-        new_id = _insert(task, slot, decision, prompt, brief_id, checkpoint, blob, now)
+        new_id = _insert(task, slot, decision, prompt, brief_id, checkpoint, blob, now, stall)
     except Exception:
         unclaim(task["id"], blob)
         raise
@@ -572,10 +863,23 @@ async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float) -> d
 
 
 def _insert(task: dict, slot: dict, decision: dict, prompt: str, brief_id: str, checkpoint: dict, blob: str,
-            now: float) -> str:
-    """Insert the handoff task and finalise the claim in one transaction."""
+            now: float, stall: dict | None = None) -> str:
+    """Insert the handoff task and finalise the claim in one transaction. A stall reroute keeps the source's
+    worktree setting and `review_of` (a review is rerouted, never duplicated) and records its reason."""
     with db() as c:
         raw = dict(c.execute("SELECT * FROM tasks WHERE id=?", (task["id"],)).fetchone())
+    extra = {"base_branch": f"fleet/{task['id']}", "source_job": task["id"], "brief_task": brief_id,
+             "checkpoint": checkpoint.get("sha")}
+    worktree, review_of = 1, None
+    if stall:
+        source_extra = _extra(task)
+        extra = {"source_job": task["id"], "brief_task": brief_id, "stall_reason": stall["reason"]}
+        if checkpoint.get("sha") or needs_checkpoint(task):
+            extra.update(base_branch=f"fleet/{task['id']}", checkpoint=checkpoint.get("sha"))
+        for name in ("tools", "max_turns"):  # a review's own limits carry over
+            if name in source_extra:
+                extra[name] = source_extra[name]
+        worktree, review_of = int(bool(task.get("worktree"))), task.get("review_of")
     policy = task.get("policy") or {}
     auto = policy.get("auto_approve") or {}
     pre_approved = slot["agent"] in (auto.get("agents") or []) and bool(auto.get("full_mode"))
@@ -584,7 +888,7 @@ def _insert(task: dict, slot: dict, decision: dict, prompt: str, brief_id: str, 
     source_label = task.get("account_label") or task.get("profile") or "fleet"
     row = {
         "id": new_id, "parent_id": task["id"], "title": task["title"], "agent": slot["agent"],
-        "model": slot.get("model"), "prompt": prompt, "mode": task["mode"], "repo": task["repo"], "worktree": 1,
+        "model": slot.get("model"), "prompt": prompt, "mode": task["mode"], "repo": task["repo"], "worktree": worktree,
         "gate": task.get("gate"), "node_id": task["node_id"], "state": state, "created_at": now, "updated_at": now,
         "instructions": raw.get("instructions"), "policy": raw.get("policy"), "policy_hash": raw.get("policy_hash"),
         "role": raw.get("role"), "error": None, "skills": raw.get("skills"), "trusted_bypass": raw.get("trusted_bypass"),
@@ -592,16 +896,15 @@ def _insert(task: dict, slot: dict, decision: dict, prompt: str, brief_id: str, 
         "budget_override": None,
         "routed_from": f"{task.get('budget_identity') or budget.identity(task['agent'], task.get('model'))} ({source_label})",
         "budget_key": decision.get("key"), "budget_identity": decision.get("identity"),
-        "prompt_bytes": len(prompt.encode()), "prompt_stripped_bytes": 0, "review_of": None,
-        "launch_extra": json.dumps({"base_branch": f"fleet/{task['id']}", "source_job": task["id"],
-                                    "brief_task": brief_id, "checkpoint": checkpoint.get("sha")}),
+        "prompt_bytes": len(prompt.encode()), "prompt_stripped_bytes": 0, "review_of": review_of,
+        "launch_extra": json.dumps(extra),
         "budget_wait": None,
         "approved_tools": json.dumps(tasks.launch_tools(slot["agent"], policy, task["mode"])),
         "profile": slot.get("profile") or "fleet", "account_label": slot.get("label"), "account": slot["account"],
     }
     resolution = json.dumps({"kind": "handed_off", "task_id": new_id, "agent": slot["agent"],
                              "model": slot.get("model"), "label": slot.get("label") or slot.get("profile"),
-                             "at": now})
+                             "at": now, **({"reason": stall["reason"]} if stall else {})})
     with db() as c:
         c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
         if c.execute("UPDATE tasks SET resolution=? WHERE id=? AND resolution=?",

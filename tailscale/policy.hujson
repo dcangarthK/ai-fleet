@@ -9,6 +9,8 @@
     // Master reaches node model servers (Ollama 11434, vLLM 8000, LM Studio 1234, llama.cpp 8080)
     // the node inventory published by the onboard script (11435), and the agent runner (11436).
     {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11434", "tcp:11435", "tcp:11436", "tcp:8000", "tcp:1234", "tcp:8080"]},
+    // Workers push signed heartbeats to the master's HTTPS endpoint. Application auth still applies.
+    {"src": ["tag:llm-node"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
     // Your own devices (phone, laptop) reach the dashboard's token-protected port via `tailscale serve` on 8443.
     {"src": ["autogroup:member"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
     // Tailnet admins (you) can SSH to fleet machines for maintenance.
@@ -17,6 +19,6 @@
 
   "tests": [
     {"src": "tag:master", "accept": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:11436", "tag:llm-node:8000"], "deny": ["tag:llm-node:22"]},
-    {"src": "tag:llm-node", "deny": ["tag:master:4000", "tag:master:8700", "tag:master:8443", "tag:llm-node:11434", "tag:llm-node:11436"]},
+    {"src": "tag:llm-node", "accept": ["tag:master:8443"], "deny": ["tag:master:4000", "tag:master:8700", "tag:llm-node:11434", "tag:llm-node:11436"]},
   ],
 }

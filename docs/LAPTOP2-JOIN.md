@@ -21,7 +21,8 @@ action in the console. `<master>` below means this Mac's Tailscale name, e.g. `d
 
 ### M1. Tailnet policy (Tailscale admin console, once)
 1. Admin console > **Access controls**: paste `tailscale/policy.hujson` and save. It makes you the owner of
-   `tag:master` and `tag:llm-node` and allows only master → node traffic on the model, inventory and runner ports.
+   `tag:master` and `tag:llm-node`, allows the existing master → node model/inventory/runner traffic, and allows
+   workers to push signed heartbeats to master TCP 8443. Worker → worker remains denied.
 2. Admin console > **DNS**: MagicDNS on, and **HTTPS Certificates enabled** (`tailscale serve` needs them).
 
 Success: the policy saves without test failures (the file has its own `tests` block).
@@ -139,7 +140,36 @@ Expected `runner.json` on a 16 GB Mac: `max_jobs: 1`, `max_mode: "auto-edit"`, `
 `power.min_battery_pct: 30`, `models: {remote_management: false, max_loaded: 1, disk_reserve_gb: 8,
 ram_reserve_gb: 4}`, gate profiles `pytest` and `unittest`.
 
-### L4. 16 GB tuning (optional, yours to run)
+### L4. Docker Model Runner smoke check (optional, owner-run)
+
+After you install Docker Desktop and enable Docker Model Runner yourself, run the repository's read-only check:
+
+```bash
+cd ~/ai-fleet
+bash nodes/check_dmr.sh
+```
+
+It saves three fact files under a timestamped `dmr-fixtures/` directory: `docker model ls`,
+`GET http://127.0.0.1:12434/engines/v1/models`, and `lsof` output for TCP 12434. Any wildcard, LAN, or tailnet
+listener is a `FAIL`; do not continue with DMR until Docker Desktop exposes it on loopback only. The script does
+not change Docker, Tailscale, or firewall state.
+
+To enable the adapter after that check passes, add this node-local block to `~/.ai-fleet/runner.json` and restart
+the runner:
+
+```json
+"engines": {
+  "dmr": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:12434/engines/v1"
+  }
+}
+```
+
+Only `127.0.0.1`, `localhost`, or `::1` base URLs are accepted. DMR's model port is never added to Tailscale;
+catalog and inference go through the token-checked runner on TCP 11436.
+
+### L5. 16 GB tuning (optional, yours to run)
 - The Ollama service is set to one loaded model, one request at a time, 16k context and q8 KV cache.
 - More GPU memory for a 14B model with 16k context (resets on reboot):
   `sudo sysctl iogpu.wired_limit_mb=12288`

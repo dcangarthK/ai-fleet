@@ -149,7 +149,7 @@ class RunnerTests(unittest.TestCase):
             cls.runner_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(cls.runner_module)
 
-            def fake_agents(_url):
+            def fake_agents(_url, ollama_up=None):
                 return {
                     "claude": str(cls.bin / "claude"),
                     "codex": str(cls.bin / "codex"),

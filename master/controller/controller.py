@@ -260,6 +260,8 @@ def desired_deployments() -> dict[str, dict]:
     desired = {}
     for a in rows:
         n = nodes.get(a["node"])
+        if (a["engine"] or "ollama") != "ollama":
+            continue  # DMR is reached only through the token-checked runner, never a raw LiteLLM model port.
         # The master's own Ollama listens on 127.0.0.1, which LiteLLM's container can't reach; it can only
         # serve roles when FLEET_MASTER_MODEL_HOST names the host as seen from LiteLLM (host.docker.internal).
         if (not n or a["state"] != "active" or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST)
@@ -434,6 +436,8 @@ async def reconcile() -> dict:
 
 
 def _route_ineligible(assignment, node) -> str | None:
+    if (assignment["engine"] or "ollama") != "ollama":
+        return "runner-only engine"
     if not node or assignment["state"] != "active" or not healthy(node):
         return "node unhealthy"
     if node["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST:
@@ -902,7 +906,7 @@ def export_document() -> dict:
             "SELECT node,catalog_id,desired,params,override_fit,confirm_preexisting FROM node_models ORDER BY node,catalog_id")]
         roles = [dict(row) for row in c.execute("SELECT * FROM roles ORDER BY name")]
         assignments = [dict(row) for row in c.execute(
-            "SELECT role,node,model,state,catalog_id,params FROM assignments ORDER BY role,node,model")]
+            "SELECT role,node,model,engine,state,catalog_id,params FROM assignments ORDER BY role,node,model")]
         instructions = _version_rows("instructions")
         policies = _version_rows("policies")
         bindings = [dict(row) for row in c.execute("SELECT * FROM skill_bindings ORDER BY skill_id,scope,scope_id")]
@@ -986,11 +990,12 @@ def _apply_import(document: dict, actor: str) -> None:
                           (row["name"], row.get("fallback"), row.get("description")))
         for row in document.get("assignments", []):
             if isinstance(row, dict) and all(row.get(key) for key in ("role", "node", "model")):
-                c.execute("INSERT INTO assignments (role,node,model,state,catalog_id,params,routed,route_reason) "
-                          "VALUES (?,?,?,?,?,?,NULL,NULL) ON CONFLICT(role,node,model) DO UPDATE SET "
-                          "state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params,routed=NULL,route_reason=NULL",
-                          (row["role"], row["node"], row["model"], row.get("state", "active"),
-                           row.get("catalog_id"), json.dumps(row.get("params") or {})))
+                c.execute("INSERT INTO assignments (role,node,model,engine,state,catalog_id,params,routed,route_reason) "
+                          "VALUES (?,?,?,?,?,?,?,NULL,NULL) ON CONFLICT(role,node,model) DO UPDATE SET "
+                          "engine=excluded.engine,state=excluded.state,catalog_id=excluded.catalog_id,"
+                          "params=excluded.params,routed=NULL,route_reason=NULL",
+                          (row["role"], row["node"], row["model"], row.get("engine", "ollama"),
+                           row.get("state", "active"), row.get("catalog_id"), json.dumps(row.get("params") or {})))
         for row in document.get("desired_installs", []):
             if isinstance(row, dict) and row.get("node") and row.get("catalog_id"):
                 c.execute("INSERT INTO node_models (node,catalog_id,desired,state,params,override_fit,confirm_preexisting,updated_at) "
@@ -1114,6 +1119,7 @@ async def retention_loop() -> None:
 
 class CatalogModel(BaseModel):
     reference: str
+    engine: str = "ollama"
     display_name: str | None = None
     defaults: dict = Field(default_factory=dict)
     suggested_roles: list[str] = Field(default_factory=list)
@@ -2042,8 +2048,9 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
     return await advance_pipeline(pipeline_id, {"type": "cancel"})
 
 
-def model_id(reference: str) -> str:
-    return reference.replace("/", "-").replace(":", "-")
+def model_id(reference: str, engine: str = "ollama") -> str:
+    name = reference.replace("/", "-").replace(":", "-")
+    return name if engine == "ollama" else engine + "-" + name
 
 
 def validate_model_params(params: dict) -> dict:
@@ -2158,9 +2165,13 @@ def list_catalog() -> list[dict]:
 def add_catalog(spec: CatalogModel) -> dict:
     if not MODEL_REF_RE.fullmatch(spec.reference):
         raise HTTPException(400, "invalid model reference")
+    if spec.engine not in ("ollama", "dmr"):
+        raise HTTPException(400, "unknown engine")
     defaults = validate_model_params(spec.defaults)
-    size, digest = registry_manifest(spec.reference)
-    identifier = model_id(spec.reference)
+    if spec.engine == "dmr" and defaults:
+        raise HTTPException(400, "DMR model parameters are not managed by the fleet")
+    size, digest = registry_manifest(spec.reference) if spec.engine == "ollama" else (None, None)
+    identifier = model_id(spec.reference, spec.engine)
     with db() as c:
         existing = c.execute("SELECT evals,source,created_at FROM model_catalog WHERE id=?", (identifier,)).fetchone()
         evals = existing["evals"] if existing else "{}"
@@ -2169,8 +2180,8 @@ def add_catalog(spec: CatalogModel) -> dict:
         c.execute(
             "INSERT OR REPLACE INTO model_catalog "
             "(id,reference,engine,display_name,download_gb,digest,min_engine,defaults,suggested_roles,evals,source,created_at) "
-            "VALUES (?,?, 'ollama', ?,?,?,NULL,?,?,?,?,?)",
-            (identifier, spec.reference, spec.display_name or spec.reference, size, digest,
+            "VALUES (?,?, ?, ?,?,?,NULL,?,?,?,?,?)",
+            (identifier, spec.reference, spec.engine, spec.display_name or spec.reference, size, digest,
              json.dumps(defaults), json.dumps(spec.suggested_roles), evals, source, created),
         )
     return next(item for item in catalog_view() if item["id"] == identifier)
@@ -2240,7 +2251,7 @@ def fleet_state() -> dict:
                             "inventory": json.loads(r["inventory"]) if r["inventory"] else None}
                  for r in c.execute("SELECT * FROM nodes ORDER BY name")]
         roles = [dict(r) for r in c.execute(
-            "SELECT a.role, a.model, a.node AS node_id, n.name AS node, a.state, a.catalog_id, a.params, "
+            "SELECT a.role, a.model, a.engine, a.node AS node_id, n.name AS node, a.state, a.catalog_id, a.params, "
             "a.routed, a.route_reason "
             "FROM assignments a "
             "LEFT JOIN nodes n ON n.id = a.node ORDER BY a.role, n.name")]
@@ -2311,7 +2322,10 @@ async def assign(a: Assignment) -> dict:
         catalog = (c.execute("SELECT * FROM model_catalog WHERE id=?", (a.catalog_id,)).fetchone()
                    if a.catalog_id else c.execute("SELECT * FROM model_catalog WHERE reference=?", (a.model,)).fetchone())
         model = catalog["reference"] if catalog else a.model
+        engine = (catalog["engine"] or "ollama") if catalog else "ollama"
         installed = model in json.loads(node["models"])
+        if engine == "dmr" and not installed:
+            raise HTTPException(400, f"{model} must be installed in DMR by the owner before assignment")
         if not installed and not a.ensure_model:
             raise HTTPException(400, f"{a.node} does not serve {model}")
         if not installed and not catalog:
@@ -2342,9 +2356,10 @@ async def assign(a: Assignment) -> dict:
             if not written:  # reconciliation claimed the row after we read it: don't record mismatched settings
                 raise HTTPException(409, f"{model} is being changed on {node['name']}; try again in a moment")
         c.execute(
-            "INSERT INTO assignments (role,node,model,state,catalog_id,params) VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(role,node,model) DO UPDATE SET state=excluded.state,catalog_id=excluded.catalog_id,params=excluded.params",
-            (a.role, node["id"], model, state, catalog_id, json.dumps(params)),
+            "INSERT INTO assignments (role,node,model,state,catalog_id,params,engine) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(role,node,model) DO UPDATE SET state=excluded.state,catalog_id=excluded.catalog_id,"
+            "params=excluded.params,engine=excluded.engine",
+            (a.role, node["id"], model, state, catalog_id, json.dumps(params), engine),
         )
         if installed and catalog_id:
             c.execute("UPDATE node_models SET state='ready',reason=NULL,updated_at=? WHERE node=? AND catalog_id=?",

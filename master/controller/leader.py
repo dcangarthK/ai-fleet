@@ -193,26 +193,41 @@ def _mark_review_queued(item: dict) -> None:
             _bump(c)
 
 
+def _unresolved_review(work_item: str) -> bool:
+    """A pending-review item owns at most one non-terminal linked review task."""
+    with db() as c:
+        row = c.execute("SELECT 1 FROM tasks WHERE review_of=? AND state NOT IN ('done','cancelled','failed') LIMIT 1",
+                        (work_item,)).fetchone()
+    return row is not None
+
+
 async def _queue_pending_reviews(now: float) -> None:
     for item in _items():
         if item["status"] != "pending_review":
             continue
         try:
             source = tasks.get_task(item["work_item"])
-        except HTTPException:
-            continue
-        if source["state"] in tasks.ACTIVE:
-            continue
-        slot = next((row for row in handoff.resources(now=now) if row["state"] == "free" and row["agent"] == "claude"
-                     and row["node"] == source["node_id"] and "review" in row.get("allowed_kinds", [])
-                     and budget.lead_allowed("claude", row.get("concrete_model"))), None)
-        if not slot:
-            continue
-        await tasks.create_task(tasks.TaskIn(agent="claude", model=slot["concrete_model"], profile=slot["profile"],
-                                              kind="review", mode="read-only", worktree=False, review_of=source["id"],
-                                              parent_id=source["id"], link="review", title="Claude review for Codex build",
-                                              prompt="Review the completed Codex work item for correctness and regressions."), scope="operate")
-        _mark_review_queued(item)
+            if source["state"] in tasks.ACTIVE:
+                continue
+            # A prior successful create can race with the plan CAS below.  Reuse it instead of
+            # issuing another paid review when the item is still pending on the next tick.
+            if _unresolved_review(source["id"]):
+                _mark_review_queued(item)
+                continue
+            slot = next((row for row in handoff.resources(now=now) if row["state"] == "free" and row["agent"] == "claude"
+                         and row["node"] == source["node_id"] and "review" in row.get("allowed_kinds", [])
+                         and budget.lead_allowed("claude", row.get("concrete_model"))), None)
+            if not slot:
+                continue
+            await tasks.create_task(tasks.TaskIn(agent="claude", model=slot["concrete_model"], profile=slot["profile"],
+                                                  kind="review", mode="read-only", worktree=False, review_of=source["id"],
+                                                  parent_id=source["id"], link="review", title="Claude review for Codex build",
+                                                  prompt="Review the completed Codex work item for correctness and regressions."), scope="operate")
+            _mark_review_queued(item)
+        except Exception as exc:
+            # One unavailable account or budget refusal must not stop leader continuity for other work.
+            print(f"leader review queue skipped {item['work_item']}: {exc!r}")
+            emit(item["work_item"], "leader.review_skipped", {"work_item": item["work_item"], "reason": str(exc)[:300]})
 
 
 async def _cancel_old(old_task: dict) -> bool:

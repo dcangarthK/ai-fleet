@@ -137,6 +137,45 @@ class LeaderTests(HandoffBase):
         self.assertIsNotNone(review)
         self.assertEqual(review["agent"], "claude")
 
+    def test_failed_review_queue_does_not_stop_leader_tick(self):
+        build = self.ok(agent="codex", model="gpt-5.6-terra", kind="build", gate="pytest")
+        with db() as c:
+            c.execute("UPDATE tasks SET state='done' WHERE id=?", (build["id"],))
+        body = {"items": [{"work_item": build["id"], "next_steps": [], "status": "pending_review"},
+                          {"work_item": "w-1", "next_steps": ["delegate build"], "status": "open"}]}
+        self.assertEqual(self.c.put("/api/plan", json=body, headers={"X-Fleet": "1", "X-Fleet-Scope": "operate"}).status_code, 200)
+        leader.handoff.resources = lambda **_: [slot("claude", SONNET), slot("codex", "gpt-5.6-terra")]
+        original = leader.tasks.create_task
+
+        async def refuse_review(task, **kwargs):
+            if task.kind == "review":
+                raise leader.HTTPException(429, "review budget refused")
+            return await original(task, **kwargs)
+
+        leader.tasks.create_task = refuse_review
+        try:
+            current = self.tick()
+        finally:
+            leader.tasks.create_task = original
+        self.assertEqual(current["model"], "gpt-5.6-terra")
+        self.assertEqual(events_of("leader.review_skipped")[-1]["data"]["work_item"], build["id"])
+
+    def test_existing_unresolved_review_is_reused(self):
+        build = self.ok(agent="codex", model="gpt-5.6-terra", kind="build", gate="pytest")
+        review = self.ok(agent="claude", model=SONNET, kind="review", mode="read-only", worktree=False,
+                         review_of=build["id"], parent_id=build["id"], link="review")
+        with db() as c:
+            c.execute("UPDATE tasks SET state='done' WHERE id=?", (build["id"],))
+        body = {"items": [{"work_item": build["id"], "next_steps": [], "status": "pending_review"}]}
+        self.assertEqual(self.c.put("/api/plan", json=body, headers={"X-Fleet": "1", "X-Fleet-Scope": "operate"}).status_code, 200)
+        leader.handoff.resources = lambda **_: [slot("claude", SONNET)]
+        self.assertIsNone(self.tick())
+        with db() as c:
+            reviews = c.execute("SELECT id FROM tasks WHERE review_of=?", (build["id"],)).fetchall()
+        self.assertEqual([row["id"] for row in reviews], [review["id"]])
+        plan = self.c.get("/api/plan", headers={"X-Fleet": "1", "X-Fleet-Scope": "operate"}).json()
+        self.assertEqual(plan["items"][0]["status"], "review_queued")
+
     def test_owner_only_actions_are_refused_to_operate_scope(self):
         self.plan()
         operate = {"X-Fleet": "1", "X-Fleet-Scope": "operate"}

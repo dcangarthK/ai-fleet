@@ -62,8 +62,8 @@ export interface Stage {
   state: "done" | "current" | "next" | "failed" | "superseded";
   /** The controller's label and tone for the stage's latest attempt (same as /api/work); absent for pipeline strips. */
   display?: { tone: "running" | "ok" | "paused" | "attention" | "resolved" | "muted"; label: string } | null;
-  /** Tasks (attempts) in this stage; 0 when it has not started. */
-  attempts?: number;
+  /** Visible tasks in this stage (hidden check tasks are not counted); 0 when none. */
+  tasks?: number;
   task_id?: string | null;
   agent?: string;
   model?: string;
@@ -217,7 +217,7 @@ export function queueText(q: QueueRow): string {
 
 /** A stage chip: its class (current highlighted, failed red) and its label, with "×2" for a repeat. */
 export function stageChip(s: Stage): { className: string; label: string } {
-  const repeat = (s.attempts ?? 0) > 1 ? ` ×${s.attempts}` : "";
+  const repeat = (s.tasks ?? 0) > 1 ? ` ×${s.tasks}` : "";
   // The colour follows the controller's tone when it sent one (settled attempts are never red); `state` is the
   // fallback for pipeline strips, which have no attempt.
   const className = s.display ? `stage stage-tone-${s.display.tone}` : `stage stage-${s.state}`;

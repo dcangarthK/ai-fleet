@@ -532,7 +532,7 @@ class DisplayContext:
     def __init__(self, now: float | None = None):
         self.now = time.time() if now is None else now
         with db() as c:
-            rows = c.execute("SELECT id,parent_id,link,state,resolution,outcome,created_at,rowid AS rid FROM tasks").fetchall()
+            rows = c.execute("SELECT id,parent_id,link,state,resolution,outcome,hidden,created_at,rowid AS rid FROM tasks").fetchall()
             self.limit_tasks = {r[0] for r in c.execute("SELECT DISTINCT task_id FROM agent_usage WHERE outcome='limit'")}
         self.items = {r["id"]: dict(r) for r in rows}
         self.retry_child: dict[str, str] = {}
@@ -546,6 +546,11 @@ class DisplayContext:
             self._by_root.setdefault(self.roots[i], {})[i] = item
         self._rules: dict | None = None
         self._snapshots: dict[str, dict] = {}
+
+    def hidden(self, task_id: str) -> bool:
+        """The task, or the root of its work item, is hidden."""
+        root = self.items.get(self.roots.get(task_id, task_id))
+        return bool((self.items.get(task_id) or {}).get("hidden") or (root and root.get("hidden")))
 
     def root_outcome(self, task_id: str) -> dict | None:
         root = self.items.get(self.roots.get(task_id, task_id))

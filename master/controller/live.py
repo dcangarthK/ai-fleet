@@ -246,7 +246,7 @@ def chain_view(chain: list[dict], members: list[dict]) -> list[dict]:
         tries = [m for m in members if m.get("stage") == stage["stage"]]
         latest = tries[-1] if tries else None
         # `state` stays for the chip's shape; `display` is the label and tone (same as /api/work and /api/tasks).
-        out.append(stage | {"state": attempt_state(latest) if latest else "next", "attempts": len(tries),
+        out.append(stage | {"state": attempt_state(latest) if latest else "next", "tasks": len([m for m in tries if not m.get("hidden")]),
                             "task_id": latest["id"] if latest else None,
                             "display": latest.get("display") if latest else None})
     return out
@@ -371,9 +371,9 @@ def queue(now: float) -> list[dict]:
     return out
 
 
-def chains(now: float) -> list[dict]:
+def chains(now: float, ctx: "tasks.DisplayContext | None" = None) -> list[dict]:
     out = []
-    ctx = tasks.DisplayContext(now)
+    ctx = ctx or tasks.DisplayContext(now)
     with db() as c:
         pipelines = [dict(r) for r in c.execute(
             "SELECT id, title, state, round, gate, history FROM pipelines WHERE state NOT IN "
@@ -497,13 +497,12 @@ TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.aw
                     "task.stall_alert": "working"}
 
 
-def _task_alert_resolution(c, ctx: "tasks.DisplayContext", task_id: str | None, kind: str) -> str | None:
+def _task_alert_resolution(ctx: "tasks.DisplayContext", task_id: str | None, kind: str) -> str | None:
     """None while the task alert is open; else why it is resolved: `settled` (a resolution, an outcome, a merged work
     item, a hidden task, or the task moved on from the reported state) or `superseded` (a later attempt in the work
     item got through, or the task was retried). The settled test is the one in docs/SPEC-dashboard-truth.md 2.1."""
-    t = c.execute("SELECT state, resolution, outcome, hidden, created_at FROM tasks WHERE id=?", (task_id,)).fetchone() \
-        if task_id else None
-    if not t or t["hidden"]:
+    t = ctx.items.get(task_id) if task_id else None
+    if not t or ctx.hidden(task_id):  # the task or its work item's root is hidden
         return "settled"
     if t["resolution"]:
         return "superseded" if (_json(t["resolution"]) or {}).get("kind") == "resolved_by" else "settled"
@@ -512,13 +511,8 @@ def _task_alert_resolution(c, ctx: "tasks.DisplayContext", task_id: str | None, 
     merged = ctx.root_outcome(task_id)
     if merged and merged.get("kind") == "merged":
         return "settled"
-    # A later attempt in the same work item that got through settles it too.
-    root = task_root(c, task_id)
-    later = c.execute(
-        "WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id) "
-        "SELECT 1 FROM tasks WHERE id IN (SELECT id FROM tree) AND id<>? AND created_at>? "
-        "AND state IN ('review','done') LIMIT 1", (root, task_id, t["created_at"] or 0)).fetchone()
-    if later or ctx.retry_child.get(task_id):
+    # The shared test (tasks.live_display): a later attempt that follows on from this one, or a retry child.
+    if ctx.superseded_by(t) or ctx.retry_child.get(task_id):
         return "superseded"
     return None if t["state"] == TASK_ALERT_STATE[kind] else "settled"
 
@@ -526,7 +520,7 @@ def _task_alert_resolution(c, ctx: "tasks.DisplayContext", task_id: str | None, 
 OPEN_CAP, RESOLVED_CAP = 10, 20
 
 
-def alerts(include_resolved: bool = False) -> list[dict]:
+def alerts(include_resolved: bool = False, ctx: "tasks.DisplayContext | None" = None) -> list[dict]:
     """Alerts are computed, not stored (docs/SPEC-dashboard-truth.md req 4): each call rebuilds them from `events`,
     checking a task alert against the task's current state, budget.limit against the account's current limit state
     and a node alert against the node's later recovery. Every alert gets `state` open|resolved and `resolved_by`
@@ -535,17 +529,17 @@ def alerts(include_resolved: bool = False) -> list[dict]:
     marks = ",".join("?" * len(ALERT_TYPES))
     now = time.time()
     rules = budget.current_rules()
-    ctx = tasks.DisplayContext(now)
+    ctx = ctx or tasks.DisplayContext(now)
     out, seen, snaps = [], set(), {}
     n_open = n_resolved = 0
     with db() as c:
         rows = c.execute(f"SELECT id, ts, task_id, type, data FROM events WHERE type IN ({marks}) "
                          "ORDER BY id DESC LIMIT 500", ALERT_TYPES).fetchall()
         online = {}  # node -> id of its newest node.runner_online event
-        for r in c.execute("SELECT id, data FROM events WHERE type='node.runner_online' ORDER BY id"):
-            node = (_json(r["data"]) or {}).get("node")
-            if isinstance(node, str):
-                online[node] = r["id"]
+        for r in c.execute("SELECT json_extract(data,'$.node') AS node, MAX(id) AS last FROM events "
+                           "WHERE type='node.runner_online' GROUP BY node"):
+            if isinstance(r["node"], str):
+                online[r["node"]] = r["last"]
         for r in rows:
             data = _json(r["data"]) or {}
             by = None
@@ -553,7 +547,7 @@ def alerts(include_resolved: bool = False) -> list[dict]:
                 if r["task_id"] in seen:
                     continue
                 seen.add(r["task_id"])
-                by = _task_alert_resolution(c, ctx, r["task_id"], r["type"])
+                by = _task_alert_resolution(ctx, r["task_id"], r["type"])
             elif r["type"] == "budget.limit":
                 account = data.get("account")
                 if not isinstance(account, str) or ("limit", account) in seen:
@@ -602,11 +596,12 @@ def live_view(include_resolved: int = 0) -> dict:
     """View scope: who is doing what, where, on which account, right now (docs/SPEC-live-monitor.md 4.2)."""
     now = time.time()
     nodes = tasks.node_rows()
+    ctx = tasks.DisplayContext(now)  # one load of the task tree for the chains and the alerts
     return {"generated_at": now, "orchestrator": presence.sessions(now), "workers": workers(now, nodes),
-            "queue": queue(now), "chains": chains(now), "accounts": accounts(now),
+            "queue": queue(now), "chains": chains(now, ctx), "accounts": accounts(now),
             "self_reported": self_reported(now),
             "machines": [machine_row(n, now) for n in nodes if n["status"] == "approved" and n.get("runner")],
-            "alerts": alerts(bool(include_resolved))}
+            "alerts": alerts(bool(include_resolved), ctx)}
 
 
 # ---------- §13 (b) the owner's limit reset ----------

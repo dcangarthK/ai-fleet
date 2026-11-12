@@ -225,11 +225,17 @@ class ChainTests(LiveBase):
         found = next(ch for ch in self.live()["chains"] if ch.get("root_id") == build["id"])
         states = {s["stage"]: s for s in found["stages"]}
         self.assertEqual(states["build"]["state"], "done")
-        self.assertEqual((states["test-1"]["state"], states["test-1"]["attempts"], states["test-1"]["task_id"]),
-                         ("current", 2, t2["id"]))
-        self.assertNotIn("count", states["test-1"])  # Part F req 10: renamed to what it counts, tasks (attempts)
-        self.assertEqual(states["build"]["attempts"], 1)
-        self.assertEqual(states["merge"]["attempts"], 0)
+        # Part F req 10: `tasks` counts the visible tasks in the stage; both test-1 tasks are hidden check tasks.
+        self.assertEqual((states["test-1"]["state"], states["test-1"]["tasks"], states["test-1"]["task_id"]),
+                         ("current", 0, t2["id"]))
+        self.assertNotIn("count", states["test-1"])
+        self.assertNotIn("attempts", states["test-1"])
+        self.assertEqual(states["build"]["tasks"], 1)
+        self.assertEqual(states["merge"]["tasks"], 0)
+        with db() as c:
+            c.execute("UPDATE tasks SET hidden=0 WHERE id=?", (t1["id"],))
+        found = next(ch for ch in self.live()["chains"] if ch.get("root_id") == build["id"])
+        self.assertEqual({s["stage"]: s for s in found["stages"]}["test-1"]["tasks"], 1)
         self.assertEqual(states["review"]["state"], "superseded")
         self.assertEqual(states["merge"]["state"], "next")
         with db() as c:
@@ -826,7 +832,7 @@ class AlertTests(LiveBase):
     def test_a_later_success_in_the_work_item_clears_it(self):
         tid = self.task("failed")
         self.event(tid, "task.failed")
-        self.task("done", parent_id=tid, created_at=time.time() + 1)
+        self.task("done", parent_id=tid, link="retry", created_at=time.time() + 1)
         self.assertEqual(self.kinds(tid), [])
 
     def test_a_cleared_limit_is_gone_and_a_live_one_stays(self):
@@ -890,7 +896,7 @@ class AlertTests(LiveBase):
     def test_resolved_by_superseded(self):
         tid = self.task("failed")
         self.event(tid, "task.failed")
-        self.task("done", parent_id=tid, created_at=time.time() + 1)
+        self.task("done", parent_id=tid, link="retry", created_at=time.time() + 1)
         (a,) = self.all_alerts(tid)
         self.assertEqual((a["state"], a["resolved_by"]), ("resolved", "superseded"))
 
@@ -930,6 +936,35 @@ class AlertTests(LiveBase):
         self.assertEqual([(a["state"], a["resolved_by"]) for a in got], [("resolved", "node_recovered")])
         add("node.disk_low", state="cleared")  # a cleared warning is resolved too
         self.assertFalse([a for a in mine() if a["type"] == "node.disk_low"])
+
+    def test_a_failed_review_alert_stays_open_after_a_later_build_succeeds(self):
+        # The shared settled test: a successful build does not resolve a failed review (resolution_targets).
+        root = self.task("review", link=None)
+        rev = self.task("failed", parent_id=root, link="review", created_at=time.time() + 1)
+        self.event(rev, "task.failed")
+        self.task("done", parent_id=root, link="fix", created_at=time.time() + 2)
+        (a,) = self.all_alerts(rev)
+        self.assertEqual(a["state"], "open")
+
+    def test_a_merged_work_item_settles_its_alerts(self):
+        root = self.task("done", outcome=json.dumps({"kind": "merged", "commit": "abc1234"}))
+        child = self.task("failed", parent_id=root, link="fix")
+        self.event(child, "task.failed")
+        self.assertEqual(self.kinds(child), [])
+        self.assertEqual(self.all_alerts(child)[0]["resolved_by"], "settled")
+
+    def test_a_retried_task_alert_is_superseded(self):
+        tid = self.task("failed")
+        self.event(tid, "task.failed")
+        self.task("working", parent_id=tid, link="retry", created_at=time.time() + 1)
+        self.assertEqual(self.kinds(tid), [])
+        self.assertEqual(self.all_alerts(tid)[0]["resolved_by"], "superseded")
+
+    def test_children_of_a_hidden_work_item_are_not_open(self):
+        root = self.task("done", hidden=1)
+        child = self.task("failed", parent_id=root, link="fix")
+        self.event(child, "task.failed")
+        self.assertEqual(self.kinds(child), [])
 
     def test_resolved_do_not_crowd_out_open(self):
         for _ in range(15):

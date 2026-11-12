@@ -68,9 +68,9 @@ describe("queue", () => {
 describe("stage strips", () => {
   it("highlights current, reds failed, counts repeats", () => {
     expect(stageChip({ stage: "build", state: "done" })).toEqual({ className: "stage stage-done", label: "build" });
-    expect(stageChip({ stage: "test-1", state: "current", attempts: 2 })).toEqual({ className: "stage stage-current", label: "test-1 ×2" });
-    expect(stageChip({ stage: "review", state: "failed", attempts: 1 }).className).toBe("stage stage-failed");
-    expect(stageChip({ stage: "merge", state: "next", attempts: 0 }).label).toBe("merge");
+    expect(stageChip({ stage: "test-1", state: "current", tasks: 2 })).toEqual({ className: "stage stage-current", label: "test-1 ×2" });
+    expect(stageChip({ stage: "review", state: "failed", tasks: 1 }).className).toBe("stage stage-failed");
+    expect(stageChip({ stage: "merge", state: "next", tasks: 0 }).label).toBe("merge");
     expect(stageChip({ stage: "review", state: "superseded" }).className).toBe("stage stage-superseded");
   });
   it("colours a stage by the controller's tone, so a settled attempt is never red", () => {

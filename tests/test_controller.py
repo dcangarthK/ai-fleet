@@ -278,6 +278,26 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(master["status"], "approved")
         self.assertEqual(master["effective_ceiling"], "auto-edit")
 
+    def test_dmr_catalog_assignment_and_role_task_keep_engine_identity(self):
+        added = self.c.post("/api/models", json={"reference": "fake-model:1b", "engine": "dmr",
+                                                  "display_name": "Fake DMR"}, headers=W)
+        self.assertEqual(200, added.status_code, added.text)
+        dmr = added.json()
+        self.assertEqual("dmr", dmr["engine"])
+        same_name = [m for m in self.c.get("/api/models").json() if m["reference"] == "fake-model:1b"]
+        self.assertEqual({"ollama", "dmr"}, {m["engine"] for m in same_name})
+        assigned = self.c.post("/api/roles", json={"role": "dmr-test", "node": "master",
+                                                     "model": "fake-model:1b", "catalog_id": dmr["id"]}, headers=W)
+        self.assertEqual(200, assigned.status_code, assigned.text)
+        role = next(a for a in assigned.json()["assignments"] if a["role"] == "dmr-test")
+        self.assertEqual("dmr", role["engine"])
+        task = self.task(agent="ollama", model="fake-model:1b", role="dmr-test", mode="read-only")
+        sent = [b for p, b in FakeRunner.calls if p == "/jobs" and b["id"] == task["id"]][0]
+        self.assertEqual(("dmr", "dmr"), (task["engine"], sent["engine"]))
+        bad = self.c.post("/api/tasks", json={"agent": "ollama", "engine": "unknown",
+                                                "model": "fake-model:1b", "prompt": "x"}, headers=W)
+        self.assertEqual(400, bad.status_code)
+
     def test_task_lifecycle_to_review_and_wait(self):
         t = self.task(gate="pytest")
         self.assertEqual(t["state"], "working")

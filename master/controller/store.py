@@ -91,8 +91,8 @@ MIGRATIONS = {
               # and the runner's own age of the metrics it reported
               "heartbeat_at": "REAL", "heartbeat_ts": "REAL", "polled_at": "REAL", "runner_age_s": "REAL"},
     "assignments": {"state": "TEXT DEFAULT 'active'", "catalog_id": "TEXT", "params": "TEXT DEFAULT '{}'",
-                    "routed": "INTEGER", "route_reason": "TEXT"},
-    "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL",
+                    "routed": "INTEGER", "route_reason": "TEXT", "engine": "TEXT DEFAULT 'ollama'"},
+    "tasks": {"agent_seconds": "REAL DEFAULT 0", "run_started_at": "REAL", "engine": "TEXT",
               "instructions": "TEXT DEFAULT ''", "policy": "TEXT DEFAULT '{}'",
               "policy_hash": "TEXT", "role": "TEXT", "skills": "TEXT DEFAULT '[]'",
               "cleaned_at": "REAL", "trusted_bypass": "INTEGER DEFAULT 0", "auto_approvals": "INTEGER DEFAULT 0",

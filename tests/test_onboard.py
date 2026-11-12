@@ -124,6 +124,31 @@ class ScriptsParse(OnboardHarness):
         self.assertIn(r'set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-fleet"', ps1)
         self.assertIn(r'set "CODEX_HOME=%USERPROFILE%\.codex-fleet"', ps1)
 
+    def test_windows_enrolls_before_advertising_worker_tag(self):
+        ps1 = (ROOT / "nodes" / "onboard.ps1").read_text()
+        enroll = ps1.index('Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd(\'/\') + "/api/enroll/complete")')
+        tag = ps1.rindex("Ensure-WorkerTag")
+        self.assertLess(enroll, tag)
+        main = ps1[ps1.index('if ($ScanOnly)'):]
+        self.assertLess(main.index("Ensure-TailscaleConnection"), main.index("Invoke-RestMethod"))
+        self.assertLess(main.index("Invoke-RestMethod"), main.index("Ensure-WorkerTag"))
+
+    def test_dmr_smoke_check_is_read_only_and_rejects_non_loopback_listener(self):
+        script = ROOT / "nodes" / "check_dmr.sh"
+        text = script.read_text()
+        self.assertIn("docker model ls", text)
+        self.assertIn("127.0.0.1:12434/engines/v1/models", text)
+        self.assertIn("lsof", text)
+        self.assertNotRegex(text, r"(?m)^\s*(docker model (pull|rm)|tailscale|pfctl|iptables|curl .*-[A-Z].*POST)")
+        fake = self.tmp / "fake-lsof"
+        fake.write_text("#!/bin/sh\necho 'docker 1 user 9u IPv4 0 TCP *:12434 (LISTEN)'\n")
+        fake.chmod(0o755)
+        result = subprocess.run([BASH, str(script)], capture_output=True, text=True,
+                                env=self.env(DMR_LSOF=str(fake), DMR_DOCKER="/usr/bin/false",
+                                             DMR_CURL="/usr/bin/false", DMR_FIXTURE_DIR=str(self.tmp / "fixtures")))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("FAIL", result.stdout)
+
 
 class RunnerPolicy(OnboardHarness):
     def configure(self, ram=16, pre=None, extra="", **env):
@@ -619,7 +644,7 @@ class PipedEndToEnd(OnboardHarness):
 
 
 class TailnetPolicy(unittest.TestCase):
-    """tailscale/policy.hujson: nodes must never reach the master's token-protected port."""
+    """tailscale/policy.hujson: minimal §14 N0 reachability."""
 
     def load(self):
         text = (ROOT / "tailscale" / "policy.hujson").read_text()
@@ -627,18 +652,13 @@ class TailnetPolicy(unittest.TestCase):
         text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
         return json.loads(text)
 
-    def test_llm_nodes_get_no_access_to_the_master_https_port(self):
+    def test_worker_can_reach_master_https_but_not_another_worker(self):
         policy = self.load()
-        for grant in policy["grants"]:
-            if "tag:master" in grant["dst"]:
-                self.assertNotIn("tag:llm-node", grant["src"], grant)
-                self.assertNotIn("*", grant["src"], grant)
         node_tests = [t for t in policy["tests"] if t["src"] == "tag:llm-node"]
-        self.assertTrue(any("tag:master:8443" in t.get("deny", []) for t in node_tests),
-                        "the policy's own tests block must deny tag:llm-node -> tag:master:8443")
-        for t in policy["tests"]:
-            if t["src"] == "tag:llm-node":
-                self.assertFalse([d for d in t.get("accept", []) if d.startswith("tag:master:")])
+        self.assertTrue(any("tag:master:8443" in t.get("accept", []) for t in node_tests))
+        self.assertTrue(any("tag:llm-node:11436" in t.get("deny", []) for t in node_tests))
+        grants = [g for g in policy["grants"] if "tag:llm-node" in g["src"] and "tag:master" in g["dst"]]
+        self.assertEqual([["tcp:8443"]], [g["ip"] for g in grants])
 
 
 class MasterTailscaleTag(OnboardHarness):

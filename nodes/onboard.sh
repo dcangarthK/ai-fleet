@@ -698,7 +698,7 @@ KEEP_ALIVE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
-    "id", "agent", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
+    "id", "agent", "engine", "prompt", "mode", "repo", "worktree", "cwd", "model", "gate", "gate_args",
     "allowed_tools", "resume_session", "instructions", "policy", "policy_hash",
     "effort", "tools", "max_turns",
     # account pools and limit handoff (docs/SPEC-limit-handoff.md 3.1, 4.3)
@@ -714,11 +714,106 @@ BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
 )
 PUBLIC_JOB_KEYS = (
-    "id", "agent", "mode", "state", "exit_code", "session_id", "cwd",
+    "id", "agent", "engine", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
     "gate", "runs", "instructions", "policy_hash", "usage", "num_turns", "limits_applied", "error",
     "profile", "account_label",
 )
+
+DMR_DEFAULT_URL = "http://127.0.0.1:12434/engines/v1"
+
+
+def loopback_base_url(value):
+    """Return a normalized local HTTP base URL, refusing any address an external caller could reach."""
+    if not isinstance(value, str):
+        raise ValueError("engine base_url must be a loopback URL")
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("engine base_url must use loopback (127.0.0.1, localhost or ::1)")
+    if parsed.username or parsed.password or not parsed.port:
+        raise ValueError("engine base_url must be a loopback URL with an explicit port")
+    return value.rstrip("/")
+
+
+def parse_docker_model_ls(output):
+    """Parse Docker's JSON-lines model list; malformed rows are contained and unknown fields stay null."""
+    models = []
+    for line in (output or "").splitlines():
+        try:
+            row = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        reference = row.get("Model") or row.get("model") or row.get("Name") or row.get("name")
+        if not isinstance(reference, str) or not reference:
+            continue
+        digest = row.get("ID") or row.get("Digest") or row.get("digest")
+        models.append({"engine": "dmr", "reference": reference,
+                       "digest": digest if isinstance(digest, str) else None,
+                       "size": None, "warm": "unknown", "warm_source": None})
+    return models
+
+
+class OpenAIEngine:
+    """Small dependency-free adapter for DMR's OpenAI-compatible local HTTP API."""
+    def __init__(self, base_url, timeout=2, docker_run=None):
+        self.base_url = loopback_base_url(base_url)
+        self.timeout = timeout
+        self.docker_run = docker_run or run_capped
+        self._catalog = {"engine": "dmr", "reachable": None, "models": [], "error": None, "checked_at": None}
+        self.lock = threading.Lock()
+
+    def request(self, method, path, body=None, timeout=None):
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(self.base_url + path, data=data,
+                                         headers={"Content-Type": "application/json"}, method=method)
+        with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            return json.load(response)
+
+    def refresh(self):
+        try:
+            body = self.request("GET", "/models")
+            rows = body.get("data") if isinstance(body, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("models response has no data list")
+            models = []
+            for row in rows:
+                reference = row.get("id") if isinstance(row, dict) else None
+                if isinstance(reference, str) and reference:
+                    models.append({"engine": "dmr", "reference": reference, "digest": None,
+                                   "size": None, "warm": "unknown", "warm_source": None})
+            cli_models = parse_docker_model_ls(
+                self.docker_run(["docker", "model", "ls", "--format", "json"], timeout=3))
+            known = {item["reference"] for item in models}
+            models.extend(item for item in cli_models if item["reference"] not in known)
+            value = {"engine": "dmr", "reachable": True, "models": models,
+                     "error": None, "checked_at": now()}
+        except Exception as exc:
+            value = {"engine": "dmr", "reachable": False, "models": [],
+                     "error": trim(str(exc), 300), "checked_at": now()}
+        with self.lock:
+            self._catalog = value
+        return value
+
+    def snapshot(self):
+        with self.lock:
+            return json.loads(json.dumps(self._catalog))
+
+
+class EngineCollector:
+    def __init__(self, manager, interval=10):
+        self.manager, self.interval = manager, interval
+
+    def run_forever(self):
+        while True:
+            for adapter in self.manager.engine_adapters.values():
+                adapter.refresh()
+            time.sleep(self.interval)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, name="engine-metrics", daemon=True).start()
+        return self
 
 
 def validate_job_policy(value):
@@ -1178,6 +1273,14 @@ class JobManager:
                                and math.isfinite(ram) and ram >= 0 else 4),
             "max_loaded": loaded if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0 else 1,
         }
+        engines = config.get("engines") if isinstance(config.get("engines"), dict) else {}
+        dmr = engines.get("dmr") if isinstance(engines.get("dmr"), dict) else {}
+        self.engine_adapters = {}
+        self.engine_config = {"ollama": {"enabled": True, "base_url": self.ollama_url}}
+        if dmr.get("enabled") is True:
+            base_url = loopback_base_url(dmr.get("base_url", DMR_DEFAULT_URL))
+            self.engine_config["dmr"] = {"enabled": True, "base_url": base_url}
+            self.engine_adapters["dmr"] = OpenAIEngine(base_url)
         self.profile_config = self._profiles_from(config.get("profiles"))
         self.request_context = threading.local()
         controller = config.get("controller")
@@ -1190,6 +1293,12 @@ class JobManager:
         self.agents = find_agents(self.ollama_url)
         self.model_manager = ModelManager(self.root, self.ollama_url, self.models_config)
         self._load_jobs()
+
+    def engine_catalog(self, refresh=True):
+        out = {}
+        for name, adapter in self.engine_adapters.items():
+            out[name] = adapter.refresh() if refresh else adapter.snapshot()
+        return out
 
     @staticmethod
     def _path_list(value):
@@ -1811,6 +1920,13 @@ class JobManager:
             raise HttpError(400, "invalid job id")
         if agent not in ("claude", "codex", "ollama"):
             raise HttpError(400, "unknown agent")
+        engine = body.get("engine", "ollama")
+        if agent == "ollama" and engine not in ("ollama", "dmr"):
+            raise HttpError(400, "unknown engine")
+        if agent != "ollama" and body.get("engine") is not None:
+            raise HttpError(400, "engine is only valid for local-model jobs")
+        if agent == "ollama" and engine == "dmr" and engine not in self.engine_adapters:
+            raise HttpError(400, "dmr engine is unavailable")
         if mode not in MODE_RANK:
             raise HttpError(400, "invalid mode")
         if MODE_RANK[mode] > MODE_RANK[self.max_mode]:
@@ -1841,6 +1957,12 @@ class JobManager:
             raise HttpError(400, "max_turns must be a positive integer")
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
+        if agent == "ollama" and engine == "dmr":
+            catalog = self.engine_adapters["dmr"].refresh()
+            if not catalog["reachable"]:
+                raise HttpError(503, "dmr engine is unreachable")
+            if body.get("model") not in {item["reference"] for item in catalog["models"]}:
+                raise HttpError(400, "model is not in the dmr catalog")
         if body.get("gate") and MODE_RANK[mode] < MODE_RANK["auto-edit"]:
             self.audit("gate_denied", "gate requested below auto-edit mode")
             raise HttpError(400, "a gate needs auto-edit or full mode")
@@ -1854,7 +1976,7 @@ class JobManager:
             if profile_entry is None:
                 self.audit("profile_denied", "unknown profile id")
                 raise HttpError(400, "unknown profile for %s on this runner" % agent)
-        if not self.agents.get(agent):
+        if not self.agents.get(agent) and not (agent == "ollama" and engine == "dmr"):
             raise HttpError(400, "%s agent is unavailable" % agent)
         gate = self._gate(body.get("gate"), body.get("gate_args"))
         repo = self.check_path(body["repo"], policy) if body.get("repo") else None
@@ -1906,7 +2028,8 @@ class JobManager:
                 if rev.returncode == 0:
                     base = rev.stdout.strip()
             job = {
-                "id": job_id, "agent": agent, "mode": mode, "state": "running",
+                "id": job_id, "agent": agent, "engine": engine if agent == "ollama" else None,
+                "mode": mode, "state": "running",
                 "exit_code": None, "session_id": body.get("resume_session"), "cwd": cwd,
                 "worktree": use_worktree, "branch": branch, "started_at": now(),
                 "ended_at": None, "result": "", "denials": [], "gate": gate,
@@ -2005,11 +2128,16 @@ class JobManager:
                     cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd.append("-")  # "-": prompt from stdin
             return cmd
-        request_path = self._job_dir(job) / ("ollama-request.%d.json" % job["runs"])
-        atomic_json(request_path, {
-            "url": self.ollama_url, "model": job["model"], "prompt": prompt,
-            "instructions": job.get("instructions") or "",
-        }, 0o600)
+        engine = job.get("engine") or "ollama"
+        request_path = self._job_dir(job) / ("%s-request.%d.json" % (engine, job["runs"]))
+        if engine == "dmr":
+            atomic_json(request_path, {
+                "url": self.engine_adapters["dmr"].base_url, "model": job["model"], "prompt": prompt,
+                "instructions": job.get("instructions") or "",
+            }, 0o600)
+            return [sys.executable, str(Path(__file__).resolve()), "--openai-worker", str(request_path)]
+        atomic_json(request_path, {"url": self.ollama_url, "model": job["model"], "prompt": prompt,
+                                   "instructions": job.get("instructions") or ""}, 0o600)
         return [sys.executable, str(Path(__file__).resolve()), "--ollama-worker", str(request_path)]
 
     def _launch(self, job, prompt, allowed_tools, resume):
@@ -2798,6 +2926,8 @@ class Handler(BaseHTTPRequestHandler):
         parts = [item for item in parsed.path.split("/") if item]
         if method == "GET" and parts == ["health"]:
             return health_report(self.manager)
+        if method == "GET" and parts == ["engines"]:
+            return self.manager.engine_catalog(refresh=True)
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:
@@ -2872,11 +3002,21 @@ def health_report(manager):
     metrics = manager.metrics.snapshot() if getattr(manager, "metrics", None) else None
     ollama_up = (metrics.get("ollama") or {}).get("up") if metrics else None
     agents = find_agents(manager.ollama_url, ollama_up=ollama_up)
+    engine_health = (manager.engine_catalog(refresh=False)
+                     if callable(getattr(manager, "engine_catalog", None)) else {})
+    if engine_health.get("dmr", {}).get("reachable") is True and getattr(manager, "engine_adapters", None):
+        agents["ollama"] = manager.engine_adapters["dmr"].base_url
     manager.agents = agents
     running = 0
+    active_dmr = set()
     for job in list(manager.jobs.values()):  # a snapshot: jobs are added from request threads
         manager.refresh(job)
         running += job.get("state") == "running"
+        if job.get("state") == "running" and job.get("engine") == "dmr" and isinstance(job.get("model"), str):
+            active_dmr.add(job["model"])
+    for item in engine_health.get("dmr", {}).get("models") or []:
+        if item.get("reference") in active_dmr:
+            item.update(warm=True, warm_source="active_runner_job")
     power = system_power()
     power["min_battery_pct"] = manager.min_battery_pct
     power["ok"] = not (power["on_battery"] is True and power["battery_pct"] is not None
@@ -2893,6 +3033,7 @@ def health_report(manager):
               "budget": manager.budget_support(), **manager.profiles(),
               "profiles": manager.profile_report(), "checkpoint": True,
               "default_models": manager.default_models(),
+              "engines": engine_health,
               # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
               "heartbeat": bool(getattr(manager, "controller_url", None))}
     if metrics is not None:
@@ -2925,6 +3066,31 @@ def ollama_worker(request_path):
         with urllib.request.urlopen(request, timeout=900) as response:
             body = json.load(response)
         text = (body.get("message") or {}).get("content", "")
+        print(json.dumps({"type": "ollama.result", "text": text}), flush=True)
+        return 0
+    except Exception as exc:
+        print(json.dumps({"type": "error", "message": str(exc)}), flush=True)
+        return 1
+
+
+def openai_worker(request_path):
+    request_data = read_json(request_path, {})
+    messages = []
+    if request_data.get("instructions"):
+        messages.append({"role": "system", "content": request_data["instructions"]})
+    messages.append({"role": "user", "content": request_data.get("prompt", "")})
+    payload = json.dumps({"model": request_data.get("model"), "messages": messages,
+                          "stream": False}).encode("utf-8")
+    request = urllib.request.Request(request_data.get("url", "").rstrip("/") + "/chat/completions",
+                                     data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            body = json.load(response)
+        choices = body.get("choices") if isinstance(body, dict) else None
+        text = ((choices[0].get("message") or {}).get("content")
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None)
+        if not isinstance(text, str):
+            raise ValueError("OpenAI-compatible response has no message content")
         print(json.dumps({"type": "ollama.result", "text": text}), flush=True)
         return 0
     except Exception as exc:
@@ -2976,6 +3142,8 @@ def runner_token(fleet_dir):
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--ollama-worker":
         return ollama_worker(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "--openai-worker":
+        return openai_worker(sys.argv[2])
     fleet_dir = os.environ.get("FLEET_DIR", str(Path.home() / ".ai-fleet"))
     ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
     address = parse_bind(os.environ.get("RUNNER_BIND", "127.0.0.1:11436"))
@@ -2983,6 +3151,7 @@ def main():
     server.manager = JobManager(fleet_dir, ollama_url)
     server.runner_token = runner_token(fleet_dir)
     server.manager.metrics = MetricsCollector(server.manager.root, ollama_url).start()
+    EngineCollector(server.manager).start()
     Heartbeat(server.manager, server.runner_token, lambda: health_report(server.manager)).start()
 
     def stop(_signum, _frame):

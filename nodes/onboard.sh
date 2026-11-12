@@ -751,7 +751,7 @@ class LoopDetector:
         except ValueError:
             self.turns = 3
         self.turns = max(2, self.turns)
-        self.calls, self.refused, self.steps, self.found = {}, {}, [], None
+        self.calls, self.refused, self.steps, self.found, self.cur = {}, {}, [], None, None
 
     def _hit(self, kind, detail):
         if self.found is None:
@@ -763,7 +763,17 @@ class LoopDetector:
         if len(self.steps) == self.turns and len(set(self.steps)) == 1:
             self._hit("no_progress", "%d identical steps in a row" % self.turns)
 
+    def _close(self):
+        """One whole turn (its text, each call and each call's result) is one step."""
+        cur, self.cur = self.cur, None
+        if cur:
+            self._step((tuple(cur["texts"]), tuple((self.calls[i][1], cur["results"].get(i)) for i in cur["calls"])))
+
     def assistant(self, message):
+        mid = message.get("id")
+        if self.cur is None or mid is None or self.cur["mid"] != mid:
+            self._close()
+            self.cur = {"mid": mid, "texts": [], "calls": [], "results": {}}
         content = message.get("content") if isinstance(message.get("content"), list) else []
         for block in content:
             if not isinstance(block, dict):
@@ -771,8 +781,9 @@ class LoopDetector:
             if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
                 key = json.dumps([block.get("name"), block.get("input")], sort_keys=True, default=str)
                 self.calls[block["id"]] = (block.get("name") or "tool", key)
+                self.cur["calls"].append(block["id"])
             elif block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                self._step(("text", block["text"].strip()))
+                self.cur["texts"].append(block["text"].strip())
 
     def tool_result(self, block):
         name, key = self.calls.get(block.get("tool_use_id"), (None, None))
@@ -784,7 +795,13 @@ class LoopDetector:
             self.refused[key] = self.refused.get(key, 0) + 1
             if self.refused[key] >= 2:
                 self._hit("refused_tool", "%s refused twice" % name)
-        self._step((key, text))
+        cur = self.cur
+        if cur and block.get("tool_use_id") in cur["calls"]:
+            cur["results"][block["tool_use_id"]] = text
+            if all(i in cur["results"] for i in cur["calls"]):
+                self._close()
+
+
 CAP_STOP_SECONDS = 300  # the one resumed run that commits and writes the handoff
 
 
@@ -2390,10 +2407,11 @@ class JobManager:
         """Settle a job as `capped` (Part H 3.2): not a failure. The handoff summary (the model's last text) is saved
         to handoff.md in the job dir and becomes the job result. The worktree is left as it is, so uncommitted work
         stays for the next session."""
-        summary = self._last_assistant_text(job)
+        loop = cap.get("reason") == "loop"
+        summary = self._last_assistant_text(job, prefer_verdict=loop)
         if summary:
             words = summary.split()
-            if len(words) > 300:
+            if len(words) > 300 and not loop:  # a loop cut keeps the full text (it may hold a review verdict)
                 summary = " ".join(words[:300])
             try:
                 (self._job_dir(job) / "handoff.md").write_text(summary + "\n", encoding="utf-8")
@@ -2404,14 +2422,16 @@ class JobManager:
         if job.get("gate"):
             job["gate"]["state"] = "skipped"
 
-    def _last_assistant_text(self, job):
-        """The text of the last assistant message with text in this run's stream; "" when there is none."""
+    def _last_assistant_text(self, job, prefer_verdict=False):
+        """The text of the last assistant message with text in this run's stream; "" when there is none. With
+        `prefer_verdict` (a loop cut), the last text that parses as a review verdict wins over a later one."""
         try:
             data = (self._job_dir(job) / "events.jsonl").read_bytes()
         except OSError:
             return ""
         offset = job.get("events_offset") or 0
         found = ""
+        verdict = ""
         for line in data[offset if isinstance(offset, int) and 0 <= offset <= len(data) else 0:].decode(
                 "utf-8", "replace").split("\n"):
             if '"assistant"' not in line:
@@ -2426,7 +2446,14 @@ class JobManager:
                 if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) \
                         and block["text"].strip():
                     found = block["text"].strip()
-        return found
+                    if prefer_verdict and '"verdict"' in found:
+                        try:
+                            parsed = json.loads(found)
+                        except ValueError:
+                            parsed = None
+                        if isinstance(parsed, dict) and "verdict" in parsed:
+                            verdict = found
+        return verdict or found
 
     def _watch_stream(self, job, st):
         """Read the new lines of events.jsonl as the job writes them (Part H 3.2; Part G review MED). Counts assistant

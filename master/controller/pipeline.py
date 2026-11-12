@@ -105,9 +105,9 @@ def parse_review(raw: str, diff: str) -> dict:
 
 
 def resolution_text(issues: list[dict]) -> str:
-    """The fix-round message. The runner runs the gate after the builder finishes, so it never asks for that.
-    A build whose gate failed fails the pipeline, so a fix round never carries gate output (the gate-output
-    part of AC17 doesn't apply)."""
+    """The review fix-round message. The runner runs the gate after the builder finishes, so it never asks for that.
+    A failed gate is a separate bounce (Part G 6): the build event carries `gate_text`, a summary of the failing
+    tests, and the builder is messaged with that instead; a review fix round never carries gate output."""
     lines = ["Resolve these independently reviewed issues and keep the existing task context. "
              "You don't need to run the gate: the runner runs the gate after you finish."]
     for issue in issues:
@@ -253,7 +253,9 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
                 _history(p, "escalated", note=f"gate failed {failures} times; bounce rounds used up")
                 return p, []
             _history(p, "building", note=f"gate failed: bounce {failures} of {GATE_BOUNCES} to the builder")
-            return p, [{"do": "message_build", "text": event["gate_text"]}]
+            return p, [{"do": "message_build", "text": event["gate_text"],
+                        "gate_bounce": {"task_id": event.get("gate_task"), "title": event.get("gate_title"),
+                                        "round": failures}}]
         if state in ("failed", "interrupted", "cancelled"):
             p["state"] = "failed"
             _history(p, "failed", note=f"builder task {state}")

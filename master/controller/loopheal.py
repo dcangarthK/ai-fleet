@@ -59,11 +59,25 @@ _PYTEST_FAIL = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)(?:\s+-\s+(.*))?$")
 _UNITTEST_HEAD = re.compile(r"^(?:FAIL|ERROR): (\S+) \(([^)]+)\)")
 _ERROR_LINE = re.compile(r"^(?:[A-Za-z_][\w.]*(?:Error|Exception|Failure)\b.*|AssertionError.*)$")
 
+_STALE_EMBED = re.compile(r"(runner|embed|stale|out of date|differs?)", re.I)
+
+
+def _stale_embed(failures, output):
+    """test_onboard fails because the embedded runner no longer matches nodes/runner.py."""
+    return any("test_onboard" in name and _STALE_EMBED.search(err) for name, err in failures)
+
+
+def _old_onboarding_kept(failures, output):
+    """test_onboard fails on a missing needle (assertIn: "... not found in ..."): newer onboarding text is gone, which
+    is what keeping an old branch's onboard.sh / onboard.ps1 in a merge looks like."""
+    return any("test_onboard" in name and "not found in" in err for name, err in failures)
+
+
 TRAPS = (
-    ("stale_runner_embed", re.compile(r"test_onboard|onboard\.(?:sh|ps1)[^\n]*(?:differ|stale|embed)", re.I),
+    ("stale_runner_embed", _stale_embed,
      "Changed `nodes/runner.py`? Run `python3 nodes/build.py` to re-embed it in `onboard.sh` / `onboard.ps1`, "
      "and commit both. `test_onboard` fails otherwise."),
-    ("old_onboarding_kept", re.compile(r"test_onboard[\s\S]*(?:merge|<<<<<<<|>>>>>>>)|(?:merge|<<<<<<<)[\s\S]*test_onboard", re.I),
+    ("old_onboarding_kept", _old_onboarding_kept,
      "Merging a branch that touched `nodes/onboard.sh` / `onboard.ps1`? Take main's copy "
      "(`git checkout main -- nodes/onboard.sh nodes/onboard.ps1`), then re-run `nodes/build.py`. "
      "Never keep an old branch's copy."),
@@ -111,8 +125,8 @@ def gate_text(gate: dict | None, round_no: int = 1) -> str:
     else:
         tail = [ln for ln in output.splitlines() if ln.strip()][-3:]
         lines.append("- no failing test names found; last output: " + " | ".join(t.strip()[:200] for t in tail))
-    for _name, pattern, line in TRAPS:
-        if pattern.search(output):
+    for _name, matches, line in TRAPS:
+        if matches(failures, output):
             lines.append("Checklist: " + line)
     return "\n".join(lines)
 
@@ -130,9 +144,14 @@ def gate_event(build: dict) -> dict:
             gate = None
     count = tasks.gate_failures(build["id"])
     text = gate_text(gate, min(count, 3))
-    emit(build["id"], "gate.bounced", {"title": build.get("title"), "round": count,
-                                       "reason": "gate failed; summary sent to the builder session"})
-    return {"failure_reason": "gate_failed", "gate_failures": count, "gate_text": text}
+    return {"failure_reason": "gate_failed", "gate_failures": count, "gate_text": text, "gate_task": build["id"],
+            "gate_title": build.get("title")}
+
+
+def emit_bounce(task_id: str, title: str | None, round_no: int) -> None:
+    """Called by the controller once a bounce action has actually been applied (not on escalation)."""
+    emit(task_id, "gate.bounced", {"title": title, "round": round_no,
+                                   "reason": "gate failed; summary sent to the builder session"})
 
 
 # ---------- 7. service self-heal ----------

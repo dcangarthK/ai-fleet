@@ -58,6 +58,21 @@ class DetectorTests(unittest.TestCase):
             events += [use(i, cmd="ls"), result(i, "same output")]
         self.assertEqual(self.feed(det, events)["kind"], "no_progress")
 
+    def test_narrated_tool_loop_is_caught(self):
+        det = runner.LoopDetector()
+        events = []
+        for n, i in enumerate("abc"):
+            events += [use(i, cmd="ls", text="Let me look again (attempt %d)" % n if False else "Let me look again"),
+                       result(i, "same output")]
+        self.assertEqual(self.feed(det, events)["kind"], "no_progress")
+
+    def test_narration_that_changes_is_not_a_loop(self):
+        det = runner.LoopDetector()
+        events = []
+        for n, i in enumerate("abc"):
+            events += [use(i, cmd="ls", text="step %d" % n), result(i, "same output")]
+        self.assertIsNone(self.feed(det, events))
+
     def test_changing_output_is_not_a_loop(self):
         det = runner.LoopDetector()
         events = []
@@ -84,6 +99,26 @@ class DetectorTests(unittest.TestCase):
             self.assertEqual(cap["reason"], "loop")
         finally:
             base.tearDown()
+
+
+class MarkCappedTests(Base):
+    def test_loop_cut_keeps_a_long_verdict_untrimmed(self):
+        verdict = json.dumps({"verdict": "approve", "issues": [], "notes": " ".join(["word"] * 400)})
+        events = [{"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": verdict}]}},
+                  {"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "stuck again"}]}}]
+        job = self.job()
+        self.write_events(job, events)
+        self.m._mark_capped(job, {"reason": "loop", "kind": "no_progress", "detail": "x"})
+        self.assertEqual(job["result"], verdict)  # the verdict, not the later chatter, and not 300 words
+        self.assertTrue(loopheal.has_verdict(job["result"]))
+
+    def test_a_turn_cap_still_trims_to_300_words(self):
+        long = " ".join(["w"] * 500)
+        job = self.job()
+        self.write_events(job, [{"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "text", "text": long}]}}])
+        self.m._mark_capped(job, {"reason": "turns"})
+        self.assertEqual(len(job["result"].split()), 300)
 
 
 class DbCase(unittest.TestCase):
@@ -169,6 +204,14 @@ class GateBounceTests(unittest.TestCase):
         text = loopheal.gate_text({"output_tail": UNITTEST_OUT})
         self.assertIn("python3 nodes/build.py", text)
         self.assertNotIn("python3 nodes/build.py", loopheal.gate_text({"output_tail": PYTEST_OUT}))
+
+    def test_old_onboarding_kept_after_a_merge_signature(self):
+        out = "FAIL: test_x (tests.test_onboard.Env)\nTraceback\nAssertionError: '--enroll-file' not found in 'usage'\n"
+        text = loopheal.gate_text({"output_tail": out})
+        self.assertIn("git checkout main -- nodes/onboard.sh", text)
+        self.assertNotIn("python3 nodes/build.py` to re-embed", text)
+        # conflict markers alone no longer trigger it
+        self.assertNotIn("git checkout main", loopheal.gate_text({"output_tail": "<<<<<<< merge\ntest_onboard"}))
 
     def test_a_non_gate_failure_still_fails_the_pipeline(self):
         p, actions = PL.step(self.pipeline(), {"type": "build", "state": "failed", "failure_reason": "error"})

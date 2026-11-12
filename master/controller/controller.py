@@ -1826,6 +1826,9 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
             save_pipeline(p)
         elif action["do"] == "message_build":
             await _message_build(p, action["text"])
+            if action.get("gate_bounce") and action["gate_bounce"].get("task_id") and p["state"] == "building":
+                loopheal.emit_bounce(action["gate_bounce"]["task_id"], action["gate_bounce"].get("title"),
+                                     action["gate_bounce"]["round"])
         elif action["do"] == "spawn_review":
             index = action["reviewer"]
             if p["state"] != "reviewing" or p["reviews"].get(str(index), {}).get("status") != "pending":

@@ -948,13 +948,15 @@ async def _poll_task(task_id: str) -> bool:
         fields = job_fields(job)
         if loopheal.is_loop_cut(job):
             fields.update(loopheal.loop_fields(new, job))
-            emit(task_id, "task.loop_cut", {"title": task["title"], "reason": loopheal.loop_reason(job), "settled": new})
         agent_end = iso_epoch(job.get("ended_at"))
         if agent_end and task.get("run_started_at"):
             fields.update(close_run(task, agent_end))  # the gate's run time isn't agent time
         if new == "working":
             update(task_id, **fields)
         elif transition(task, {"working"}, new, **fields):
+            if loopheal.is_loop_cut(job):
+                emit(task_id, "task.loop_cut", {"title": task["title"], "reason": loopheal.loop_reason(job),
+                                                "settled": new})
             record_usage(task_id)
             if new == "blocked":
                 await auto_approve_denials(get_task(task_id))

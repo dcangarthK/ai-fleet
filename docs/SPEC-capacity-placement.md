@@ -1,6 +1,6 @@
 # Spec: capacity-driven placement (Part G)
 
-Status: draft v2, 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
+Status: draft v3 (Claude usage source), v2 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
 merged into main, together with the open fixes. Depends on Part E's `rank_slots` and stall handling, and on Part F
 requirements 6 (one limit helper) and 11 (Codex limits from Codex).
 
@@ -27,7 +27,11 @@ tier order and the independence rules that already exist. Fable never builds, fi
      - `usage` = `{window: "5h"|"weekly", used_percent, resets_at, source, observed_at}`.
    - Sources:
      - Codex: the newest `rate_limits` record in its session logs (Part F requirement 11).
-     - Claude: the usage the CLI reports (statusline or `/usage` data). Where none is available, `source: "inferred"` comes from limit failures.
+     - Claude: the newest `rate_limit_event` in the runner's stream-json job logs (`~/.ai-fleet/jobs/<id>/events.jsonl`,
+       keyed by the job's `profile`): `rate_limit_info.unifiedWindows.{five_hour,seven_day}.{utilization,resetsAt}`
+       (utilization is 0–1; `observed_at` = read time or file mtime, since the event has no timestamp). A
+       `status:"rejected"` event gives an exact `resets_at` and never clears a limit. No event, or older than 30
+       minutes: `source: "inferred"`/stale. Source found by research task t-77a287f5.
    - Stale usage (older than 30 minutes) is labelled stale and is never used to clear a limit.
 2. **Limits follow live usage.** A model is limited only while live usage says so, or while a limit failure is
    newer than the last fresh usage record. Fresh data showing headroom clears the limit automatically, so no owner
@@ -59,8 +63,9 @@ tier order and the independence rules that already exist. Fable never builds, fi
    account. `budget_override` stays owner-only.
 
 ## 3a. Safety constraints (from spec review t-fcd07719)
-- **Claude usage source is unverified.** Find a real, readable source before building requirement 1 for Claude.
-  Until then Claude usage is `source: "inferred"` only, and inferred data never clears a limit.
+- **Claude usage source (verified, t-77a287f5).** Stream-json `rate_limit_event` (requirement 1). Only an account with
+  a running job reports fresh data; an idle account goes stale, and stale or inferred data never clears a limit. The
+  statusline is not used (unverified under `-p`).
 - **Shadow mode first.** Requirements 1–3 first run in shadow mode: they record what they would decide, and act
   only once the logged decisions match what the orchestrator would have done.
 - **Idempotent with recovery.** A move or re-queue is one compare-and-set on the task row

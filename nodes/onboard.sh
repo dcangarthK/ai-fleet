@@ -1311,6 +1311,7 @@ class Heartbeat:
         self.manager, self.token, self.report = manager, token, report
         self.interval, self.jitter = interval, jitter
         self.post = post or self._post
+        self.stop = threading.Event()  # set to end run_forever; also what the loop waits on between beats
 
     def ready(self):
         url = getattr(self.manager, "controller_url", None)
@@ -1340,8 +1341,7 @@ class Heartbeat:
         return max(1.0, self.interval + (secrets.randbelow(2001) / 1000.0 - 1.0) * self.jitter)
 
     def run_forever(self):
-        while True:
-            time.sleep(self.next_delay())
+        while not self.stop.wait(self.next_delay()):
             try:
                 self.beat()
             except Exception:  # a failing report must not end the thread: the next beat tries again

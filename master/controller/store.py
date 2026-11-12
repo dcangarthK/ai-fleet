@@ -131,6 +131,9 @@ def db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
+        # WAL: readers and the single writer don't block each other, so the poll loops, request handlers and
+        # tests sharing this file don't hit "database is locked". Persistent in the file; cheap to repeat.
+        conn.execute("PRAGMA journal_mode=WAL")
         with conn:
             yield conn
     finally:

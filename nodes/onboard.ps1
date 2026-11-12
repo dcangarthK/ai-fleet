@@ -532,6 +532,22 @@ def group_alive(pgid):
     return True
 
 
+def proc_start(pid):
+    """Start time of process `pid` as `ps` prints it (the identity that tells a pid from a reused one).
+    "" if no such process, None if it could not be determined or the platform has no `ps`."""
+    if not isinstance(pid, int) or pid <= 1 or os.name == "nt":
+        return None
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=3,
+                             env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = " ".join((out.stdout or "").split())
+    if text:
+        return text
+    return "" if out.returncode == 1 and not (out.stderr or "").strip() else None
+
+
 def boot_time():
     """Seconds since the epoch when this machine booted, or None if unknown."""
     try:
@@ -1633,9 +1649,32 @@ class JobManager:
 
     def _group_ok(self, job):
         """Only a job's own process group may be signalled: the pgid it was started with must still be its pid
-        (it is a session leader from start_new_session), so a reused pid can never aim a signal elsewhere."""
+        (it is a session leader from start_new_session), and whatever lives at that pid now must be the process
+        that was started: its start time must equal the one saved at launch. If the leader is gone, nothing
+        lives there to confuse (the kernel does not reuse a pid while its group exists). If the start time can't
+        be read, or the job has none saved while something lives at the pid, refuse."""
         pid = job.get("pid")
-        return isinstance(pid, int) and pid > 1 and job.get("pgid", pid) == pid
+        if not (isinstance(pid, int) and pid > 1 and job.get("pgid", pid) == pid):
+            return False
+        if os.name == "nt":
+            return True
+        live = proc_start(pid)
+        if live is None:
+            return False
+        return live == "" or live == job.get("pid_start")
+
+    def _old_group_alive(self, job):
+        """True when a stopped job's process group may still be running (resume and hand-off must wait)."""
+        if job.get("group_gone") is True:
+            return False
+        if self._group_ok(job):
+            # The wrapper writes the exit code just before it exits: give a normal exit a moment to finish.
+            return not self._wait_group_gone(job.get("pid"), 1.5)
+        return job.get("group_gone") is False  # identity unverifiable: believe the last report
+
+    def _refuse_if_group_alive(self, job):
+        if self._old_group_alive(job):
+            raise HttpError(409, "the job's old process group is still alive; stop it before resuming or handing off")
 
     @staticmethod
     def _wait_group_gone(pgid, seconds):
@@ -1687,16 +1726,18 @@ class JobManager:
             if job.get("state") != "running":
                 return
             pid = job.get("pid")
-            try:
-                self._kill_group(pid)
-            except (OSError, subprocess.SubprocessError) as exc:
-                self.audit("kill_failed", "%s: group kill failed: %s" % (job.get("id"), error_line(exc)))
-                if pid and os.name != "nt" and process_alive(pid):  # fall back to the single process
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except OSError as inner:
-                        self.audit("kill_failed", "%s: pid kill failed: %s" % (job.get("id"), error_line(inner)))
-            job["group_gone"] = self._group_ok(job) and self._wait_group_gone(pid, 2.0)
+            ok = self._group_ok(job)
+            if not ok:
+                self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
+            else:
+                try:
+                    self._kill_group(pid)
+                except ProcessLookupError:
+                    pass  # already gone
+                except (OSError, subprocess.SubprocessError) as exc:
+                    # No fallback to the bare pid: a failed group kill is when it may be someone else's process.
+                    self.audit("kill_failed", "%s: group kill failed: %s" % (job.get("id"), error_line(exc)))
+            job["group_gone"] = ok and self._wait_group_gone(pid, 2.0)
             if not job["group_gone"]:
                 self.audit("group_survived", "%s: process group %s is still alive after the timeout" % (job.get("id"), pid))
             self._parse_events_safe(job)
@@ -2080,6 +2121,7 @@ class JobManager:
             prompt_in.close()
         job["pid"] = process.pid
         job["pgid"] = process.pid  # a session leader (start_new_session): its group id is its pid
+        job["pid_start"] = proc_start(process.pid) or None  # identity for _group_ok (pid reuse)
         job["group_gone"] = None
         self._save(job)
         self._start_monitor(job, process)
@@ -2097,6 +2139,7 @@ class JobManager:
             self.refresh(job)
             if job["state"] == "running":
                 raise HttpError(409, "job is running")
+            self._refuse_if_group_alive(job)
             if not job.get("session_id") or job["agent"] == "ollama":
                 raise HttpError(409, "job has no resumable session")
             mode = body.get("mode") or job["mode"]
@@ -2185,6 +2228,7 @@ class JobManager:
             self.refresh(job)
             if job["state"] == "running":
                 raise HttpError(409, "job is running")
+            self._refuse_if_group_alive(job)
             cwd = job.get("cwd")
             if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
                 raise HttpError(409, "job has no worktree")

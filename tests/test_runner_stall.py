@@ -109,6 +109,8 @@ class Base(unittest.TestCase):
                "policy": {}, "state": "running", "pid": 999999, "exit_file": "exit_code", "cwd": str(self.code),
                "started_at": runner.now(), "run_started_at": runner.now(), "timeout_minutes": 120}
         job.update(kw)
+        if "pid_start" not in kw:  # as _launch records it
+            job["pid_start"] = runner.proc_start(job["pid"]) or None
         (self.fleet / "jobs" / job_id).mkdir(parents=True, exist_ok=True)
         m.jobs[job_id] = job
         return job
@@ -220,18 +222,29 @@ class RootCause(Base):
             time.sleep(0.5)
         self.assertEqual(1, len([a for a in audits if a[0] == "monitor_error"]))
 
-    def test_timeout_falls_back_to_killing_the_pid_when_the_group_kill_fails(self):
+    def test_timeout_never_kills_a_bare_pid_when_the_group_kill_fails(self):
         m = self.manager()
-        job = self.add_job(m, pid=4242)
+        job = self.add_job(m, pid=4242, pgid=4242)
         audits = []
         with mock.patch.object(m, "_kill_group", side_effect=PermissionError("nope")), \
                 mock.patch.object(runner, "process_alive", return_value=True), \
+                mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(m, "_wait_group_gone", return_value=False), \
                 mock.patch.object(runner.os, "kill") as kill, \
                 mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
             m._timeout(job)
-        kill.assert_called_once_with(4242, runner.signal.SIGKILL)
+        kill.assert_not_called()
         self.assertIn("kill_failed", [a[0] for a in audits])
-        self.assertEqual(("exited", 124), (job["state"], job["exit_code"]))
+        self.assertEqual(("exited", 124, False), (job["state"], job["exit_code"], job["group_gone"]))
+
+    def test_timeout_does_not_signal_a_pid_that_is_not_the_recorded_leader(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=1111)
+        with mock.patch.object(m, "_kill_group") as kill, mock.patch.object(runner.os, "kill") as bare:
+            m._timeout(job)
+        kill.assert_not_called()
+        bare.assert_not_called()
+        self.assertEqual(("exited", 124, False), (job["state"], job["exit_code"], job["group_gone"]))
 
     def test_restart_with_a_poisoned_job_still_loads(self):
         m = self.manager()
@@ -464,3 +477,99 @@ class GroupGone(Base):
         job = self.add_job(m, pid=proc.pid, pgid=proc.pid)
         m._timeout(job)
         self.assertEqual(("exited", 124, True), (job["state"], job["exit_code"], job["group_gone"]))
+
+
+class PidReuse(Base):
+    """Review t-8fbffa45 finding 2: the saved identity (process start time) must match the live process."""
+
+    def test_proc_start_of_a_live_and_a_missing_process(self):
+        self.assertTrue(runner.proc_start(os.getpid()))
+        import subprocess
+        done = subprocess.Popen(["true"])
+        done.wait()  # reaped: its pid is free
+        self.assertEqual("", runner.proc_start(done.pid))
+
+    def test_group_ok_needs_the_saved_start_to_match_the_live_process(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242, pid_start="Mon Jan  1 00:00:00 2024")
+        with mock.patch.object(runner, "proc_start", return_value="Tue Feb  2 00:00:00 2025"):
+            self.assertFalse(m._group_ok(job))
+        with mock.patch.object(runner, "proc_start", return_value="Mon Jan  1 00:00:00 2024"):
+            self.assertTrue(m._group_ok(job))
+        with mock.patch.object(runner, "proc_start", return_value=""):  # leader gone: nothing to confuse
+            self.assertTrue(m._group_ok(job))
+        with mock.patch.object(runner, "proc_start", return_value=None):  # could not tell: refuse
+            self.assertFalse(m._group_ok(job))
+
+    def test_a_job_without_a_saved_start_is_refused_while_something_lives_at_its_pid(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242)
+        with mock.patch.object(runner, "proc_start", return_value="Mon Jan  1 00:00:00 2024"):
+            self.assertFalse(m._group_ok(job))
+
+    def test_a_reused_pid_is_never_signalled(self):
+        m = self.manager()
+        job = self.add_job(m, pid=os.getpid(), pgid=os.getpid(), pid_start="Mon Jan  1 00:00:00 2000")
+        with mock.patch.object(m, "_kill_group") as kill:
+            public = m.cancel(job)
+        kill.assert_not_called()
+        self.assertIs(False, public["group_gone"])
+
+    def test_launch_records_the_start_time(self):
+        import subprocess
+        proc = subprocess.Popen(["sleep", "5"], start_new_session=True)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(runner.proc_start(proc.pid), runner.proc_start(proc.pid))
+        self.assertTrue(runner.proc_start(proc.pid))
+
+
+class OldGroupAlive(Base):
+    """Review t-8fbffa45 finding 3: no resume or hand-off while the old process group still lives."""
+
+    def stopped(self, m, **kw):
+        return self.add_job(m, pid=4242, pgid=4242, state="cancelled", group_gone=False, **kw)
+
+    def test_message_refuses_while_the_old_group_is_alive(self):
+        m = self.manager()
+        job = self.stopped(m)
+        with mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(runner, "proc_start", return_value=""), \
+                mock.patch.object(m, "_launch") as launch:
+            with self.assertRaises(runner.HttpError) as caught:
+                m.message(job, {"text": "go on"})
+        self.assertEqual(409, caught.exception.status)
+        self.assertIn("process group", str(caught.exception))
+        launch.assert_not_called()
+        self.assertEqual("cancelled", job["state"])
+
+    def test_message_refuses_when_group_gone_is_false_and_identity_is_unverifiable(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=1111, state="cancelled", group_gone=False)
+        with mock.patch.object(m, "_launch") as launch:
+            with self.assertRaises(runner.HttpError) as caught:
+                m.message(job, {"text": "go on"})
+        self.assertEqual(409, caught.exception.status)
+        launch.assert_not_called()
+
+    def test_message_allowed_when_the_group_is_gone(self):
+        m = self.manager()
+        job = self.stopped(m)
+        with mock.patch.object(runner, "group_alive", return_value=False), \
+                mock.patch.object(runner, "proc_start", return_value=""), \
+                mock.patch.object(m, "_launch") as launch:
+            m.message(job, {"text": "go on"})
+        launch.assert_called_once()
+        self.assertEqual(2, job["runs"])
+
+    def test_checkpoint_refuses_while_the_old_group_is_alive(self):
+        m = self.manager()
+        job = self.stopped(m, worktree=True, branch="fleet/j-1")
+        with mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(runner, "proc_start", return_value=""), \
+                mock.patch.object(runner.subprocess, "run") as run:
+            with self.assertRaises(runner.HttpError) as caught:
+                m.checkpoint(job, {})
+        self.assertEqual(409, caught.exception.status)
+        self.assertIn("process group", str(caught.exception))
+        run.assert_not_called()

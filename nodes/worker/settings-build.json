@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 nodes/worker/quiet_bash.py"
+            "command": "python3 {{QUIET_BASH}}"
           }
         ]
       }

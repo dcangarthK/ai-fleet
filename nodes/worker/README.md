@@ -1,14 +1,23 @@
 # Lean worker profile (Part H req 1, 5, 9)
 
-Files here are inert until the runner wires them in. Per kind, add these arguments to `claude -p`:
+Files here are inert until the runner wires them in. Per kind, launch `claude -p` with:
 
-    --settings nodes/worker/settings-<kind>.json \
-    --strict-mcp-config --mcp-config nodes/worker/mcp-empty.json \
+    <LAUNCH_ARGS from profile.py> \
+    --settings <rendered settings-<kind>.json> \
+    --mcp-config nodes/worker/mcp-empty.json \
     --allowedTools <tools> --model <model> --effort <effort>
 
-Set `FLEET_JOB_DIR=<job dir>` in the worker env so `quiet_bash.py` saves full test output there.
-The hook command in the settings files is `python3 nodes/worker/quiet_bash.py`; the runner must run it with the
-repo root as cwd, or substitute the absolute path.
+`LAUNCH_ARGS` = `--setting-sources project --strict-mcp-config --disable-slash-commands`. Without
+`--setting-sources` omitting `user`, an empty `enabledPlugins` merges with ~/.claude/settings.json and the user's
+plugins, skills and hooks still load. (Flags checked in `claude --help` only; that omitting `user` also stops
+user-installed plugins is UNVERIFIED by a live run.)
+
+Hook path: the settings files hold `python3 {{QUIET_BASH}}`. The runner must write a rendered copy
+(`profile.render_settings(text, <absolute path of quiet_bash.py>)`) into the job dir and pass that to `--settings`;
+never pass the raw file (the placeholder is not a path, and a relative path breaks when cwd is a worktree).
+
+Set `FLEET_JOB_DIR=<job dir>` in the worker env so `quiet_bash.py` saves full test output there (else it uses a
+fresh private temp dir).
 
 | kind | settings file | --allowedTools | model | effort |
 |---|---|---|---|---|
@@ -24,3 +33,10 @@ Idle features (req 9) set in the files: `promptSuggestionEnabled`, `autoDreamEna
 `spinnerTipsEnabled`, `autoMemoryEnabled` all false, and `env.CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0`. These names
 were found in the installed Claude Code 2.1.322 binary. The cross-session inbound `hold` setting could not be
 verified there, so it is not set.
+
+## quiet_bash (req 5)
+Test runs (`python3 -m unittest`, `scripts/gate.sh`, `vitest`) are summarised only when they are the start of the
+command or of a segment after `&&`, `||`, `;` or `|`; `grep vitest` or a commit message mentioning them pass
+through. Bare `git log` gets `-n 30`; `git diff` without a path output is piped through `head -n 300` with a
+`truncated, full: <path>` line. Each output line is capped at 500 chars. Hook replies carry `updatedInput` only,
+no `permissionDecision`, so normal permission rules still decide.

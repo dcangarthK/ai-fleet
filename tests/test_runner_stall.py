@@ -489,6 +489,32 @@ class PidReuse(Base):
         done.wait()  # reaped: its pid is free
         self.assertEqual("", runner.proc_start(done.pid))
 
+    def test_proc_start_nonzero_exit_or_empty_output_means_gone(self):
+        for rc, out, err in ((1, "", ""), (1, "ps: error\n", "ps: no such process"), (0, "", ""), (2, "junk", "")):
+            done = mock.Mock(returncode=rc, stdout=out, stderr=err)
+            with mock.patch.object(runner.subprocess, "run", return_value=done), \
+                    mock.patch.object(runner.os, "name", "posix"):
+                self.assertEqual("", runner.proc_start(4242), (rc, out))
+
+    def test_proc_start_windows_reads_creation_time_and_refuses_when_unreadable(self):
+        ok = mock.Mock(returncode=0, stdout="2024-01-01T00:00:00.0000000Z\r\n", stderr="")
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(runner.subprocess, "run", return_value=ok):
+            self.assertEqual("2024-01-01T00:00:00.0000000Z", runner.proc_start(4242))
+        with mock.patch.object(runner.os, "name", "nt"), \
+                mock.patch.object(runner.subprocess, "run", side_effect=OSError("no powershell")):
+            self.assertIsNone(runner.proc_start(4242))
+
+    def test_windows_group_ok_uses_the_creation_time(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242, pid_start="2024-01-01T00:00:00.0000000Z")
+        with mock.patch.object(runner.os, "name", "nt"):
+            with mock.patch.object(runner, "proc_start", return_value="2025-01-01T00:00:00.0000000Z"):
+                self.assertFalse(m._group_ok(job))
+            with mock.patch.object(runner, "proc_start", return_value="2024-01-01T00:00:00.0000000Z"):
+                self.assertTrue(m._group_ok(job))
+            with mock.patch.object(runner, "proc_start", return_value=None):
+                self.assertFalse(m._group_ok(job))
+
     def test_group_ok_needs_the_saved_start_to_match_the_live_process(self):
         m = self.manager()
         job = self.add_job(m, pid=4242, pgid=4242, pid_start="Mon Jan  1 00:00:00 2024")
@@ -551,6 +577,43 @@ class OldGroupAlive(Base):
                 m.message(job, {"text": "go on"})
         self.assertEqual(409, caught.exception.status)
         launch.assert_not_called()
+
+    def test_unverifiable_identity_with_unknown_group_gone_fails_closed(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=1111, state="cancelled", group_gone=None)
+        self.assertTrue(m._old_group_alive(job))
+        lost = self.add_job(m, "j-2", pid=4242, pgid=1111, state="lost", group_gone=None)
+        self.assertFalse(m._old_group_alive(lost))
+
+    def test_group_wait_runs_outside_the_manager_lock(self):
+        import threading
+        m = self.manager()
+        for call in (lambda j: m.message(j, {"text": "go on"}), lambda j: m.checkpoint(j, {})):
+            job = self.stopped(m, worktree=True, branch="fleet/j-1")
+            held = []
+
+            def probe(pgid, seconds):
+                box = []
+
+                def grab():
+                    got = m.lock.acquire(timeout=0.2)
+                    box.append(got)
+                    if got:
+                        m.lock.release()
+
+                t = threading.Thread(target=grab)
+                t.start()
+                t.join()
+                held.append(bool(box and box[0]))
+                return False
+
+            with mock.patch.object(runner, "proc_start", return_value=""), \
+                    mock.patch.object(runner.JobManager, "_wait_group_gone", staticmethod(probe)), \
+                    mock.patch.object(runner, "group_alive", return_value=True):
+                with self.assertRaises(runner.HttpError):
+                    call(job)
+            self.assertTrue(held)
+            self.assertTrue(all(held), "group wait ran while holding the lock")
 
     def test_message_allowed_when_the_group_is_gone(self):
         m = self.manager()

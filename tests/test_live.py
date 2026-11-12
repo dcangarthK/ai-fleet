@@ -354,6 +354,16 @@ class PresenceTests(LiveBase):
         self.assertFalse(s["stale"])
         self.assertIsNone(s["stale_since"])
 
+    def test_saved_sessions_older_than_a_day_are_dropped_on_load(self):
+        self.c.get("/api/fleet", headers=self.H)
+        with db() as c:
+            c.execute("INSERT INTO presence (session, model, account_label, last_seen) VALUES ('old-1', 'm', NULL, ?)",
+                      (time.time() - 25 * 3600,))
+        self.restart()
+        self.assertEqual([s["session"] for s in self.live()["orchestrator"]], ["orch-1"])
+        with db() as c:
+            self.assertIsNone(c.execute("SELECT 1 FROM presence WHERE session='old-1'").fetchone())
+
     def test_restored_presence_is_not_refreshed_by_other_sessions(self):
         self.c.get("/api/fleet", headers=self.H)
         self.restart()

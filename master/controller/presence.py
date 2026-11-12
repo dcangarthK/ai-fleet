@@ -14,6 +14,7 @@ from store import db
 VALUE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 MAX_SESSIONS = 20
 STALE_SECONDS = 15 * 60
+FORGET_SECONDS = 24 * 3600  # a saved session not seen for this long is dropped on load, not shown stale
 WRITE_EVERY = 60.0  # seconds: a plain refresh within this of the last saved one is not written again
 
 SESSIONS: dict[str, dict] = {}
@@ -53,6 +54,7 @@ def _load() -> None:
     _loaded = True
     try:
         with db() as c:
+            c.execute("DELETE FROM presence WHERE last_seen < ?", (time.time() - FORGET_SECONDS,))
             rows = c.execute("SELECT session, model, account_label, last_seen FROM presence "
                              "ORDER BY last_seen DESC LIMIT ?", (MAX_SESSIONS,)).fetchall()
     except Exception as exc:  # presence is informational: start empty

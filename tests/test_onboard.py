@@ -133,6 +133,14 @@ class ScriptsParse(OnboardHarness):
         self.assertLess(main.index("Ensure-TailscaleConnection"), main.index("Invoke-RestMethod"))
         self.assertLess(main.index("Invoke-RestMethod"), main.index("Ensure-WorkerTag"))
 
+    def test_windows_enroll_code_has_a_prompt_and_a_file_and_warns_on_argv(self):
+        ps1 = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertIn("[switch]$EnrollPrompt", ps1)
+        self.assertIn("Read-Host -AsSecureString", ps1)
+        self.assertIn("[string]$EnrollFile", ps1)
+        self.assertRegex(ps1, r"Write-Warning \"The enrollment code was passed on the command line")
+        self.assertNotIn("code = $Enroll;", ps1)
+
     def test_dmr_smoke_check_is_read_only_and_rejects_non_loopback_listener(self):
         script = ROOT / "nodes" / "check_dmr.sh"
         text = script.read_text()
@@ -673,6 +681,11 @@ class TailnetPolicy(unittest.TestCase):
         self.assertTrue(any("tag:llm-node:11436" in t.get("deny", []) for t in node_tests))
         grants = [g for g in policy["grants"] if "tag:llm-node" in g["src"] and "tag:master" in g["dst"]]
         self.assertEqual([["tcp:8443"]], [g["ip"] for g in grants])
+        denied = {d for t in node_tests for d in t.get("deny", [])}
+        for port in (11435, 8000, 22):
+            self.assertIn(f"tag:llm-node:{port}", denied)
+        self.assertEqual([], [g for g in policy["grants"] if "tag:llm-node" in g["src"] and "tag:llm-node" in g["dst"]],
+                         "no grant lets a worker reach a worker")
 
 
 class MasterTailscaleTag(OnboardHarness):

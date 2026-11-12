@@ -209,7 +209,12 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     offline = runner_offline(node)
     if offline:
         return offline
-    if not (node["runner"].get("agents") or {}).get(agent):
+    dmr = agent == "ollama" and engine == "dmr"
+    dmr_status = (node["runner"].get("engines") or {}).get("dmr") or {}
+    if dmr:  # DMR is reported only under engines, never as the ollama agent
+        if dmr_status.get("reachable") is not True:
+            return "no dmr engine on this node"
+    elif not (node["runner"].get("agents") or {}).get(agent):
         return f"no {agent} on this node"
     power = node["runner"].get("power") or {}
     if (agent in ("claude", "codex") and power.get("on_battery") is True and power.get("ok") is False):
@@ -218,9 +223,12 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     if agent == "ollama":
         if engine not in ("ollama", "dmr"):
             return f"unknown engine {engine}"
-        reported = ((node["runner"].get("engines") or {}).get(engine) or {}).get("models")
-        engine_models = {item.get("reference") for item in reported or [] if isinstance(item, dict)}
-        if model not in (engine_models or set(node["models"])):
+        if engine == "dmr":
+            engine_models = {item.get("reference") for item in dmr_status.get("models") or [] if isinstance(item, dict)}
+            available = engine_models
+        else:  # only the ollama engine may use the node's ollama model list
+            available = set(node["models"])
+        if model not in available:
             return f"model {model} not on this node's {engine} engine"
     runner = node["runner"]
     if (gate and str(runner.get("version")) == "2"

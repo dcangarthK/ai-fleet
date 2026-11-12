@@ -5,8 +5,13 @@
 #   .\onboard.ps1 -AllowRoot C:\code -AllowRoot D:\repos
 #   .\onboard.ps1 -ScanOnly                    just rescan and republish (runs hourly after onboarding)
 param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(),
-      [string]$FleetDir = "", [string]$Enroll = "", [string]$Master = "")
+      [string]$FleetDir = "", [string]$Enroll = "", [string]$EnrollFile = "", [switch]$EnrollPrompt,
+      [string]$Master = "")
 $ErrorActionPreference = "Stop"
+# Prefer -EnrollPrompt (asks, input hidden) or -EnrollFile PATH: a code given as -Enroll VALUE stays in the
+# process command line and PowerShell history.
+$EnrollRequested = [bool]($Enroll -or $EnrollFile -or $EnrollPrompt)
+$EnrollCode = ""
 $AllowRootsSet = $PSBoundParameters.ContainsKey("AllowRoot")
 if (-not $FleetDir) { $FleetDir = if ($env:FLEET_DIR) { $env:FLEET_DIR } else { Join-Path $env:ProgramData "ai-fleet" } }
 $InfoPort = 11435
@@ -39,7 +44,7 @@ function Ensure-TailscaleConnection {
     winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
   }
   $status = try { (& $TS status --json) | ConvertFrom-Json } catch { $null }
-  if ($Enroll -and $null -ne $status -and @($status.Self.Tags) -contains "tag:llm-node") {
+  if ($EnrollRequested -and $null -ne $status -and @($status.Self.Tags) -contains "tag:llm-node") {
     throw "This machine is already tagged tag:llm-node; remove the tag before enrollment so it can reach the master."
   }
   if ($null -eq $status -or $status.BackendState -ne "Running") {
@@ -310,6 +315,19 @@ def loopback_base_url(value):
     return value.rstrip("/")
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.URLError(f"redirect refused ({code}); engine requests must stay on loopback")
+
+
+# No proxies (HTTP(S)_PROXY must not carry a prompt off-host) and no redirects.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirect)
+
+
+def loopback_urlopen(request, timeout=None):
+    return _LOOPBACK_OPENER.open(request, timeout=timeout)
+
+
 def parse_docker_model_ls(output):
     """Parse Docker's JSON-lines model list; malformed rows are contained and unknown fields stay null."""
     models = []
@@ -347,12 +365,13 @@ class OpenAIEngine:
         self.docker_run = docker_run or run_capped
         self._catalog = {"engine": "dmr", "reachable": None, "models": [], "error": None, "checked_at": None}
         self.lock = threading.Lock()
+        self.refreshed_at = None
 
     def request(self, method, path, body=None, timeout=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(self.base_url + path, data=data,
                                          headers={"Content-Type": "application/json"}, method=method)
-        with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+        with loopback_urlopen(request, timeout=timeout or self.timeout) as response:
             return json.load(response)
 
     def refresh(self):
@@ -367,8 +386,10 @@ class OpenAIEngine:
                 if isinstance(reference, str) and reference:
                     models.append({"engine": "dmr", "reference": reference, "digest": None,
                                    "size": None, "warm": "unknown", "warm_source": None})
-            cli_models = parse_docker_model_ls(
-                self.docker_run(["docker", "model", "ls"], timeout=3))
+            try:  # the CLI is optional: its failure must not discard a good /models catalog
+                cli_models = parse_docker_model_ls(self.docker_run(["docker", "model", "ls"], timeout=3))
+            except Exception:
+                cli_models = []
             known = {item["reference"] for item in models}
             models.extend(item for item in cli_models if item["reference"] not in known)
             value = {"engine": "dmr", "reachable": True, "models": models,
@@ -378,7 +399,12 @@ class OpenAIEngine:
                      "error": trim(str(exc), 300), "checked_at": now()}
         with self.lock:
             self._catalog = value
+            self.refreshed_at = time.monotonic()
         return value
+
+    def age(self):
+        """Seconds since the last refresh, or None if it never ran."""
+        return None if self.refreshed_at is None else time.monotonic() - self.refreshed_at
 
     def snapshot(self):
         with self.lock:
@@ -1542,7 +1568,10 @@ class JobManager:
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if agent == "ollama" and engine == "dmr":
-            catalog = self.engine_adapters["dmr"].refresh()
+            adapter = self.engine_adapters["dmr"]
+            catalog = adapter.snapshot()
+            if adapter.age() is None or adapter.age() >= 10:  # reuse a fresh snapshot instead of a probe per submit
+                catalog = adapter.refresh()
             if not catalog["reachable"]:
                 raise HttpError(503, "dmr engine is unreachable")
             if body.get("model") not in {item["reference"] for item in catalog["models"]}:
@@ -2588,8 +2617,6 @@ def health_report(manager):
     agents = find_agents(manager.ollama_url, ollama_up=ollama_up)
     engine_health = (manager.engine_catalog(refresh=False)
                      if callable(getattr(manager, "engine_catalog", None)) else {})
-    if engine_health.get("dmr", {}).get("reachable") is True and getattr(manager, "engine_adapters", None):
-        agents["ollama"] = manager.engine_adapters["dmr"].base_url
     manager.agents = agents
     running = 0
     active_dmr = set()
@@ -2665,10 +2692,11 @@ def openai_worker(request_path):
     messages.append({"role": "user", "content": request_data.get("prompt", "")})
     payload = json.dumps({"model": request_data.get("model"), "messages": messages,
                           "stream": False}).encode("utf-8")
-    request = urllib.request.Request(request_data.get("url", "").rstrip("/") + "/chat/completions",
-                                     data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=900) as response:
+        base = loopback_base_url(request_data.get("url", ""))
+        request = urllib.request.Request(base + "/chat/completions",
+                                         data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with loopback_urlopen(request, timeout=900) as response:
             body = json.load(response)
         choices = body.get("choices") if isinstance(body, dict) else None
         text = ((choices[0].get("message") or {}).get("content")
@@ -2853,7 +2881,7 @@ if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
   if ($token) {
     $script:RunnerTokenValue = $token
     $nodeName = $env:COMPUTERNAME.ToLower()
-    if (-not $Enroll) {
+    if (-not $EnrollRequested) {
       Write-Host "Runner token (shown once). On the master run: printf '%s\n' '$token' | uv run --script master/controller/controller.py runner-token set '$nodeName'"
     }
   } else {
@@ -2867,6 +2895,20 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $admin) { Write-Host "Run this in an elevated PowerShell (Run as administrator)."; exit 1 }
 if (-not (Have winget)) { Write-Host "winget is required (App Installer from the Microsoft Store)."; exit 1 }
 
+if ($EnrollRequested) {  # resolve the code first: a bad file or no terminal stops before anything changes
+  if (-not $Master) { throw "-Master is required with -Enroll, -EnrollFile or -EnrollPrompt" }
+  if ($EnrollFile) {
+    if (-not (Test-Path -LiteralPath $EnrollFile)) { throw "-EnrollFile $EnrollFile: no such file" }
+    $EnrollCode = (Get-Content -LiteralPath $EnrollFile -Raw).Trim()
+  } elseif ($EnrollPrompt) {
+    $secure = Read-Host -AsSecureString "Console enrollment code"
+    $EnrollCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
+  } else {
+    Write-Warning "The enrollment code was passed on the command line, so it is visible in the process list and PowerShell history. Next time use -EnrollPrompt or -EnrollFile PATH."
+    $EnrollCode = $Enroll
+  }
+  if (-not $EnrollCode) { throw "The enrollment code is empty" }
+}
 Say "AI fleet onboarding: $env:COMPUTERNAME, Windows, $(RamGB)GB RAM, $(GpuGB)GB GPU"
 Ensure-TailscaleConnection
 $ip = TailnetIp
@@ -2876,12 +2918,12 @@ Say "Scanning for LLMs, engines and agents"
 Scan $ip
 Install-Services $ip
 Install-Runner $ip
-if ($Enroll) {
-  if (-not $Master) { throw "-Master is required with -Enroll" }
+if ($EnrollRequested) {
   if (-not $RunnerTokenValue) { throw "Runner token was not created; enrollment cannot complete" }
-  $body = @{ code = $Enroll; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
+  $body = @{ code = $EnrollCode; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
   Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd('/') + "/api/enroll/complete") -ContentType "application/json" -Body $body | Out-Null
   $RunnerTokenValue = ""
+  $EnrollCode = ""
   Write-Host "Enrollment completed; approve this pending node in the console."
 }
 Ensure-WorkerTag

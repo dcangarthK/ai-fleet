@@ -84,6 +84,19 @@ def loopback_base_url(value):
     return value.rstrip("/")
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.URLError(f"redirect refused ({code}); engine requests must stay on loopback")
+
+
+# No proxies (HTTP(S)_PROXY must not carry a prompt off-host) and no redirects.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirect)
+
+
+def loopback_urlopen(request, timeout=None):
+    return _LOOPBACK_OPENER.open(request, timeout=timeout)
+
+
 def parse_docker_model_ls(output):
     """Parse Docker's JSON-lines model list; malformed rows are contained and unknown fields stay null."""
     models = []
@@ -121,12 +134,13 @@ class OpenAIEngine:
         self.docker_run = docker_run or run_capped
         self._catalog = {"engine": "dmr", "reachable": None, "models": [], "error": None, "checked_at": None}
         self.lock = threading.Lock()
+        self.refreshed_at = None
 
     def request(self, method, path, body=None, timeout=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(self.base_url + path, data=data,
                                          headers={"Content-Type": "application/json"}, method=method)
-        with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+        with loopback_urlopen(request, timeout=timeout or self.timeout) as response:
             return json.load(response)
 
     def refresh(self):
@@ -141,8 +155,10 @@ class OpenAIEngine:
                 if isinstance(reference, str) and reference:
                     models.append({"engine": "dmr", "reference": reference, "digest": None,
                                    "size": None, "warm": "unknown", "warm_source": None})
-            cli_models = parse_docker_model_ls(
-                self.docker_run(["docker", "model", "ls"], timeout=3))
+            try:  # the CLI is optional: its failure must not discard a good /models catalog
+                cli_models = parse_docker_model_ls(self.docker_run(["docker", "model", "ls"], timeout=3))
+            except Exception:
+                cli_models = []
             known = {item["reference"] for item in models}
             models.extend(item for item in cli_models if item["reference"] not in known)
             value = {"engine": "dmr", "reachable": True, "models": models,
@@ -152,7 +168,12 @@ class OpenAIEngine:
                      "error": trim(str(exc), 300), "checked_at": now()}
         with self.lock:
             self._catalog = value
+            self.refreshed_at = time.monotonic()
         return value
+
+    def age(self):
+        """Seconds since the last refresh, or None if it never ran."""
+        return None if self.refreshed_at is None else time.monotonic() - self.refreshed_at
 
     def snapshot(self):
         with self.lock:
@@ -1316,7 +1337,10 @@ class JobManager:
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if agent == "ollama" and engine == "dmr":
-            catalog = self.engine_adapters["dmr"].refresh()
+            adapter = self.engine_adapters["dmr"]
+            catalog = adapter.snapshot()
+            if adapter.age() is None or adapter.age() >= 10:  # reuse a fresh snapshot instead of a probe per submit
+                catalog = adapter.refresh()
             if not catalog["reachable"]:
                 raise HttpError(503, "dmr engine is unreachable")
             if body.get("model") not in {item["reference"] for item in catalog["models"]}:
@@ -2362,8 +2386,6 @@ def health_report(manager):
     agents = find_agents(manager.ollama_url, ollama_up=ollama_up)
     engine_health = (manager.engine_catalog(refresh=False)
                      if callable(getattr(manager, "engine_catalog", None)) else {})
-    if engine_health.get("dmr", {}).get("reachable") is True and getattr(manager, "engine_adapters", None):
-        agents["ollama"] = manager.engine_adapters["dmr"].base_url
     manager.agents = agents
     running = 0
     active_dmr = set()
@@ -2439,10 +2461,11 @@ def openai_worker(request_path):
     messages.append({"role": "user", "content": request_data.get("prompt", "")})
     payload = json.dumps({"model": request_data.get("model"), "messages": messages,
                           "stream": False}).encode("utf-8")
-    request = urllib.request.Request(request_data.get("url", "").rstrip("/") + "/chat/completions",
-                                     data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=900) as response:
+        base = loopback_base_url(request_data.get("url", ""))
+        request = urllib.request.Request(base + "/chat/completions",
+                                         data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with loopback_urlopen(request, timeout=900) as response:
             body = json.load(response)
         choices = body.get("choices") if isinstance(body, dict) else None
         text = ((choices[0].get("message") or {}).get("content")

@@ -59,7 +59,7 @@ class EngineAdapterTests(unittest.TestCase):
     def setUp(self):
         FakeOpenAIEngine.calls = []
         FakeOpenAIEngine.use_fixture = False
-        mocked = patch.object(runner.urllib.request, "urlopen", FakeOpenAIEngine.urlopen)
+        mocked = patch.object(runner, "loopback_urlopen", FakeOpenAIEngine.urlopen)
         mocked.start()
         self.addCleanup(mocked.stop)
 
@@ -142,6 +142,99 @@ class EngineAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.HttpError, "unknown engine"):
             manager.create(body)
 
+    def test_dmr_does_not_make_the_ollama_agent_available(self):
+        manager = self.manager({"engines": {"dmr": {"enabled": True, "base_url": self.base_url}}})
+        manager.engine_catalog()
+        with patch.object(runner, "find_agents", lambda *_a, **_k: {"claude": None, "codex": None, "ollama": None}):
+            report = runner.health_report(manager)
+        self.assertIsNone(report["agents"]["ollama"])
+        self.assertTrue(report["engines"]["dmr"]["reachable"])
+
+    def test_docker_cli_failure_keeps_the_http_catalog(self):
+        manager = self.manager({"engines": {"dmr": {"enabled": True, "base_url": self.base_url}}})
+
+        def broken(*_args, **_kwargs):
+            raise OSError("docker exploded")
+        for adapter in manager.engine_adapters.values():
+            adapter.docker_run = broken
+        catalog = manager.engine_catalog()["dmr"]
+        self.assertTrue(catalog["reachable"])
+        self.assertEqual(["ai/qwen3:latest", "shared-name"], [m["reference"] for m in catalog["models"]])
+
+    def test_job_submit_reuses_a_fresh_catalog_snapshot(self):
+        manager = self.manager({"engines": {"dmr": {"enabled": True, "base_url": self.base_url}}})
+        manager.engine_catalog()  # refresh once
+        FakeOpenAIEngine.calls = []
+        manager._launch = lambda *_args: None
+        body = {"id": "j1", "agent": "ollama", "engine": "dmr", "model": "ai/qwen3:latest", "prompt": "x",
+                "mode": "read-only", "repo": None, "worktree": False, "cwd": None, "gate": None,
+                "allowed_tools": [], "resume_session": None}
+        manager.create(body)
+        self.assertEqual([], [c for c in FakeOpenAIEngine.calls if c[1].endswith("/models")], "no second refresh")
+
+    def test_worker_refuses_a_non_loopback_url(self):
+        path = Path(tempfile.mkdtemp()) / "request.json"
+        path.write_text(json.dumps({"url": "http://192.168.1.2:12434/engines/v1", "model": "m", "prompt": "secret"}))
+        with patch("builtins.print") as output:
+            self.assertEqual(1, runner.openai_worker(str(path)))
+        self.assertIn("loopback", output.call_args.args[0])
+        self.assertEqual([], FakeOpenAIEngine.calls)
+
+
+class RedirectAndProxyTests(unittest.TestCase):
+    """Real sockets, no patching: the opener must not follow a redirect or use a proxy."""
+
+    def test_redirect_is_refused_and_target_never_sees_the_prompt(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        seen = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                self.send_response(200); self.end_headers(); self.wfile.write(b"{}")
+
+            def log_message(self, *_a):
+                pass
+        target = HTTPServer(("127.0.0.1", 0), Target)
+
+        class Bouncer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(307)
+                self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/steal")
+                self.end_headers()
+
+            def log_message(self, *_a):
+                pass
+        bouncer = HTTPServer(("127.0.0.1", 0), Bouncer)
+        for server in (target, bouncer):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        engine = runner.OpenAIEngine(f"http://127.0.0.1:{bouncer.server_address[1]}/v1")
+        with self.assertRaisesRegex(Exception, "redirect refused"):
+            engine.request("POST", "/chat/completions", {"prompt": "secret"})
+        self.assertEqual([], seen)
+
+    def test_proxy_environment_is_ignored(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Echo(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"data": []}')
+
+            def log_message(self, *_a):
+                pass
+        server = HTTPServer(("127.0.0.1", 0), Echo)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # A dead proxy: a client that honoured it would fail instead of reaching the loopback server.
+        with patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9",
+                                     "no_proxy": "", "NO_PROXY": ""}):
+            engine = runner.OpenAIEngine(f"http://127.0.0.1:{server.server_address[1]}/v1")
+            self.assertEqual({"data": []}, engine.request("GET", "/models"))
 
 if __name__ == "__main__":
     unittest.main()

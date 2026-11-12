@@ -290,7 +290,42 @@ class ControllerTests(unittest.TestCase):
             c.execute("DELETE FROM node_models WHERE catalog_id=?", (catalog_id,))
             c.execute("DELETE FROM model_catalog WHERE id=?", (catalog_id,))
 
+    def report_dmr(self, references):
+        """Make the fake runner report a reachable DMR engine with these models, and clean up afterwards."""
+        previous = FakeRunner.health_extra
+        FakeRunner.health_extra = {"engines": {"dmr": {"engine": "dmr", "reachable": True, "models": [
+            {"engine": "dmr", "reference": ref, "warm": "unknown"} for ref in references]}}}
+
+        def restore():
+            FakeRunner.health_extra = previous
+            self.c.post("/api/refresh", headers=W)
+        self.addCleanup(restore)
+        self.c.post("/api/refresh", headers=W)
+        wait_for(lambda: ((next(n for n in self.c.get("/api/fleet").json()["nodes"] if n["id"] == "master")
+                           .get("runner") or {}).get("engines") or {}).get("dmr"))
+
+    def test_dmr_only_models_can_be_assigned_and_ollama_only_models_are_refused_on_dmr(self):
+        self.report_dmr(["ai/qwen3"])
+        added = self.c.post("/api/models", json={"reference": "ai/qwen3", "engine": "dmr"}, headers=W)
+        self.assertEqual(200, added.status_code, added.text)
+        self.addCleanup(self.drop_dmr_fixture_rows, added.json()["id"])
+        assigned = self.c.post("/api/roles", json={"role": "dmr-test", "node": "master", "model": "ai/qwen3",
+                                                     "catalog_id": added.json()["id"]}, headers=W)
+        self.assertEqual(200, assigned.status_code, assigned.text)
+        # fake-model:1b is only on the ollama list: a dmr task naming it is refused
+        refused = self.c.post("/api/tasks", json={"agent": "ollama", "engine": "dmr", "model": "fake-model:1b",
+                                                    "prompt": "x", "mode": "read-only"}, headers=W)
+        self.assertEqual(409, refused.status_code, refused.text)
+        self.assertIn("dmr", refused.text)
+
+    def test_import_refuses_an_unknown_engine(self):
+        doc = self.c.get("/api/export").json()
+        doc["assignments"] = [{"role": "bad-engine", "node": "master", "model": "x", "engine": "surprise"}]
+        refused = self.c.post("/api/import", json=doc, headers=W)
+        self.assertEqual(400, refused.status_code, refused.text)
+
     def test_dmr_catalog_assignment_and_role_task_keep_engine_identity(self):
+        self.report_dmr(["fake-model:1b"])
         added = self.c.post("/api/models", json={"reference": "fake-model:1b", "engine": "dmr",
                                                   "display_name": "Fake DMR"}, headers=W)
         self.assertEqual(200, added.status_code, added.text)

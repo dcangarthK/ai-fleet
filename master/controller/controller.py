@@ -962,6 +962,10 @@ def _import_comparable(row: dict) -> dict:
 
 
 def _apply_import(document: dict, actor: str) -> None:
+    for section in ("assignments", "catalog"):  # refuse before anything is written
+        for row in document.get(section, []):
+            if isinstance(row, dict) and row.get("engine", "ollama") not in ("ollama", "dmr"):
+                raise HTTPException(400, f"unknown engine {row.get('engine')}")
     links = {row.get("name"): row.get("fallback") for row in document.get("roles", []) if isinstance(row, dict)}
     for start in links:
         seen, cursor = set(), start
@@ -2323,7 +2327,11 @@ async def assign(a: Assignment) -> dict:
                    if a.catalog_id else c.execute("SELECT * FROM model_catalog WHERE reference=?", (a.model,)).fetchone())
         model = catalog["reference"] if catalog else a.model
         engine = (catalog["engine"] or "ollama") if catalog else "ollama"
-        installed = model in json.loads(node["models"])
+        if engine == "dmr":  # DMR models come from the runner's engine report, not the ollama list
+            dmr_report = ((_json(node["runner"], {}) or {}).get("engines") or {}).get("dmr") or {}
+            installed = model in {m.get("reference") for m in dmr_report.get("models") or [] if isinstance(m, dict)}
+        else:
+            installed = model in json.loads(node["models"])
         if engine == "dmr" and not installed:
             raise HTTPException(400, f"{model} must be installed in DMR by the owner before assignment")
         if not installed and not a.ensure_model:
@@ -2336,7 +2344,8 @@ async def assign(a: Assignment) -> dict:
             raise HTTPException(400, "model settings need a catalog model (they're applied as a fleet-* derived model)")
         # What will actually be routed: the derived fleet-* model when there are settings, else the base model.
         routed_name = ("fleet-" + catalog_id) if params else model
-        installed = installed and routed_name in json.loads(node["models"])
+        if engine != "dmr":  # a dmr model is routed by name through the runner, never as a fleet-* derived model
+            installed = installed and routed_name in json.loads(node["models"])
         if not installed and not a.ensure_model:
             raise HTTPException(400, f"{a.node} does not have {routed_name} yet; pass ensure_model to install it")
         state = "active" if installed else "pending_install"

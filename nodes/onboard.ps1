@@ -5,13 +5,8 @@
 #   .\onboard.ps1 -AllowRoot C:\code -AllowRoot D:\repos
 #   .\onboard.ps1 -ScanOnly                    just rescan and republish (runs hourly after onboarding)
 param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(),
-      [string]$FleetDir = "", [string]$Enroll = "", [string]$EnrollFile = "", [switch]$EnrollPrompt,
-      [string]$Master = "")
+      [string]$FleetDir = "", [string]$Enroll = "", [string]$Master = "")
 $ErrorActionPreference = "Stop"
-# Prefer -EnrollPrompt (asks, input hidden) or -EnrollFile PATH: a code given as -Enroll VALUE stays in the
-# process command line and PowerShell history.
-$EnrollRequested = [bool]($Enroll -or $EnrollFile -or $EnrollPrompt)
-$EnrollCode = ""
 $AllowRootsSet = $PSBoundParameters.ContainsKey("AllowRoot")
 if (-not $FleetDir) { $FleetDir = if ($env:FLEET_DIR) { $env:FLEET_DIR } else { Join-Path $env:ProgramData "ai-fleet" } }
 $InfoPort = 11435
@@ -38,28 +33,20 @@ $TS = "$env:ProgramFiles\Tailscale\tailscale.exe"
 $OllamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
 function TailnetIp { if (Test-Path $TS) { ((& $TS ip -4) | Select-Object -First 1).Trim() } else { "" } }
 
-function Ensure-TailscaleConnection {
+function Ensure-Tailscale {
   if (-not (Test-Path $TS)) {
     Say "Installing Tailscale"
     winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
   }
-  $status = try { (& $TS status --json) | ConvertFrom-Json } catch { $null }
-  if ($EnrollRequested -and $null -ne $status -and @($status.Self.Tags) -contains "tag:llm-node") {
-    throw "This machine is already tagged tag:llm-node; remove the tag before enrollment so it can reach the master."
-  }
-  if ($null -eq $status -or $status.BackendState -ne "Running") {
-    Say "Joining the tailnet (log in if a URL appears)"
-    & $TS up
-    if ($LASTEXITCODE -ne 0) { throw "Tailscale sign-in failed" }
-  }
-}
-
-function Ensure-WorkerTag {
-  $tags = try { @(((& $TS status --json) | ConvertFrom-Json).Self.Tags) } catch { @() }
+  $tags = try { ((& $TS status --json) | ConvertFrom-Json).Self.Tags } catch { @() }
   if (-not ($tags -contains "tag:llm-node")) {
-    Say "Advertising tag:llm-node after enrollment"
-    & $TS set --advertise-tags=tag:llm-node
-    if ($LASTEXITCODE -ne 0) { throw "Could not advertise tag:llm-node" }
+    Say "Joining the tailnet as tag:llm-node (log in if a URL appears)"
+    # No --reset: keep the machine's existing Tailscale settings (routes, DNS, exit node).
+    & $TS up --advertise-tags=tag:llm-node
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Tailscale wants existing non-default flags repeated. Run the command it suggests above, keeping --advertise-tags=tag:llm-node, then re-run."
+      exit 1
+    }
   }
 }
 
@@ -297,7 +284,7 @@ PUBLIC_JOB_KEYS = (
     "id", "agent", "engine", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
     "gate", "runs", "instructions", "policy_hash", "usage", "num_turns", "limits_applied", "error",
-    "profile", "account_label",
+    "profile", "account_label", "group_gone",
 )
 
 DMR_DEFAULT_URL = "http://127.0.0.1:12434/engines/v1"
@@ -526,6 +513,25 @@ def process_alive(pid):
         return False
 
 
+def group_alive(pgid):
+    """Whether any process is still in the process group `pgid` (the whole group, not just its leader).
+    POSIX: killpg(pgid, 0). ProcessLookupError means the group is gone; a permission error means it exists.
+    Windows has no process groups to probe, so it falls back to the single process."""
+    if not isinstance(pgid, int) or pgid <= 1:
+        return False
+    if os.name == "nt":
+        return process_alive(pgid)
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True  # unknown: never claim a group is gone on a doubtful answer
+    return True
+
+
 def boot_time():
     """Seconds since the epoch when this machine booted, or None if unknown."""
     try:
@@ -552,6 +558,81 @@ def started_epoch(job):
         return datetime.datetime.fromisoformat(job.get("run_started_at") or job["started_at"]).timestamp()
     except (KeyError, TypeError, ValueError):
         return None
+
+
+SCAN_CAP = 20000
+SCAN_INTERVAL = 60
+CPU_GROWTH_MIN = 0.5
+JOBS_REPORT_MAX = 32
+SCAN_SKIP = frozenset((".git", "node_modules", ".venv", "dist"))
+
+
+def parse_cpu_time(text):
+    """Seconds from a `ps -o time` value: MM:SS, MM:SS.ss, HH:MM:SS or D-HH:MM:SS. None if it is not one."""
+    if not isinstance(text, str):
+        return None
+    match = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", text.strip())
+    if not match:
+        return None
+    days, hours, minutes, seconds = match.groups()
+    return int(days or 0) * 86400 + int(hours or 0) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def group_cpu_map(run=None):
+    """{pgid: CPU seconds so far, summed over the group} for every process, from one `ps` call (no psutil).
+    None if unknown."""
+    if os.name == "nt":
+        return None
+    out = (run or run_capped)(["ps", "-A", "-o", "pgid=,time="])
+    if out is None:
+        return None
+    totals = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        seconds = parse_cpu_time(parts[1])
+        if seconds is not None:
+            totals[int(parts[0])] = totals.get(int(parts[0]), 0.0) + seconds
+    return totals
+
+
+def group_cpu_seconds(pgid, run=None):
+    """CPU seconds used so far by one process group, or None if unknown."""
+    if not isinstance(pgid, int) or pgid <= 1:
+        return None
+    totals = group_cpu_map(run)
+    return None if totals is None else totals.get(pgid, 0.0)
+
+
+def scan_worktree(root, cap):
+    """(newest mtime, entries seen, capped) for a worktree. Never follows symlinks, so it cannot leave the root;
+    skips .git, node_modules, .venv and dist; stops after `cap` entries. A root that is itself a symlink is not
+    scanned (reported as capped, so file activity is ignored)."""
+    if os.path.islink(root):
+        return 0.0, 0, True
+    newest, count = 0.0, 0
+    stack = [str(root)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > cap:
+                        return newest, count, True
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in SCAN_SKIP:
+                                stack.append(entry.path)
+                            continue
+                        newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return newest, count, False
 
 
 def agent_search_path():
@@ -831,6 +912,11 @@ class JobManager:
         self.lock = threading.RLock()
         self.jobs = {}
         self.gate_threads = set()
+        self.clock = time.time  # runner clock for idle_s; tests replace these three
+        self.cpu_probe = group_cpu_map  # one call per jobs report: {pgid: cpu_s}
+        self.scan_cap = SCAN_CAP
+        self.activity = {}
+        self.activity_lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.worktrees_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1043,10 +1129,14 @@ class JobManager:
             started = started_epoch(job)
             if (job.get("state") == "running" and booted and started and started < booted
                     and not (self._job_dir(job) / job.get("exit_file", "exit_code")).exists()):
-                job.update({"state": "lost", "ended_at": now()})
-                self._parse_events(job)
+                # A reboot ended every process of the old boot, and the saved pgid may be reused: signal nothing.
+                job.update({"state": "lost", "ended_at": now(), "group_gone": True})
+                self._parse_events_safe(job)
                 self._save(job)
-            self.refresh(job)
+            try:
+                self.refresh(job)
+            except Exception as exc:  # one bad job must never stop the runner from starting
+                self.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
             if job["state"] == "running":
                 self._start_monitor(job)
             elif (job["state"] == "exited" and job.get("exit_code") == 0
@@ -1063,8 +1153,96 @@ class JobManager:
                     self._start_gate(job)
 
     def public(self, job):
-        self.refresh(job)
-        return {key: job.get(key) for key in PUBLIC_JOB_KEYS}
+        try:
+            self.refresh(job)
+        except Exception as exc:  # a dead or odd job answers with its record, never a 500 (t-253101a7)
+            self.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+        record = {key: job.get(key) for key in PUBLIC_JOB_KEYS}
+        record["alive"] = self._alive(job)
+        return record
+
+    def _alive(self, job):
+        """The agent process or the gate is still running (docs/SPEC-stall-reroute.md 12.2)."""
+        agent = job.get("state") == "running" and process_alive(job.get("pid"))
+        return bool(agent or job.get("id") in self.gate_threads)
+
+    def _gate_alive(self, job):
+        return job.get("id") in self.gate_threads
+
+    def _activity_of(self, job, now_s, cpus=None):
+        """Update and return the runtime activity record of a job. Idle time runs on the runner's clock.
+        `cpus` is the {pgid: cpu_s} map of this report (None if unknown). The worktree scan runs outside the lock."""
+        job_id = job["id"]
+        scan_due = False
+        with self.activity_lock:
+            act = self.activity.get(job_id)
+            if act is None:
+                act = self.activity[job_id] = {"last": now_s, "src": "output", "out": None, "cpu": None,
+                                               "cpu_s": None, "scan_at": None, "mtime": None}
+            def touch(src):
+                act["last"], act["src"] = now_s, src
+            try:
+                size = (self._job_dir(job) / "events.jsonl").stat().st_size
+            except OSError:
+                size = None
+            if act["out"] is not None and size is not None and size > act["out"]:
+                touch("output")
+            if size is not None:
+                act["out"] = size
+            if self._gate_alive(job):
+                touch("output")  # gate output counts as activity (12.2)
+            cpu = None
+            if job.get("state") == "running" and cpus is not None:
+                cpu = cpus.get(job.get("pid"), 0.0)
+            if cpu is not None:
+                if act["cpu"] is not None and cpu - act["cpu"] >= CPU_GROWTH_MIN:
+                    touch("cpu")
+                act["cpu"] = act["cpu_s"] = cpu
+            if act["scan_at"] is None or now_s - act["scan_at"] >= SCAN_INTERVAL:
+                act["scan_at"] = now_s  # claimed: a concurrent report will not scan too
+                scan_due = True
+            result = dict(act)
+        if not scan_due:
+            return result
+        try:
+            newest, _count, capped = scan_worktree(job.get("cwd") or "", self.scan_cap)
+        except Exception:
+            newest, capped = None, True
+        with self.activity_lock:
+            act = self.activity.get(job_id)
+            if act is None:
+                return result
+            if not capped and newest is not None:
+                if act["mtime"] is not None and newest > act["mtime"]:
+                    act["last"], act["src"] = now_s, "files"
+                act["mtime"] = max(newest, act["mtime"] or 0)
+            return dict(act)
+
+    def jobs_report(self):
+        """The "jobs" list of /health: running jobs and jobs whose gate still runs, at most JOBS_REPORT_MAX."""
+        now_s = self.clock()
+        active = [(job, self._gate_alive(job)) for job in
+                  sorted(list(self.jobs.values()), key=lambda item: item.get("started_at") or "")]
+        active = [(job, gate) for job, gate in active if job.get("state") == "running" or gate]
+        cpus = None
+        if any(job.get("state") == "running" for job, _gate in active):
+            try:
+                cpus = self.cpu_probe()  # one `ps` for all jobs
+            except Exception:
+                cpus = None
+        entries = []
+        for job, gate in active:  # every active job keeps its record, even beyond the reported 32
+            act = self._activity_of(job, now_s, cpus)
+            if len(entries) < JOBS_REPORT_MAX:
+                cpu = act["cpu_s"]
+                entries.append({"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
+                                "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
+                                "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)})
+        keep = {job["id"] for job, _gate in active}
+        with self.activity_lock:  # forget finished jobs
+            for job_id in [key for key in self.activity if key not in keep]:
+                del self.activity[job_id]
+        return entries
 
     def get(self, job_id):
         with self.lock:
@@ -1331,7 +1509,7 @@ class JobManager:
                 event = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(event, dict):
+            if not isinstance(event, dict):  # stderr lines such as `null` or `7` are valid JSON but not events
                 continue
             event_type = event.get("type")
             if event_type in ("system", "result") and event.get("session_id"):
@@ -1341,14 +1519,15 @@ class JobManager:
             if event_type == "result":
                 if isinstance(event.get("result"), str):
                     result = event["result"]
-                current = event.get("permission_denials") or []
+                found = event.get("permission_denials")
                 denials = [
                     {"tool": item.get("tool_name") or item.get("tool") or "",
                      "input": item.get("tool_input", item.get("input"))}
-                    for item in current if isinstance(item, dict)
+                    for item in (found if isinstance(found, list) else []) if isinstance(item, dict)
                 ]
             if event_type in ("item.completed", "item.updated"):
-                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                item = event.get("item")
+                item = item if isinstance(item, dict) else {}
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     result = item["text"]
             if event_type == "ollama.result":
@@ -1356,6 +1535,17 @@ class JobManager:
         job["session_id"] = session_id or job.get("session_id")
         job["result"] = trim(result or job.get("result", ""))
         job["denials"] = denials
+
+    def _parse_events_safe(self, job):
+        """Parsing events must never keep a job from being settled (t-253101a7)."""
+        try:
+            self._parse_events(job)
+        except Exception as exc:
+            self.audit("parse_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+
+    def _deadline(self, job):
+        minutes = min(self.max_job_minutes, job.get("timeout_minutes", self.max_job_minutes))
+        return (started_epoch(job) or time.time()) + minutes * 60
 
     def refresh(self, job):
         with self.lock:
@@ -1371,13 +1561,17 @@ class JobManager:
                 if not process_alive(job.get("pid")):
                     job["state"] = "lost"
                     job["ended_at"] = now()
-                    self._parse_events(job)
+                    self._reap_group(job)  # the leader is gone; children may not be (12.9)
+                    self._parse_events_safe(job)
                     self._save(job)
+                elif time.time() >= self._deadline(job):
+                    # The monitor thread normally does this; if it is gone (crashed, or not restarted), a poll must.
+                    self._timeout(job)
                 return
             job["state"] = "exited"
             job["exit_code"] = exit_code
             job["ended_at"] = now()
-            self._parse_events(job)
+            self._parse_events_safe(job)
             self._save(job)
             if exit_code == 0 and job.get("gate"):
                 self._start_gate(job)
@@ -1387,15 +1581,31 @@ class JobManager:
 
     def _start_monitor(self, job, process=None):
         def monitor():
-            timeout_minutes = min(self.max_job_minutes, job.get("timeout_minutes", self.max_job_minutes))
-            deadline = (started_epoch(job) or time.time()) + timeout_minutes * 60
+            deadline = self._deadline(job)
+
             def alive():
                 return process.poll() is None if process is not None else process_alive(job.get("pid"))
 
-            while job.get("state") == "running" and alive():
+            # An exception must never end this thread: it is what enforces max_job_minutes (t-253101a7).
+            errors = 0
+            while job.get("state") == "running":
+                # The deadline comes first, in its own try, so a failing alive() can never hide it.
                 if time.time() >= deadline:
-                    self._timeout(job)
-                    return
+                    try:
+                        self._timeout(job)
+                        if job.get("state") != "running":
+                            return
+                    except Exception as exc:
+                        errors += 1
+                        if errors == 1 or errors % 150 == 0:  # rate-limited: about every 30 s
+                            self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
+                try:
+                    if not alive():
+                        break
+                except Exception as exc:  # unknown: assume alive; refresh() still covers the deadline
+                    errors += 1
+                    if errors == 1 or errors % 150 == 0:
+                        self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
                 time.sleep(0.2)
             if process is not None:
                 try:
@@ -1404,7 +1614,10 @@ class JobManager:
                     pass
             # The wrapper writes its code immediately before exiting; allow that write to land.
             for _ in range(20):
-                self.refresh(job)
+                try:
+                    self.refresh(job)
+                except Exception as exc:
+                    self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
                 if job.get("state") != "running":
                     break
                 time.sleep(0.05)
@@ -1418,15 +1631,75 @@ class JobManager:
         else:
             os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
 
+    def _group_ok(self, job):
+        """Only a job's own process group may be signalled: the pgid it was started with must still be its pid
+        (it is a session leader from start_new_session), so a reused pid can never aim a signal elsewhere."""
+        pid = job.get("pid")
+        return isinstance(pid, int) and pid > 1 and job.get("pgid", pid) == pid
+
+    @staticmethod
+    def _wait_group_gone(pgid, seconds):
+        end = time.monotonic() + seconds
+        while group_alive(pgid):
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def _signal_group(self, job, force):
+        try:
+            self._kill_group(job.get("pid"), force=force)
+        except ProcessLookupError:
+            pass  # already gone
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.audit("kill_failed", "%s: group %s failed: %s" % (
+                job.get("id"), "SIGKILL" if force else "SIGTERM", error_line(exc)))
+
+    def _reap_group(self, job, graceful=False):
+        """Stop whatever is left of the job's process group and record `group_gone` (true only when the runner
+        saw the whole group disappear). Returns it. Never raises; failures are audited (12.9)."""
+        gone = False
+        try:
+            pid = job.get("pid")
+            if not self._group_ok(job):
+                self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
+            elif os.name == "nt":
+                if process_alive(pid):
+                    self._signal_group(job, True)
+                gone = self._wait_group_gone(pid, 2.0)
+            else:
+                if graceful and group_alive(pid):
+                    self._signal_group(job, False)
+                    self._wait_group_gone(pid, 1.0)
+                if group_alive(pid):
+                    self._signal_group(job, True)
+                    self._wait_group_gone(pid, 2.0)
+                gone = not group_alive(pid)
+            if not gone and self._group_ok(job):
+                self.audit("group_survived", "%s: process group %s is still alive" % (job.get("id"), job.get("pid")))
+        except Exception as exc:
+            self.audit("kill_failed", "%s: group check failed: %s" % (job.get("id"), error_line(exc)))
+        job["group_gone"] = gone
+        return gone
+
     def _timeout(self, job):
         with self.lock:
             if job.get("state") != "running":
                 return
+            pid = job.get("pid")
             try:
-                self._kill_group(job.get("pid"))
-            except (OSError, subprocess.SubprocessError):
-                pass
-            self._parse_events(job)
+                self._kill_group(pid)
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.audit("kill_failed", "%s: group kill failed: %s" % (job.get("id"), error_line(exc)))
+                if pid and os.name != "nt" and process_alive(pid):  # fall back to the single process
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError as inner:
+                        self.audit("kill_failed", "%s: pid kill failed: %s" % (job.get("id"), error_line(inner)))
+            job["group_gone"] = self._group_ok(job) and self._wait_group_gone(pid, 2.0)
+            if not job["group_gone"]:
+                self.audit("group_survived", "%s: process group %s is still alive after the timeout" % (job.get("id"), pid))
+            self._parse_events_safe(job)
             message = "Job timed out after %s minutes" % job.get("timeout_minutes", self.max_job_minutes)
             job.update({"state": "exited", "exit_code": 124, "ended_at": now(),
                         "result": trim(((job.get("result") or "") + "\n" + message).strip())})
@@ -1806,6 +2079,8 @@ class JobManager:
             raw.close()
             prompt_in.close()
         job["pid"] = process.pid
+        job["pgid"] = process.pid  # a session leader (start_new_session): its group id is its pid
+        job["group_gone"] = None
         self._save(job)
         self._start_monitor(job, process)
 
@@ -1840,7 +2115,7 @@ class JobManager:
                 "ended_at": None, "runs": job["runs"] + 1,
                 "allowed_tools": body.get("allowed_tools") or [],
                 "exit_file": "exit_code.%d" % (job["runs"] + 1),
-                "run_started_at": now(),
+                "run_started_at": now(), "group_gone": None,
             })
             if job.get("gate"):
                 job["gate"].update({"state": "pending", "exit_code": None, "output_tail": ""})
@@ -1857,22 +2132,11 @@ class JobManager:
         with self.lock:
             self.refresh(job)
             if job["state"] == "running":
-                pid = job.get("pid")
-                try:
-                    if os.name == "nt":
-                        self._kill_group(pid)
-                    else:
-                        self._kill_group(pid, force=False)
-                        for _ in range(20):
-                            if not process_alive(pid):
-                                break
-                            time.sleep(0.05)
-                        if process_alive(pid):
-                            self._kill_group(pid)
-                except (OSError, subprocess.SubprocessError):
-                    pass
+                # SIGTERM, then SIGKILL to the whole group; "cancelled" stays, but group_gone says whether the
+                # runner saw every process in the group disappear (12.9: only then may the controller reroute).
+                self._reap_group(job, graceful=True)
                 job.update({"state": "cancelled", "ended_at": now()})
-                self._parse_events(job)
+                self._parse_events_safe(job)
                 self._save(job)
             return self.public(job)
 
@@ -2626,7 +2890,10 @@ def health_report(manager):
     running = 0
     active_dmr = set()
     for job in list(manager.jobs.values()):  # a snapshot: jobs are added from request threads
-        manager.refresh(job)
+        try:
+            manager.refresh(job)
+        except Exception as exc:  # one odd job must not take /health or the heartbeat down
+            manager.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
         running += job.get("state") == "running"
         if job.get("state") == "running" and job.get("engine") == "dmr" and isinstance(job.get("model"), str):
             active_dmr.add(job["model"])
@@ -2639,7 +2906,7 @@ def health_report(manager):
                        and power["battery_pct"] < manager.min_battery_pct)
     report = {"ok": True, "version": VERSION, "digest": RUNNER_DIGEST,
               "power": power, "max_mode": manager.max_mode,
-              "agents": agents, "running": running,
+              "agents": agents, "running": running, "jobs": manager.jobs_report(),
               "gate_profiles": sorted(manager.gate_profiles),
               "allow_raw_gates": manager.allow_raw_gates,
               "allowed_roots": manager.allowed_roots,
@@ -2886,7 +3153,7 @@ if not exist "%CODEX_HOME%" mkdir "%CODEX_HOME%"
   if ($token) {
     $script:RunnerTokenValue = $token
     $nodeName = $env:COMPUTERNAME.ToLower()
-    if (-not $EnrollRequested) {
+    if (-not $Enroll) {
       Write-Host "Runner token (shown once). On the master run: printf '%s\n' '$token' | uv run --script master/controller/controller.py runner-token set '$nodeName'"
     }
   } else {
@@ -2900,22 +3167,8 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 if (-not $admin) { Write-Host "Run this in an elevated PowerShell (Run as administrator)."; exit 1 }
 if (-not (Have winget)) { Write-Host "winget is required (App Installer from the Microsoft Store)."; exit 1 }
 
-if ($EnrollRequested) {  # resolve the code first: a bad file or no terminal stops before anything changes
-  if (-not $Master) { throw "-Master is required with -Enroll, -EnrollFile or -EnrollPrompt" }
-  if ($EnrollFile) {
-    if (-not (Test-Path -LiteralPath $EnrollFile)) { throw "-EnrollFile ${EnrollFile}: no such file" }
-    $EnrollCode = (Get-Content -LiteralPath $EnrollFile -Raw).Trim()
-  } elseif ($EnrollPrompt) {
-    $secure = Read-Host -AsSecureString "Console enrollment code"
-    $EnrollCode = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-  } else {
-    Write-Warning "The enrollment code was passed on the command line, so it is visible in the process list and PowerShell history. Next time use -EnrollPrompt or -EnrollFile PATH."
-    $EnrollCode = $Enroll
-  }
-  if (-not $EnrollCode) { throw "The enrollment code is empty" }
-}
 Say "AI fleet onboarding: $env:COMPUTERNAME, Windows, $(RamGB)GB RAM, $(GpuGB)GB GPU"
-Ensure-TailscaleConnection
+Ensure-Tailscale
 $ip = TailnetIp
 if (-not $ip) { Write-Host "No tailnet IP: is Tailscale signed in?"; exit 1 }
 Configure-Ollama $ip
@@ -2923,14 +3176,13 @@ Say "Scanning for LLMs, engines and agents"
 Scan $ip
 Install-Services $ip
 Install-Runner $ip
-if ($EnrollRequested) {
+if ($Enroll) {
+  if (-not $Master) { throw "-Master is required with -Enroll" }
   if (-not $RunnerTokenValue) { throw "Runner token was not created; enrollment cannot complete" }
-  $body = @{ code = $EnrollCode; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
+  $body = @{ code = $Enroll; hostname = $env:COMPUTERNAME.ToLower(); runner_token = $RunnerTokenValue } | ConvertTo-Json -Compress
   Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd('/') + "/api/enroll/complete") -ContentType "application/json" -Body $body | Out-Null
   $RunnerTokenValue = ""
-  $EnrollCode = ""
   Write-Host "Enrollment completed; approve this pending node in the console."
 }
-Ensure-WorkerTag
 Say "Done"
 Write-Host "This node will show as 'pending' in the master dashboard within ~30s. Approve it there, then assign roles."

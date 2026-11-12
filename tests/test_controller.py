@@ -93,6 +93,8 @@ class FakeRunner(BaseHTTPRequestHandler):
     # Live (docs/SPEC-live-monitor.md): extra /health fields (metrics), and the node id the controller told us
     health_extra: dict = {}
     node_ids: list = []
+    # Part E (docs/SPEC-stall-reroute.md): what a cancel leaves the job as. None: "cancelled", group_gone true.
+    cancel_reply: dict | None = None
 
     def log_message(self, *a):
         pass
@@ -180,7 +182,7 @@ class FakeRunner(BaseHTTPRequestHandler):
         if self.path.endswith("/message"):
             self.jobs[jid].update(state="running", denials=[], runs=self.jobs[jid]["runs"] + 1)
         elif self.path.endswith("/cancel"):
-            self.jobs[jid]["state"] = "cancelled"
+            self.jobs[jid].update(FakeRunner.cancel_reply or {"state": "cancelled", "group_gone": True})
         return self._send(200, self.jobs[jid])
 
 

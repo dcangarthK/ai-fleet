@@ -10,7 +10,8 @@ import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 LINKS = ("retry", "resume", "review", "fix", "merge", "check")
-REASONS = ("limit", "gate_failed", "denied", "error", "interrupted", "cancelled")
+# "stalled": the controller stopped a dead or idle run (docs/SPEC-stall-reroute.md 12.5, 12.6)
+REASONS = ("limit", "gate_failed", "denied", "error", "interrupted", "cancelled", "stalled")
 RESOLUTION_KINDS = ("resolved_by", "dismissed", "done_elsewhere", "handed_off")
 # Set by the controller during a limit handoff (docs/SPEC-limit-handoff.md 4.3): `handing_off` is the claim,
 # `handed_off` the result. Neither can be overwritten by /resolve, and a handed-off task can't be resumed.
@@ -87,6 +88,9 @@ def failure_reason(task: dict, job: dict | None = None, state: str | None = None
         return "interrupted"
     if state == "blocked":
         return "denied"
+    if task.get("failure_reason") == "stalled":
+        # Only ever set explicitly by the stall stop (Part E 12.6); a resumed run clears it.
+        return "stalled"
     if is_limit_text(tail(job.get("result") or task.get("result"))) or is_limit_text(tail(task.get("error"))):
         return "limit"
     gate = job.get("gate") if job.get("gate") is not None else _json(task.get("gate_result"))
@@ -184,7 +188,8 @@ def display_status(task: dict, tz: datetime.tzinfo | None = None, now: float | N
             return {"tone": "paused", "label": "Paused: usage limit"}
         if state == "interrupted" or reason == "interrupted":
             return {"tone": "attention", "label": "Interrupted"}
-        label = {"gate_failed": "Failed: gate", "error": "Failed: error", "denied": "Failed: denied"}.get(reason, "Failed")
+        label = {"gate_failed": "Failed: gate", "error": "Failed: error", "denied": "Failed: denied",
+                 "stalled": "Failed: stalled"}.get(reason, "Failed")
         return {"tone": "attention", "label": label}
     if state == "review":
         return {"tone": "ok", "label": "Ready for review"}

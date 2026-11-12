@@ -114,7 +114,10 @@ MIGRATIONS = {
               "account": "TEXT",
               # Live (docs/SPEC-live-monitor.md): display-only stage, a work item's descriptive chain (root only),
               # an advisory independence waiver, and how to place the task again on failover (12.6)
-              "stage": "TEXT", "chain": "TEXT", "independence": "TEXT", "placement": "TEXT"},
+              "stage": "TEXT", "chain": "TEXT", "independence": "TEXT", "placement": "TEXT",
+              # Part E (docs/SPEC-stall-reroute.md 5.1, 12): the stall record, JSON {kind, since, last_activity_at,
+              # detail, nudged_at, escalated, waiting, overrun_at}
+              "stall": "TEXT"},
     # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
     # later cancelling, completing or resuming of the task cannot erase; `account` is whose limit it was
     # (null on older rows, which then hold every account of the agent)

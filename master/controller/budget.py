@@ -491,7 +491,8 @@ def limit_state(rows: list[dict], now: float, scope: str = "auto", rules: dict |
 
 def _limit(state: dict, agent: str, ident: str | None, rules: dict | None, key: str | None):
     """(until, scope, subject): the one place a limit is read (Part F 6). `scope` is "account" (the whole agent
-    account is limited: limit_scope "account", or two limited models of one agent) or "model". A model is limited
+    account is limited: limit_scope "account", limit_scope "auto" for Claude (its models share one account limit),
+    or two limited models of one agent) or "model". A model is limited
     when a limited identity is its own, maps to the same rules key (when `rules` is given), or is the bare agent
     (a run whose model was unknown); a run whose model is unknown (ident == agent) is held while any model is."""
     if agent in state["accounts"]:
@@ -574,18 +575,20 @@ def seed_rules() -> None:
             c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (1, ?, 'seed', ?)",
                       (json.dumps(DEFAULT_RULES), time.time()))
         # One-time: bodies stored while the default was "model" keep it forever through with_defaults, which left
-        # Opus and Fable looking free after a Sonnet limit. Move the latest body to "auto" once, as a new version
-        # (history keeps the old one, restorable).
+        # Opus and Fable looking free after a Sonnet limit. On the first run of this check, move the latest body to
+        # "auto" if it says "model". Either way a marker version (author migration:limit_scope, the body as it then
+        # stands) is written, so the check never runs again and an owner's later "model" choice is kept on restart.
         latest = c.execute("SELECT version, body FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
         if latest and not c.execute("SELECT 1 FROM budget_rules WHERE author='migration:limit_scope'").fetchone():
             try:
                 body = json.loads(latest["body"])
             except (ValueError, TypeError):
                 body = None
-            if isinstance(body, dict) and body.get("limit_scope") == "model":
+            if isinstance(body, dict):
+                if body.get("limit_scope") == "model":
+                    body = body | {"limit_scope": "auto"}
                 c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (?, ?, ?, ?)",
-                          (latest["version"] + 1, json.dumps(body | {"limit_scope": "auto"}),
-                           "migration:limit_scope", time.time()))
+                          (latest["version"] + 1, json.dumps(body), "migration:limit_scope", time.time()))
 
 
 def rules_row() -> dict:

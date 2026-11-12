@@ -329,6 +329,7 @@ function RulesSection() {
                 </label>
                 <label className="field">Limit scope
                   <select value={form.limit_scope} onChange={(e) => set({ limit_scope: e.target.value as RulesForm["limit_scope"] })}>
+                    <option value="auto">automatic (Claude: whole account, Codex: per model)</option>
                     <option value="model">per model (two limited models limit the account)</option>
                     <option value="account">whole account</option>
                   </select>

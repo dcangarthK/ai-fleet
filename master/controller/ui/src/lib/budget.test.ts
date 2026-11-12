@@ -20,7 +20,7 @@ const DEFAULT: BudgetRules = {
     exclude_globs: ["master/controller/ui/dist/**", "**/*.min.js", "**/*.bundle.js", "**/package-lock.json", "evals/results/*.json"] },
   limits: { on_limit: "queue", fallbacks: { codex: ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"] } },
   effort_ladder: { build: ["medium", "medium", "high"], fix: ["low", "medium", "high"], re_review: ["low", "medium"] },
-  limit_scope: "model",
+  limit_scope: "auto",
   review_exec: { tools: ["Read", "Grep", "Glob"], max_turns: 8, task_minutes: 15 },
   reviews: { stages: ["local", "paid"], max_paid_rounds: 2, max_codex_rounds: 1, paid_skip_when: null,
     security_paths: ["master/controller/auth.py", "master/controller/policy.py", "nodes/runner.py", "master/mcp/**"] },

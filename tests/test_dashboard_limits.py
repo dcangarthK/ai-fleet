@@ -146,6 +146,16 @@ class OneHelperTests(LimitBase):
         budget.seed_rules()
         self.assertEqual(budget.current_rules()["limit_scope"], "model")
 
+    def test_the_marker_is_written_even_when_nothing_needed_migrating(self):
+        with db() as c:
+            c.execute("DELETE FROM budget_rules WHERE author='migration:limit_scope'")
+        self.set_rules(limit_scope="auto")
+        budget.seed_rules()  # first run of the check: body already "auto", marker still written
+        self.assertEqual(len([h for h in budget.rules_history() if h["author"] == "migration:limit_scope"]), 1)
+        self.set_rules(limit_scope="model")  # the owner's later choice
+        budget.seed_rules()  # a restart
+        self.assertEqual(budget.current_rules()["limit_scope"], "model")
+
     def test_model_scope_limits_only_that_key_everywhere(self):
         self.set_rules(limit_scope="model")
         self.limit_row(FLEET_ACCOUNT, "claude", OPUS)

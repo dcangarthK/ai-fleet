@@ -29,7 +29,7 @@ export interface BudgetRules {
     allow_cross_vendor?: boolean;
   };
   effort_ladder: Record<string, string[]>;
-  limit_scope: "model" | "account";
+  limit_scope: "auto" | "model" | "account";
   review_exec: { tools: string[]; max_turns: number | null; task_minutes: number | null };
   reviews: {
     stages: string[];

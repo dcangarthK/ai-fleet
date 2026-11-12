@@ -278,6 +278,77 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(master["status"], "approved")
         self.assertEqual(master["effective_ceiling"], "auto-edit")
 
+    def drop_task(self, task_id):
+        with db() as c:
+            c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+    def drop_dmr_fixture_rows(self, catalog_id):
+        # The shared database must look as it did before the test: no dmr role, assignment or catalog row.
+        with db() as c:
+            c.execute("DELETE FROM assignments WHERE role='dmr-test'")
+            c.execute("DELETE FROM roles WHERE name='dmr-test'")
+            c.execute("DELETE FROM node_models WHERE catalog_id=?", (catalog_id,))
+            c.execute("DELETE FROM model_catalog WHERE id=?", (catalog_id,))
+
+    def report_dmr(self, references):
+        """Make the fake runner report a reachable DMR engine with these models, and clean up afterwards."""
+        previous = FakeRunner.health_extra
+        FakeRunner.health_extra = {"engines": {"dmr": {"engine": "dmr", "reachable": True, "models": [
+            {"engine": "dmr", "reference": ref, "warm": "unknown"} for ref in references]}}}
+
+        def restore():
+            FakeRunner.health_extra = previous
+            self.c.post("/api/refresh", headers=W)
+        self.addCleanup(restore)
+        self.c.post("/api/refresh", headers=W)
+        wait_for(lambda: ((next(n for n in self.c.get("/api/fleet").json()["nodes"] if n["id"] == "master")
+                           .get("runner") or {}).get("engines") or {}).get("dmr"))
+
+    def test_dmr_only_models_can_be_assigned_and_ollama_only_models_are_refused_on_dmr(self):
+        self.report_dmr(["ai/qwen3"])
+        added = self.c.post("/api/models", json={"reference": "ai/qwen3", "engine": "dmr"}, headers=W)
+        self.assertEqual(200, added.status_code, added.text)
+        self.addCleanup(self.drop_dmr_fixture_rows, added.json()["id"])
+        assigned = self.c.post("/api/roles", json={"role": "dmr-test", "node": "master", "model": "ai/qwen3",
+                                                     "catalog_id": added.json()["id"]}, headers=W)
+        self.assertEqual(200, assigned.status_code, assigned.text)
+        # fake-model:1b is only on the ollama list: a dmr task naming it is refused
+        refused = self.c.post("/api/tasks", json={"agent": "ollama", "engine": "dmr", "model": "fake-model:1b",
+                                                    "prompt": "x", "mode": "read-only"}, headers=W)
+        self.assertEqual(409, refused.status_code, refused.text)
+        self.assertIn("dmr", refused.text)
+
+    def test_import_refuses_an_unknown_engine(self):
+        doc = self.c.get("/api/export").json()
+        doc["assignments"] = [{"role": "bad-engine", "node": "master", "model": "x", "engine": "surprise"}]
+        refused = self.c.post("/api/import", json=doc, headers=W)
+        self.assertEqual(400, refused.status_code, refused.text)
+
+    def test_dmr_catalog_assignment_and_role_task_keep_engine_identity(self):
+        self.report_dmr(["fake-model:1b"])
+        added = self.c.post("/api/models", json={"reference": "fake-model:1b", "engine": "dmr",
+                                                  "display_name": "Fake DMR"}, headers=W)
+        self.assertEqual(200, added.status_code, added.text)
+        dmr = added.json()
+        self.addCleanup(self.drop_dmr_fixture_rows, dmr["id"])
+        self.assertEqual("dmr", dmr["engine"])
+        listed = [m for m in self.c.get("/api/models").json() if m["reference"] == "fake-model:1b"]
+        self.assertEqual(["dmr"], [m["engine"] for m in listed if m["id"] == dmr["id"]])
+        self.assertNotEqual("fake-model:1b", dmr["id"], "dmr ids are namespaced apart from plain ollama names")
+        assigned = self.c.post("/api/roles", json={"role": "dmr-test", "node": "master",
+                                                     "model": "fake-model:1b", "catalog_id": dmr["id"]}, headers=W)
+        self.assertEqual(200, assigned.status_code, assigned.text)
+        role = next(a for a in assigned.json()["assignments"] if a["role"] == "dmr-test")
+        self.assertEqual("dmr", role["engine"])
+        task = self.task(agent="ollama", model="fake-model:1b", role="dmr-test", mode="read-only")
+        # Don't leave recent use of the shared fake model behind: the retention test counts idle models.
+        self.addCleanup(self.drop_task, task["id"])
+        sent = [b for p, b in FakeRunner.calls if p == "/jobs" and b["id"] == task["id"]][0]
+        self.assertEqual(("dmr", "dmr"), (task["engine"], sent["engine"]))
+        bad = self.c.post("/api/tasks", json={"agent": "ollama", "engine": "unknown",
+                                                "model": "fake-model:1b", "prompt": "x"}, headers=W)
+        self.assertEqual(400, bad.status_code)
+
     def test_task_lifecycle_to_review_and_wait(self):
         t = self.task(gate="pytest")
         self.assertEqual(t["state"], "working")

@@ -124,6 +124,53 @@ class ScriptsParse(OnboardHarness):
         self.assertIn(r'set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-fleet"', ps1)
         self.assertIn(r'set "CODEX_HOME=%USERPROFILE%\.codex-fleet"', ps1)
 
+    def test_windows_enrolls_before_advertising_worker_tag(self):
+        ps1 = (ROOT / "nodes" / "onboard.ps1").read_text()
+        enroll = ps1.index('Invoke-RestMethod -Method Post -Uri ($Master.TrimEnd(\'/\') + "/api/enroll/complete")')
+        tag = ps1.rindex("Ensure-WorkerTag")
+        self.assertLess(enroll, tag)
+        main = ps1[ps1.index('if ($ScanOnly)'):]
+        self.assertLess(main.index("Ensure-TailscaleConnection"), main.index("Invoke-RestMethod"))
+        self.assertLess(main.index("Invoke-RestMethod"), main.index("Ensure-WorkerTag"))
+
+    def test_windows_enroll_code_has_a_prompt_and_a_file_and_warns_on_argv(self):
+        ps1 = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertIn("[switch]$EnrollPrompt", ps1)
+        self.assertIn("Read-Host -AsSecureString", ps1)
+        self.assertIn("[string]$EnrollFile", ps1)
+        self.assertRegex(ps1, r"Write-Warning \"The enrollment code was passed on the command line")
+        self.assertNotIn("code = $Enroll;", ps1)
+
+    def test_dmr_smoke_check_is_read_only_and_rejects_non_loopback_listener(self):
+        script = ROOT / "nodes" / "check_dmr.sh"
+        text = script.read_text()
+        self.assertIn("docker model ls", text)
+        self.assertIn("127.0.0.1:12434/engines/v1/models", text)
+        self.assertIn("lsof", text)
+        self.assertNotRegex(text, r"(?m)^\s*(docker model (pull|rm)|tailscale|pfctl|iptables|curl .*-[A-Z].*POST)")
+        fake = self.tmp / "fake-lsof"
+        fake.write_text("#!/bin/sh\necho 'docker 1 user 9u IPv4 0 TCP *:12434 (LISTEN)'\n")
+        fake.chmod(0o755)
+        result = subprocess.run([BASH, str(script)], capture_output=True, text=True,
+                                env=self.env(DMR_LSOF=str(fake), DMR_DOCKER="/usr/bin/false",
+                                             DMR_CURL="/usr/bin/false", DMR_FIXTURE_DIR=str(self.tmp / "fixtures")))
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("FAIL", result.stdout)
+
+    def test_dmr_smoke_check_passes_on_real_loopback_fixtures(self):
+        fx = ROOT / "tests" / "fixtures" / "dmr"
+        tool = {}
+        for name, fixture in (("lsof", "lsof_12434.txt"), ("docker", "docker_model_ls.txt"), ("curl", "models.json")):
+            path = self.tmp / ("fake-" + name)
+            path.write_text(f"#!/bin/sh\ncat '{fx / fixture}'\n")
+            path.chmod(0o755)
+            tool[name] = str(path)
+        result = subprocess.run([BASH, str(ROOT / "nodes" / "check_dmr.sh")], capture_output=True, text=True,
+                                env=self.env(DMR_LSOF=tool["lsof"], DMR_DOCKER=tool["docker"],
+                                             DMR_CURL=tool["curl"], DMR_FIXTURE_DIR=str(self.tmp / "fx2")))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+
 
 class RunnerPolicy(OnboardHarness):
     def configure(self, ram=16, pre=None, extra="", **env):
@@ -619,7 +666,7 @@ class PipedEndToEnd(OnboardHarness):
 
 
 class TailnetPolicy(unittest.TestCase):
-    """tailscale/policy.hujson: nodes must never reach the master's token-protected port."""
+    """tailscale/policy.hujson: minimal §14 N0 reachability."""
 
     def load(self):
         text = (ROOT / "tailscale" / "policy.hujson").read_text()
@@ -627,18 +674,18 @@ class TailnetPolicy(unittest.TestCase):
         text = re.sub(r",(\s*[}\]])", r"\1", text)  # trailing commas
         return json.loads(text)
 
-    def test_llm_nodes_get_no_access_to_the_master_https_port(self):
+    def test_worker_can_reach_master_https_but_not_another_worker(self):
         policy = self.load()
-        for grant in policy["grants"]:
-            if "tag:master" in grant["dst"]:
-                self.assertNotIn("tag:llm-node", grant["src"], grant)
-                self.assertNotIn("*", grant["src"], grant)
         node_tests = [t for t in policy["tests"] if t["src"] == "tag:llm-node"]
-        self.assertTrue(any("tag:master:8443" in t.get("deny", []) for t in node_tests),
-                        "the policy's own tests block must deny tag:llm-node -> tag:master:8443")
-        for t in policy["tests"]:
-            if t["src"] == "tag:llm-node":
-                self.assertFalse([d for d in t.get("accept", []) if d.startswith("tag:master:")])
+        self.assertTrue(any("tag:master:8443" in t.get("accept", []) for t in node_tests))
+        self.assertTrue(any("tag:llm-node:11436" in t.get("deny", []) for t in node_tests))
+        grants = [g for g in policy["grants"] if "tag:llm-node" in g["src"] and "tag:master" in g["dst"]]
+        self.assertEqual([["tcp:8443"]], [g["ip"] for g in grants])
+        denied = {d for t in node_tests for d in t.get("deny", [])}
+        for port in (11435, 8000, 22):
+            self.assertIn(f"tag:llm-node:{port}", denied)
+        self.assertEqual([], [g for g in policy["grants"] if "tag:llm-node" in g["src"] and "tag:llm-node" in g["dst"]],
+                         "no grant lets a worker reach a worker")
 
 
 class MasterTailscaleTag(OnboardHarness):
@@ -760,6 +807,71 @@ class Build(unittest.TestCase):
             installed = Path(fleet, "runner.py").read_bytes()
         self.assertEqual(hashlib.sha256(installed).hexdigest(),
                          hashlib.sha256((ROOT / "nodes" / "runner.py").read_bytes()).hexdigest())
+
+
+SCOPES = {"env", "script", "global", "using", "local", "private"}
+
+
+def scoped_var_pitfalls(text: str):
+    """Find `$Name:` inside double-quoted PowerShell strings (parsed as a scope/drive prefix).
+
+    Line-based scanner: skips comments, single-quoted strings and here-string blocks
+    (@' ... '@ and @" ... "@ are treated as opaque)."""
+    found = []
+    here = None
+    for n, line in enumerate(text.splitlines(), 1):
+        if here:
+            if line.startswith(here):
+                here = None
+            continue
+        m = re.search(r"@(['\"])\s*$", line)
+        if m:
+            here = m.group(1) + "@"
+            continue
+        i, state = 0, None
+        while i < len(line):
+            c = line[i]
+            if state is None:
+                if c == "#":
+                    break
+                if c in "'\"":
+                    state = c
+            elif state == "'":
+                if c == "'":
+                    state = None
+            else:
+                if c == "`":
+                    i += 2
+                    continue
+                if c == '"':
+                    state = None
+                elif c == "$":
+                    mm = re.match(r"\$([A-Za-z_][A-Za-z0-9_]*):", line[i:])
+                    if mm and mm.group(1).lower() not in SCOPES:
+                        found.append((n, mm.group(0)))
+            i += 1
+    return found
+
+
+class OnboardPs1SyntaxTests(unittest.TestCase):
+    def test_no_scoped_variable_pitfalls_in_double_quoted_strings(self):
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertEqual(scoped_var_pitfalls(text), [],
+                         'use "${Name}:" instead of "$Name:" in double-quoted strings')
+
+    def test_pitfall_detector_catches_the_known_bug(self):
+        self.assertEqual(scoped_var_pitfalls('throw "-X $EnrollFile: no such file"'), [(1, "$EnrollFile:")])
+        self.assertEqual(scoped_var_pitfalls('x "${EnrollFile}: ok $env:HOME $(f):"'), [])
+        self.assertEqual(scoped_var_pitfalls("x 'single $Name: ok' # \"$a: c\""), [])
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh not installed")
+    def test_onboard_ps1_parses(self):
+        script = ("$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+                  "$args[0],[ref]$null,[ref]$e); if ($e.Count) { $e | ForEach-Object { $_.ToString() }; exit 1 }")
+        r = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script,
+                            str(ROOT / "nodes" / "onboard.ps1")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

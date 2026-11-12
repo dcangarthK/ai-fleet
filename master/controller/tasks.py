@@ -151,7 +151,7 @@ async def runner_health(client: httpx.AsyncClient, base: str, node: dict | str =
 NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 # The /health fields the controller keeps, whether polled or pushed in a heartbeat (live monitor 12.1): a
 # heartbeat can claim nothing a poll couldn't, and unknown fields are dropped.
-HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "running", "gate_profiles",
+HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
                  "age_s"}
@@ -198,7 +198,7 @@ def ceiling(node: dict) -> str:
 
 
 def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | None = None,
-             policy: dict | None = None, escalation: bool = False) -> str | None:
+             policy: dict | None = None, escalation: bool = False, engine: str = "ollama") -> str | None:
     """None if the node can take the task, else the reason it can't.
 
     ``escalation`` marks a grounded-ask escalation task. It only ever adds a requirement: the agent must still be
@@ -209,14 +209,27 @@ def eligible(node: dict, agent: str, model: str | None, mode: str, gate: str | N
     offline = runner_offline(node)
     if offline:
         return offline
-    if not (node["runner"].get("agents") or {}).get(agent):
+    dmr = agent == "ollama" and engine == "dmr"
+    dmr_status = (node["runner"].get("engines") or {}).get("dmr") or {}
+    if dmr:  # DMR is reported only under engines, never as the ollama agent
+        if dmr_status.get("reachable") is not True:
+            return "no dmr engine on this node"
+    elif not (node["runner"].get("agents") or {}).get(agent):
         return f"no {agent} on this node"
     power = node["runner"].get("power") or {}
     if (agent in ("claude", "codex") and power.get("on_battery") is True and power.get("ok") is False):
         pct = power.get("battery_pct")
         return f"on battery ({pct}%)" if isinstance(pct, int) else "on battery"
-    if agent == "ollama" and model not in node["models"]:
-        return f"model {model} not on this node"
+    if agent == "ollama":
+        if engine not in ("ollama", "dmr"):
+            return f"unknown engine {engine}"
+        if engine == "dmr":
+            engine_models = {item.get("reference") for item in dmr_status.get("models") or [] if isinstance(item, dict)}
+            available = engine_models
+        else:  # only the ollama engine may use the node's ollama model list
+            available = set(node["models"])
+        if model not in available:
+            return f"model {model} not on this node's {engine} engine"
     runner = node["runner"]
     if (gate and str(runner.get("version")) == "2"
             and gate not in (runner.get("gate_profiles") or []) and not runner.get("allow_raw_gates")):
@@ -272,6 +285,21 @@ def warm_models(node: dict, now: float | None = None) -> set[str]:
     metrics = (node.get("runner") or {}).get("metrics") or {}
     loaded = (metrics.get("ollama") or {}).get("loaded") if isinstance(metrics, dict) else None
     return {m for m in loaded or [] if isinstance(m, str)}
+
+
+def warm_models_by_engine(node: dict, now: float | None = None) -> set[tuple[str, str]]:
+    """Fresh, directly observed warm models, keeping engine identity in the routing key."""
+    warm = {("ollama", model) for model in warm_models(node, now)}
+    now = time.time() if now is None else now
+    seen = max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0])
+    if not seen or now - seen + (node.get("runner_age_s") or 0) >= 60:
+        return warm
+    engines = (node.get("runner") or {}).get("engines") or {}
+    for engine, status in engines.items():
+        for item in (status or {}).get("models") or []:
+            if isinstance(item, dict) and item.get("warm") is True and isinstance(item.get("reference"), str):
+                warm.add((engine, item["reference"]))
+    return warm
 
 
 def ram(node: dict) -> int:
@@ -375,7 +403,7 @@ def accounts_of(slots: list[dict], agent: str) -> list[str]:
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
               role: str | None = None, task_policy: dict | None = None,
               skill_ids: list[str] | None = None, escalation: bool = False,
-              allowed: set[str] | None = None) -> tuple[dict, dict, str | None]:
+              allowed: set[str] | None = None, engine: str = "ollama") -> tuple[dict, dict, str | None]:
     nodes = node_rows()
     if allowed is not None and not wanted:
         nodes = [n for n in nodes if n["id"] in allowed] or nodes
@@ -387,17 +415,17 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
             raise HTTPException(409, f"several nodes are named {wanted}; use an id: {[n['id'] for n in match]}")
         snapshot = effective_policy(match[0]["id"], role, agent, task_policy, skill_ids)
         why = eligible(match[0], agent, model, mode, gate,
-                       _esc_view(match[0], role, agent, snapshot, task_policy, escalation), escalation)
+                       _esc_view(match[0], role, agent, snapshot, task_policy, escalation), escalation, engine)
         if why:
             raise HTTPException(409, f"{wanted}: {why}")
         return match[0], snapshot, temporary_reason(match[0], snapshot["policy"])
     candidates = [(n, effective_policy(n["id"], role, agent, task_policy, skill_ids)) for n in nodes]
     ok = [(n, snapshot) for n, snapshot in candidates
           if not eligible(n, agent, model, mode, gate, _esc_view(n, role, agent, snapshot, task_policy, escalation),
-                          escalation)]
+                          escalation, engine)]
     if not ok:
         reasons = {n["name"]: eligible(n, agent, model, mode, gate,
-                                       _esc_view(n, role, agent, snapshot, task_policy, escalation), escalation)
+                                       _esc_view(n, role, agent, snapshot, task_policy, escalation), escalation, engine)
                    for n, snapshot in candidates}
         raise HTTPException(409, f"no node can run {agent} in {mode} mode: {reasons}")
     # Prefer a node that can start now, then (Ollama) one with the model already loaded (live monitor 12.3), then
@@ -405,7 +433,7 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
     now = time.time()
     node, snapshot = sorted(ok, key=lambda item: (
         temporary_reason(item[0], item[1]["policy"]) is not None,
-        agent == "ollama" and model not in warm_models(item[0], now),
+        agent == "ollama" and (engine, model) not in warm_models_by_engine(item[0], now),
         item[0]["running_tasks"], -ram(item[0])))[0]
     return node, snapshot, temporary_reason(node, snapshot["policy"])
 
@@ -628,6 +656,8 @@ async def start(task: dict) -> None:
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
+    if task["agent"] == "ollama":
+        body["engine"] = task.get("engine") or "ollama"
     support = budget_support(node)
     extra = task.get("launch_extra") or {}
     if profile_support(node) and task["agent"] in budget.PAID_AGENTS:
@@ -673,7 +703,8 @@ async def try_start(task: dict) -> bool:
     if task["state"] != "queued":
         return False
     node = node_of(task)
-    why = eligible(node, task["agent"], task["model"], task["mode"], task["gate"], task["policy"])
+    why = eligible(node, task["agent"], task["model"], task["mode"], task["gate"], task["policy"],
+                   engine=task.get("engine") or "ollama")
     why = why or temporary_reason(node, task["policy"])
     wait = None
     if not why:
@@ -882,6 +913,7 @@ class TaskIn(BaseModel):
     prompt: str
     title: str | None = None
     model: str | None = None
+    engine: str | None = None
     mode: str = DEFAULT_MODE
     repo: str | None = None
     worktree: bool = True
@@ -921,6 +953,41 @@ class MessageIn(BaseModel):
 
 class ModeIn(BaseModel):
     mode: str
+
+
+def local_engine(agent: str, model: str | None, role: str | None, node: str | None,
+                 requested: str | None) -> str | None:
+    if agent != "ollama":
+        if requested is not None:
+            raise HTTPException(400, "engine is only valid for ollama tasks")
+        return None
+    if requested is not None and requested not in ("ollama", "dmr"):
+        raise HTTPException(400, f"unknown engine {requested}")
+    candidates = []
+    with db() as c:
+        if role:
+            query = ("SELECT DISTINCT a.engine FROM assignments a LEFT JOIN nodes n ON n.id=a.node "
+                     "WHERE a.role=? AND a.state='active'")
+            args = [role]
+            if model:
+                query += " AND a.model=?"
+                args.append(model)
+            if node:
+                query += " AND (a.node=? OR n.name=?)"
+                args.extend((node, node))
+            candidates = [row[0] or "ollama" for row in c.execute(query, args)]
+        if not candidates and model:
+            candidates = [row[0] or "ollama" for row in c.execute(
+                "SELECT DISTINCT engine FROM model_catalog WHERE reference=?", (model,))]
+    candidates = list(dict.fromkeys(candidates))
+    if requested:
+        if role and candidates and requested not in candidates:
+            raise HTTPException(400, f"role {role} is assigned to {candidates}, not {requested}")
+        return requested
+    # Omitted engine means ollama (SPEC-networking §14.1), so a same-named dmr model never changes old callers.
+    if len(candidates) > 1 and "ollama" not in candidates:
+        raise HTTPException(400, f"model {model} exists on several engines; specify engine")
+    return "ollama" if "ollama" in candidates or not candidates else candidates[0]
 
 
 @router.get("/api/tasks")
@@ -1134,6 +1201,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
         raise HTTPException(refusal.status, refusal.detail)
     agent, model = decision["agent"], decision["model"]
+    engine = local_engine(agent, model, t.role, t.node, t.engine)
     task_policy = t.policy
     review_exec = decision.get("review_exec") or {}
     if review_exec.get("task_minutes"):
@@ -1148,7 +1216,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             fleet_policy.validate(task_policy)
         node, effective, queued_reason = pick_node(agent, model, t.mode, t.node, t.gate, t.role, task_policy,
                                                    t.skills, t.escalation,
-                                                   allowed={s["node"] for s in on_account} if on_account else None)
+                                                   allowed={s["node"] for s in on_account} if on_account else None,
+                                                   engine=engine or "ollama")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     # The profile this task runs under: the chosen account's slot on the chosen node.
@@ -1187,6 +1256,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         part_title = title if len(parts) == 1 else f"{title[:68]} (part {index + 1}/{len(parts)})"
         row = {
             "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": model,
+            "engine": engine,
             "prompt": part, "mode": t.mode, "repo": t.repo, "worktree": int(t.worktree), "gate": t.gate,
             "node_id": node["id"], "state": state, "created_at": now, "updated_at": now,
             "instructions": effective["instructions"], "policy": json.dumps(effective["policy"]),
@@ -1316,12 +1386,12 @@ TRANSIENT_INELIGIBLE = ("runner offline", "on battery")
 
 
 def node_hold(node: dict, agent: str, model: str | None, mode: str, gate: str | None, policy: dict,
-              now: float | None = None) -> dict | None:
+              now: float | None = None, engine: str = "ollama") -> dict | None:
     """The node side of admission, shared by new tasks' starts, continuations and handoffs: a refusal when the
     node can't take this work at all (agent, model, mode ceiling, gate), a defer while its policy holds work back
     (quiet hours, its concurrency, its daily agent minutes). None when the node admits it."""
     now = time.time() if now is None else now
-    why = eligible(node, agent, model, mode, gate, policy)
+    why = eligible(node, agent, model, mode, gate, policy, engine=engine)
     if why and why.startswith(TRANSIENT_INELIGIBLE):
         # The node is briefly unreachable or on battery: retry shortly, as a queued new task would keep waiting.
         return {"outcome": "defer", "until": now + CONTINUE_RETRY, "reason": why, "wait": "node"}
@@ -1346,7 +1416,7 @@ def continuation(task: dict, *, effort: str | None = None, now: float | None = N
     except HTTPException as exc:
         return {"outcome": "refuse", "until": None, "reason": str(exc.detail), "wait": None}
     return node_hold(node, task["agent"], task.get("model"), task["mode"], task.get("gate"),
-                     task.get("policy") or {}, now) or verdict
+                     task.get("policy") or {}, now, task.get("engine") or "ollama") or verdict
 
 
 class NotAdmitted(HTTPException):

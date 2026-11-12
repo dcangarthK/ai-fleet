@@ -468,6 +468,7 @@ def machine_row(node: dict, now: float) -> dict:
     return {"node": node["id"], "name": node.get("name"), "age_s": round(age) if age is not None else None,
             "unknown": unknown, **values, "ollama_up": ollama.get("up"),
             "loaded": [m for m in ollama.get("loaded") or [] if isinstance(m, str)],
+            "engines": runner.get("engines") if isinstance(runner.get("engines"), dict) else {},
             "warm": sorted(tasks.warm_models(node, now)), "warnings": warnings,
             "offline": tasks.runner_offline(node, now), "heartbeat": heartbeat}
 

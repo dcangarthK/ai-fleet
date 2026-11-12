@@ -1612,6 +1612,8 @@ class JobManager:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
             event_type = event.get("type")
             if event_type in ("system", "result") and event.get("session_id"):
                 session_id = event["session_id"]
@@ -1627,7 +1629,7 @@ class JobManager:
                     for item in current if isinstance(item, dict)
                 ]
             if event_type in ("item.completed", "item.updated"):
-                item = event.get("item") or {}
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     result = item["text"]
             if event_type == "ollama.result":
@@ -2239,6 +2241,9 @@ class JobManager:
                 if raw_line.strip():
                     lines.append("error: " + raw_line.strip())
                 continue
+            if not isinstance(event, dict):
+                lines.append(raw_line.strip())
+                continue
             event_type = event.get("type", "event")
             if event_type == "assistant":
                 for block in (event.get("message") or {}).get("content") or []:
@@ -2252,7 +2257,7 @@ class JobManager:
                 if event.get("is_error") and event.get("error"):
                     lines.append("error: " + str(event["error"]))
             elif event_type in ("item.started", "item.completed", "item.updated"):
-                item = event.get("item") or {}
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
                 if item.get("type") == "agent_message" and item.get("text"):
                     lines.append(str(item["text"]))
                 elif item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):

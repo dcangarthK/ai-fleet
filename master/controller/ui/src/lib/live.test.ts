@@ -44,6 +44,12 @@ describe("presence", () => {
     expect(presenceText({ ...s, waiting_on: null, last_wait: { ids: ["t-1"], ago_s: 90 } }, NOW))
       .toBe("Orchestrator (opus 5.5, configured; spare), last seen 2m ago, last waited on t-1 2m ago");
   });
+  it("a session restored after a controller restart reads 'stale since T' until a request refreshes it", () => {
+    const restored: Session = { ...s, stale: true, stale_since: at(20, 58), waiting_on: null };
+    expect(presenceText(restored, NOW)).toBe("Orchestrator (opus 5.5, configured; spare), stale since 8:58 PM");
+    expect(presenceText({ ...restored, stale: false, stale_since: null }, NOW))
+      .toBe("Orchestrator (opus 5.5, configured; spare), last seen 2m ago");
+  });
 });
 
 describe("queue", () => {

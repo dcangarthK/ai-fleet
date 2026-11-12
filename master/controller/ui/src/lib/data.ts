@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { WorkItem } from "./lineage";
-import { ApiError, get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageRow } from "./api";
+import { ApiError, get, post, type CatalogModel, type Fleet, type FleetEvent, type Me, type Task, type UsageResponse } from "./api";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,7 +16,7 @@ export const useWork = (includeHidden: boolean) =>
 export const useTask = (id: string | undefined) =>
   useQuery({ queryKey: ["task", id], queryFn: () => get<Task>(`/api/tasks/${id}`), enabled: !!id });
 export const useUsage = (days = 1) =>
-  useQuery({ queryKey: ["usage", days], queryFn: () => get<UsageRow[]>(`/api/usage?days=${days}`) });
+  useQuery({ queryKey: ["usage", days], queryFn: () => get<UsageResponse>(`/api/usage?days=${days}`) });
 /** The catalog with per-node install state; polls faster while anything is installing. */
 export const useModels = () =>
   useQuery({

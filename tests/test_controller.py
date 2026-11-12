@@ -1940,8 +1940,40 @@ Imported body.
 
     def test_usage(self):
         self.task()
-        rows = self.c.get("/api/usage").json()
-        self.assertTrue(any(r["node_id"] == "master" and r["agent"] == "claude" for r in rows))
+        body = self.c.get("/api/usage").json()
+        self.assertTrue(any(r["node_id"] == "master" and r["agent"] == "claude" for r in body["rows"]))
+
+    def test_usage_states_its_window(self):
+        before = time.time()
+        body = self.c.get("/api/usage?days=3").json()
+        self.assertEqual(body["window_days"], 3)
+        self.assertAlmostEqual(body["until"] - body["since"], 3 * 86400, delta=5)
+        self.assertGreaterEqual(body["until"], before)
+
+    def test_usage_failed_counts_only_unsettled_failures(self):
+        """Req 9: done_elsewhere, handed_off and merged-work-item failures are settled, not failures."""
+        def failed_task(state="failed", **fields):
+            t = self.task()
+            with db() as c:
+                c.execute("UPDATE tasks SET state=?, node_id='usage-node' WHERE id=?", (state, t["id"]))
+                for column, value in fields.items():
+                    c.execute(f"UPDATE tasks SET {column}=? WHERE id=?", (value, t["id"]))
+            return t["id"]
+
+        def failed_now() -> int:
+            rows = self.c.get("/api/usage").json()["rows"]
+            return sum(r["failed"] for r in rows if r["node_id"] == "usage-node")
+
+        self.assertEqual(failed_now(), 0)
+        failed_task()
+        failed_task("interrupted")
+        self.assertEqual(failed_now(), 2)
+        failed_task(resolution=json.dumps({"kind": "done_elsewhere", "by": "me", "commit": "abc1234"}))
+        failed_task(resolution=json.dumps({"kind": "handed_off", "task_id": "t-00000000", "agent": "claude"}))
+        self.assertEqual(failed_now(), 2)
+        root = failed_task(outcome=json.dumps({"kind": "merged", "commit": "abc1234"}))
+        failed_task(parent_id=root)
+        self.assertEqual(failed_now(), 2)  # root and child both belong to a merged work item
 
     # ---------- phase 8: operations ----------
 

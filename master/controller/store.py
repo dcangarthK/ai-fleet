@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS slot_flags (
 CREATE TABLE IF NOT EXISTS activity (
     id TEXT PRIMARY KEY, ts REAL, updated_at REAL, ended_at REAL, actor TEXT, session TEXT, title TEXT, kind TEXT,
     account_label TEXT, model TEXT, work_item TEXT, status TEXT, tokens TEXT, note TEXT);
+CREATE TABLE IF NOT EXISTS presence (
+    session TEXT PRIMARY KEY, model TEXT, account_label TEXT, last_seen REAL);
 CREATE TABLE IF NOT EXISTS limit_resets (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, at REAL, actor TEXT);
 """

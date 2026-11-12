@@ -155,7 +155,7 @@ class DisplayStatusTests(unittest.TestCase):
 
     def test_running_and_queued(self):
         self.assertEqual(self.ds(state="queued"), {"tone": "running", "label": "Queued"})
-        self.assertEqual(self.ds(state="starting"), {"tone": "running", "label": "Working"})
+        self.assertEqual(self.ds(state="starting"), {"tone": "running", "label": "Starting"})
         self.assertEqual(self.ds(state="working"), {"tone": "running", "label": "Working"})
 
     def test_waiting_on_a_person(self):
@@ -519,7 +519,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(len(item["attempts"]), 2)
         first, last = item["attempts"]
         self.assertEqual((first["id"], last["id"]), (t["id"], t["id"]))
-        self.assertEqual(first["display"]["tone"], "paused")
+        self.assertEqual(first["display"], {"tone": "muted", "label": "Resumed"})  # a resumed run is not "Paused"
         self.assertEqual(first["failure_reason"], "limit")
         self.assertEqual(last["display"]["label"], "Ready for review")
 

@@ -911,6 +911,7 @@ class PipelineTests(HandoffBase):
         self.assertEqual(current["budget"]["paid_rounds"], [1])
 
     def test_review_independence_across_every_build_attempt(self):
+        self.put_rules(rules(limit_scope="model"))  # the walk assumes Opus and Sonnet limit apart
         p = self.start(reviewer=SONNET)
         first = p["build_task"]
         self.limit(first)

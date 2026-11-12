@@ -350,6 +350,7 @@ class AccountTests(LiveBase):
         return self.get(t["id"])
 
     def test_limit_event_usage_label_and_account_room(self):
+        self.c.put("/api/budget/rules", json={"body": rules(limit_scope="model")}, headers=W)  # legacy: one model limited
         t = self.limited_task()
         with db() as c:
             row = c.execute("SELECT account_label FROM agent_usage WHERE task_id=?", (t["id"],)).fetchone()
@@ -508,6 +509,7 @@ class OwnerRequirementTests(LiveBase):
                                                      "claude:" + model, outcome, resets_at, account))
 
     def test_limit_state_comes_from_the_account(self):
+        self.c.put("/api/budget/rules", json={"body": rules(limit_scope="model")}, headers=W)  # legacy: one model limited
         t = self.paused()
         self.assertEqual(t["display"]["tone"], "paused")
         other = self.ok(agent="claude", model=SONNET, kind="draft", profile="fleet")  # a different identity succeeds

@@ -18,7 +18,7 @@ RESOLUTION_KINDS = ("resolved_by", "dismissed", "done_elsewhere", "handed_off")
 HANDOFF_KINDS = ("handing_off", "handed_off")
 OUTCOME_KINDS = ("merged", "done", "abandoned")
 FAILURE_STATES = {"failed", "blocked", "interrupted", "cancelled"}
-RUNNING = {"queued": "Queued", "starting": "Working", "working": "Working"}
+RUNNING = {"queued": "Queued", "starting": "Starting", "working": "Working"}
 # A successful attempt linked like this continues the work of the attempt it follows.
 CHAIN_LINKS = {"retry", "resume", "fix"}
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")

@@ -269,8 +269,12 @@ def pipeline_strip(p: dict) -> list[dict]:
     if strip:
         if not terminal:
             strip[-1]["state"] = "current"
-        elif p.get("state") in ("failed", "escalated", "cancelled"):
+        elif p.get("state") == "cancelled":
+            strip[-1]["state"] = "superseded"  # not a failure: a cancelled pipeline reads Cancelled, muted
+            strip[-1]["display"] = {"tone": "muted", "label": "Cancelled"}
+        elif p.get("state") in ("failed", "escalated"):
             strip[-1]["state"] = "failed"
+            strip[-1]["display"] = {"tone": "attention", "label": p["state"].capitalize()}
     return strip
 
 

@@ -74,6 +74,9 @@ describe("stage strips", () => {
     expect(stageChip({ ...settled, display: { tone: "muted", label: "Cancelled" } }).className).toBe("stage stage-tone-muted");
     expect(stageChip({ ...settled, display: { tone: "attention", label: "Failed: error" } }).className).toBe("stage stage-tone-attention");
     expect(stageTitle(settled)).toBe("build: Done elsewhere · ec2ab20");
+    const cancelled = { stage: "cancelled", state: "superseded" as const, display: { tone: "muted" as const, label: "Cancelled" } };
+    expect(stageChip(cancelled).className).toBe("stage stage-tone-muted");
+    expect(stageTitle(cancelled)).toBe("cancelled: Cancelled");
     expect(stageTitle({ stage: "next", state: "next" })).toBe("next: next");
   });
 });

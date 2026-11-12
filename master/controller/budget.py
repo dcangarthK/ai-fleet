@@ -56,7 +56,8 @@ DEFAULT_RULES = {
                # counted apart from limit handoffs; the next stall escalates.
                "on_task_stall": {"*": "reroute"}, "max_stall_handoffs": 2},
     "effort_ladder": {"build": ["medium", "medium", "high"], "fix": ["low", "medium", "high"], "re_review": ["low", "medium"]},
-    "limit_scope": "model",
+    # "auto": a Claude limit holds the whole account (every model shares it), Codex limits stay per model.
+    "limit_scope": "auto",
     "review_exec": {"tools": ["Read", "Grep", "Glob"], "max_turns": 8, "task_minutes": 15},
     "reviews": {"stages": ["local", "paid"], "max_paid_rounds": 2, "max_codex_rounds": 1, "paid_skip_when": None,
                 "security_paths": ["master/controller/auth.py", "master/controller/policy.py", "nodes/runner.py",
@@ -215,8 +216,8 @@ def validate_rules(body) -> dict:
     if not isinstance(ladder, dict) or any(k not in KINDS or not isinstance(v, list) or not v
                                            or any(e not in EFFORTS for e in v) for k, v in ladder.items()):
         raise ValueError("effort_ladder maps kinds to non-empty lists of low, medium or high")
-    if body["limit_scope"] not in ("model", "account"):
-        raise ValueError("limit_scope must be model or account")
+    if body["limit_scope"] not in ("model", "account", "auto"):
+        raise ValueError("limit_scope must be auto, model or account")
     review = body["review_exec"]
     if not isinstance(review, dict):
         raise ValueError("review_exec must be an object")
@@ -448,7 +449,7 @@ def _succeeded(row: dict) -> bool:
     return state in ("review", "done") if state is not None else row.get("failure_reason") is None
 
 
-def limit_state(rows: list[dict], now: float, scope: str = "model", rules: dict | None = None) -> dict:
+def limit_state(rows: list[dict], now: float, scope: str = "auto", rules: dict | None = None) -> dict:
     """{"models": {identity: until}, "accounts": {agent: until}} from settled task rows.
 
     A model is limited while one of its tasks failed with a limit whose reset is still ahead, unless a task of
@@ -483,7 +484,7 @@ def limit_state(rows: list[dict], now: float, scope: str = "model", rules: dict 
         known = by_agent.setdefault(agent, {})
         known[distinct] = max(until, known.get(distinct, 0))
     for agent, untils in by_agent.items():
-        if scope == "account" or len(untils) >= 2:
+        if scope == "account" or (scope == "auto" and agent == "claude") or len(untils) >= 2:
             accounts[agent] = max(untils.values())
     return {"models": models, "accounts": accounts}
 
@@ -572,6 +573,19 @@ def seed_rules() -> None:
         if not c.execute("SELECT 1 FROM budget_rules LIMIT 1").fetchone():
             c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (1, ?, 'seed', ?)",
                       (json.dumps(DEFAULT_RULES), time.time()))
+        # One-time: bodies stored while the default was "model" keep it forever through with_defaults, which left
+        # Opus and Fable looking free after a Sonnet limit. Move the latest body to "auto" once, as a new version
+        # (history keeps the old one, restorable).
+        latest = c.execute("SELECT version, body FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+        if latest and not c.execute("SELECT 1 FROM budget_rules WHERE author='migration:limit_scope'").fetchone():
+            try:
+                body = json.loads(latest["body"])
+            except (ValueError, TypeError):
+                body = None
+            if isinstance(body, dict) and body.get("limit_scope") == "model":
+                c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (?, ?, ?, ?)",
+                          (latest["version"] + 1, json.dumps(body | {"limit_scope": "auto"}),
+                           "migration:limit_scope", time.time()))
 
 
 def rules_row() -> dict:
@@ -770,7 +784,7 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     rows = [r for r in rows if not (r["agent"] == "codex" and r["failure_reason"] == "limit"
                                     and (rec := records.get(r["account"] or account))
                                     and rec.get("seen_at") and r["ended_at"] <= rec["seen_at"])]
-    state = limit_state(rows, now, rules.get("limit_scope", "model"), rules)
+    state = limit_state(rows, now, rules.get("limit_scope", "auto"), rules)
     ends = [until for owner, rec in records.items() if (account is None or owner == account)
             and (until := rate_limit_until(rec, now))]
     if ends:

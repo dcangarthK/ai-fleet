@@ -29,7 +29,7 @@ import policy as fleet_policy
 import presence
 import skills as fleet_skills
 from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part of this module's surface)
-    CHAIN_LINKS, FAILURE_STATES, HANDOFF_KINDS, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, clock, display_status,
+    CHAIN_LINKS, FAILURE_STATES, HANDOFF_KINDS, LINKS, OUTCOME_KINDS, RESOLUTION_KINDS, RUNNING, clock, display_status,
     failure_reason,
     parse_reset, provider_limit, resolution_targets, tail, valid_commit,
 )
@@ -582,12 +582,15 @@ def live_display(t: dict, now: float | None = None, ctx: DisplayContext | None =
     now = time.time() if now is None else now
     shown = display_status(t, now=now)
     state = t.get("state")
+    ctx = ctx or DisplayContext(now)
+    # Row 1 wins for every state: a finished attempt of a merged work item reads Merged too. A running attempt
+    # is still running.
+    if state not in RUNNING:
+        merged = ctx.root_outcome(t["id"])
+        if merged and merged.get("kind") == "merged":
+            return outcome_display(merged)
     if state not in ("failed", "interrupted", "blocked"):
         return shown  # running, review, done, awaiting_approval, cancelled: no failure to rescue
-    ctx = ctx or DisplayContext(now)
-    merged = ctx.root_outcome(t["id"])
-    if merged and merged.get("kind") == "merged":
-        return outcome_display(merged)
     if t.get("resolution"):
         return shown
     later = ctx.superseded_by(t)
@@ -1828,8 +1831,16 @@ def attempt_entries(row: dict, resumed: list[dict], ctx: "DisplayContext | None"
     out, started = [], row["started_at"] or at
     for number, event in enumerate(resumed, start=1):
         data = event["data"]
-        shown = ({"tone": "muted", "label": "Auto-approved and resumed"} if data.get("auto_approved")
-                 else data.get("display") or {"tone": "muted", "label": str(data.get("from"))})
+        # An earlier run is judged by what happened after it, not by how it stopped: it was resumed.
+        merged = ctx.root_outcome(row["id"]) if ctx else None
+        if merged and merged.get("kind") == "merged":
+            shown = outcome_display(merged)
+        elif data.get("auto_approved"):
+            shown = {"tone": "muted", "label": "Auto-approved and resumed"}
+        elif data.get("from") in ("blocked", "awaiting_approval"):
+            shown = {"tone": "muted", "label": "Approved and resumed"}
+        else:
+            shown = {"tone": "muted", "label": "Resumed"}
         out.append(entry(state=data.get("from"), display=shown,
                          failure_reason=data.get("failure_reason"), started_at=started, ended_at=data.get("ended_at"),
                          run=number, at=at))

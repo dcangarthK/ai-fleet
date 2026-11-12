@@ -125,7 +125,10 @@ class FixtureWorkItems(DisplayBase):
         self.assertEqual(self.api_task(gate), want)
         self.assertEqual(self.work(root)[1][gate], want)
         self.assertEqual(self.work(root)[0]["display"], want)
-        self.assertEqual(self.api_task(good)["label"], "Ready for review")  # a successful attempt keeps its state
+        # row 1 wins for every state: a finished attempt of a merged item reads Merged too, on every surface
+        self.assertEqual(self.api_task(good), want)
+        self.assertEqual(self.list_task(good), want)
+        self.assertEqual(self.work(root)[1][good], want)
 
     def test_superseded_by_later_success_without_a_stored_resolution(self):
         root = self.put(link="build", state="failed")
@@ -178,6 +181,52 @@ class FixtureWorkItems(DisplayBase):
         root = self.put(state="done", failure_reason=None, exit_code=0)
         stage = self.stages(root)[0]
         self.assertEqual(stage["display"], {"tone": "ok", "label": "Done"})
+
+    def test_merged_item_stage_reads_merged(self):
+        root = self.put(outcome={"kind": "merged", "commit": "ec2ab20", "at": time.time()}, state="done",
+                        failure_reason=None, exit_code=0)
+        self.assertEqual(self.stages(root)[0]["display"], {"tone": "ok", "label": "Merged · ec2ab20"})
+
+    def resumed_event(self, task, **data):
+        with db() as c:
+            c.execute("INSERT INTO events (ts,task_id,type,data) VALUES (?,?,?,?)",
+                      (time.time() + 5, task, "task.resumed", json.dumps(data)))
+
+    def first_run(self, root, task):
+        item = self.work(root)[0]
+        return [a for a in item["attempts"] if a["id"] == task][0]["display"]
+
+    def test_earlier_run_of_a_limit_paused_task_is_not_paused_once_resumed(self):
+        t = self.put(state="review", failure_reason=None, exit_code=0, runs=2)
+        self.resumed_event(t, run=2, **{"from": "failed"}, failure_reason="limit",
+                           display={"tone": "paused", "label": "Paused: limit, resets 7:30 PM"})
+        self.assertEqual(self.first_run(t, t), {"tone": "muted", "label": "Resumed"})
+
+    def test_earlier_run_blocked_then_approved_reads_approved_and_resumed(self):
+        t = self.put(state="working", failure_reason=None, exit_code=None, runs=2)
+        self.resumed_event(t, run=2, **{"from": "blocked"}, failure_reason="denied",
+                           display={"tone": "attention", "label": "Blocked: needs approval"})
+        self.assertEqual(self.first_run(t, t), {"tone": "muted", "label": "Approved and resumed"})
+
+    def test_earlier_run_in_a_merged_item_reads_merged(self):
+        root = self.put(outcome={"kind": "merged", "commit": "ec2ab20", "at": time.time()}, state="done",
+                        failure_reason=None, exit_code=0)
+        child = self.put(parent_id=root, link="fix", state="review", failure_reason=None, exit_code=0, runs=2)
+        self.resumed_event(child, run=2, **{"from": "failed"}, failure_reason="error",
+                           display={"tone": "attention", "label": "Failed: error"})
+        self.assertEqual(self.first_run(root, child), {"tone": "ok", "label": "Merged · ec2ab20"})
+
+    def test_starting_reads_starting(self):
+        t = self.put(state="starting", failure_reason=None, exit_code=None)
+        self.same_everywhere(t, t, "Starting", "running")
+
+    def test_cancelled_pipeline_strip_is_not_red(self):
+        import live
+        strip = live.pipeline_strip({"state": "cancelled", "history": [{"state": "building"}, {"state": "cancelled"}]})
+        self.assertEqual(strip[-1]["display"], {"tone": "muted", "label": "Cancelled"})
+        self.assertNotEqual(strip[-1]["state"], "failed")
+        failed = live.pipeline_strip({"state": "failed", "history": [{"state": "building"}, {"state": "failed"}]})
+        self.assertEqual(failed[-1]["display"]["tone"], "attention")
 
 
 class BatchTests(DisplayBase):

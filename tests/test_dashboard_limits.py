@@ -136,6 +136,7 @@ class OneHelperTests(LimitBase):
         self.set_rules(**{"models__codex:gpt-5.6-terra": dict(entry), "models__codex:gpt-5.6-sol": dict(entry)})
         now = time.time()
         with db() as c:
+            c.execute("DELETE FROM agent_usage WHERE agent='codex'")  # other tests' runs must not name the model
             for ts, model in ((now - 300, "gpt-5.6-sol"), (now - 60, "gpt-5.6-terra")):
                 c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,account) "
                           "VALUES (?,?,?,?,?,?,?,?)", (ts, f"t-ok{time.time_ns()}", 1, "codex", model,

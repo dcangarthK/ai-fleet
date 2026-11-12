@@ -15,6 +15,11 @@ from tests.test_runner_budget import Base, runner  # noqa: E402
 ENDLESS = r'''#!{python}
 import json, sys, time
 sys.stdin.read()
+if "--resume" in sys.argv:  # the one stop run: commit and write the handoff
+    open(sys.argv[0] + ".resumed", "w").write(" ".join(sys.argv))
+    print(json.dumps({{"type": "assistant", "message": {{"id": "h1", "content": [
+        {{"type": "text", "text": "handoff: committed"}}]}}}}))
+    sys.exit(0)
 print(json.dumps({{"type": "system", "session_id": "s1"}}), flush=True)
 print(json.dumps({{"type": "rate_limit_event", "rate_limit_info": {{"status": "allowed", "unifiedWindows": {{
     "five_hour": {{"utilization": 0.3, "resetsAt": 1763000000}}}}}}}}), flush=True)
@@ -79,9 +84,11 @@ class Caps(Base):
         self.assertEqual(job["state"], "capped")
         self.assertEqual(job["cap"]["reason"], "turns")
         self.assertEqual(job["cap"]["limit"], 2)
-        self.assertEqual(job["cap"]["stop"], "terminated")
+        self.assertEqual(job["cap"]["stop"], "resumed")  # the stop run committed and wrote the handoff
         self.assertEqual(job["turns_seen"], 2)  # repeated message ids count once
-        self.assertTrue(job["result"].startswith("step "))
+        self.assertEqual(job["result"], "handoff: committed")
+        args = (self.bin / "claude.resumed").read_text().split()
+        self.assertEqual(args[args.index("--resume") + 1], "s1")
         self.assertEqual((self.fleet / "jobs" / "cap1" / "handoff.md").read_text().strip(), job["result"])
         self.assertIsNone(job["exit_code"])
         self.assertIn("capped", self.m.public(job)["state"])
@@ -122,6 +129,44 @@ class Caps(Base):
         self.assertEqual(self.m.claude_usage(), {})
 
 
+class Watch(Base):
+    """_watch_stream on a hand-written log."""
+
+    def state(self, job, **kw):
+        return {"pos": 0, "buf": b"", "ids": set(), "cap": None, "dirty": False, "pending": set(), "stamp_from": 0,
+                "caps": {"turns": 1}} | kw
+
+    def write(self, job, events):
+        path = self.fleet / "jobs" / job["id"] / "events.jsonl"
+        with open(path, "ab") as handle:
+            for event in events:
+                handle.write((json.dumps(event) + "\n").encode())
+
+    def test_waits_for_every_tool_result_of_the_turn(self):
+        job, st = self.job(), None
+        st = self.state(job)
+        use = {"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "tool_use", "id": "a"}, {"type": "tool_use", "id": "b"}]}}
+        result = lambda i: {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": i}]}}
+        self.write(job, [use, result("a")])
+        self.assertIsNone(self.m._watch_stream(job, st))  # "b" has no result yet
+        self.write(job, [result("b")])
+        self.assertEqual(self.m._watch_stream(job, st)["reason"], "turns")
+
+    def test_restored_monitor_does_not_stamp_old_rate_limit_events(self):
+        job = self.job()
+        event = {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": 1763000000}}}}
+        self.write(job, [event])
+        size = (self.fleet / "jobs" / job["id"] / "events.jsonl").stat().st_size
+        st = self.state(job, stamp_from=size, caps={})
+        self.m._watch_stream(job, st)
+        self.assertNotIn("rate_limit", job)  # caught up on old lines only
+        self.write(job, [event])
+        self.m._watch_stream(job, st)
+        self.assertIn("observed_at", job["rate_limit"])  # a line written after the restore is live
+
+
 class Launch(Base):
     def setUp(self):
         super().setUp()
@@ -150,11 +195,11 @@ class Launch(Base):
             self.assertEqual(settings.parent, self.m._job_dir(job))
             text = settings.read_text()
             self.assertNotIn("{{", text)
-            self.assertEqual(json.loads(text)["permissions"]["allow"],
-                             json.loads((runner.WORKER_DIR / ("settings-%s.json" % profile)).read_text())
-                             ["permissions"]["allow"])
+            self.assertNotIn("allow", json.loads(text).get("permissions", {}))  # tool control: runner flags only
             if profile != "review":
-                self.assertIn(str(runner.WORKER_DIR / "quiet_bash.py"), text)
+                hook = json.loads(text)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+                import shlex
+                self.assertEqual(shlex.split(hook), [sys.executable, str(runner.WORKER_DIR / "quiet_bash.py")])
             mcp = Path(cmd[cmd.index("--mcp-config") + 1])
             self.assertTrue(mcp.is_absolute() and mcp.name == "mcp-empty.json")
 

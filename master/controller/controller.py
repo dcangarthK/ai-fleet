@@ -1915,7 +1915,7 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 if result["action"] in ("handoff", "wait", "left"):
                     await _pipeline_step_unlocked(p, {"type": "build_limited", **result})
                 return
-            if build["state"] in ("review", "failed", "interrupted", "cancelled"):
+            if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped"):
                 await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"]})
             return
         if p["state"] == "review_waiting":
@@ -1946,7 +1946,7 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 _pipeline_events(p, before)
                 return
             # "blocked" counts as finished too: a read-only reviewer that hit a denied tool still has its answer.
-            if all(part["state"] in ("review", "failed", "interrupted", "blocked") for part in parts):
+            if all(part["state"] in ("review", "failed", "interrupted", "blocked", "capped") for part in parts):
                 limited = [part for part in parts if handoff.limit_failure(part)]
                 if limited:
                     # Not a finished review and not a paid round: wait for the reset, then review again.

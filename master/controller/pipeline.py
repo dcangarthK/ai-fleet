@@ -236,6 +236,12 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
             p["reviews"] = {str(i): {"status": "pending"} for i in range(len(p["reviewers"]))}
             _history(p, "reviewing")
             return p, [{"do": "spawn_review", "reviewer": i} for i in range(len(p["reviewers"]))]
+        if state == "capped":
+            # Hit its turn/context cap (Part H 3.2): settled, not a failure. Automatic continuation comes later
+            # (Part H 3.3); until then the owner decides, so the pipeline stops building.
+            p["state"] = "escalated"
+            _history(p, "escalated", note="builder task capped (turn or context cap); needs a continuation")
+            return p, []
         if state in ("failed", "interrupted", "cancelled"):
             p["state"] = "failed"
             _history(p, "failed", note=f"builder task {state}")

@@ -737,6 +737,7 @@ DEFAULT_TOKEN_CAPS = {
     "test": {"turns": 20},
 }
 STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"
+CAP_STOP_SECONDS = 300  # the one resumed run that commits and writes the handoff
 
 
 def lean_enabled():
@@ -763,7 +764,8 @@ def lean_module():
 
 
 def token_caps(kind):
-    """{turns, context} caps for a task kind (any key may be missing); {} for no caps."""
+    """{turns, context} caps for a task kind (any key may be missing); {} for no caps. Caps apply to every Claude
+    job that has a kind, whether or not FLEET_LEAN_PROFILE is on (the flag only changes the launch)."""
     if not isinstance(kind, str) or not kind:
         return {}
     caps = {name: dict(values) for name, values in DEFAULT_TOKEN_CAPS.items()}
@@ -2284,8 +2286,8 @@ class JobManager:
 
     def refresh(self, job):
         with self.lock:
-            if job.get("state") != "running":
-                return
+            if job.get("state") != "running" or job.get("capping"):
+                return  # a capped job is being stopped and resumed by its monitor (_cap_stop)
             exit_path = self._job_dir(job) / job.get("exit_file", "exit_code")
             exit_code = None
             try:
@@ -2392,9 +2394,12 @@ class JobManager:
             return None
         st["pos"] += len(chunk)
         data = st["buf"] + chunk
+        start = st["pos"] - len(data)  # file offset of data[0]
         *lines, st["buf"] = data.split(b"\n")
         caps = st["caps"]
+        end = start
         for raw in lines:
+            end += len(raw) + 1  # file offset just after this line
             if b'"assistant"' not in raw and b'"rate_limit_event"' not in raw and b'"user"' not in raw:
                 continue
             try:
@@ -2404,7 +2409,7 @@ class JobManager:
             kind = event.get("type") if isinstance(event, dict) else None
             if kind == "rate_limit_event":
                 found = self._rate_limit_from_event(event)
-                if found:
+                if found and end > st["stamp_from"]:  # a restored monitor's catch-up lines are old: never stamped
                     job["rate_limit"] = {**found, "observed_at": time.time()}
                     st["dirty"] = True
             elif kind == "assistant":
@@ -2413,6 +2418,9 @@ class JobManager:
                 if isinstance(mid, str) and mid not in st["ids"]:
                     st["ids"].add(mid)
                     job["turns_seen"] = len(st["ids"])
+                for block in message.get("content") if isinstance(message.get("content"), list) else []:
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                        st["pending"].add(block["id"])
                 usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
                 context = sum(v for v in (usage.get("input_tokens"), usage.get("cache_read_input_tokens"),
                                           usage.get("cache_creation_input_tokens"))
@@ -2423,17 +2431,24 @@ class JobManager:
                     elif caps.get("context") and context >= caps["context"]:
                         st["cap"] = {"reason": "context", "limit": caps["context"], "context": context,
                                      "turns": len(st["ids"])}
-            elif kind == "user" and st["cap"] is not None:
-                return st["cap"]  # the turn that hit the cap has finished its tool calls
+            elif kind == "user":
+                message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                for block in message.get("content") if isinstance(message.get("content"), list) else []:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        st["pending"].discard(block.get("tool_use_id"))
+                if st["cap"] is not None and not st["pending"]:
+                    return st["cap"]  # every tool call of the turn that hit the cap has its result
         return None
 
     def _cap_stop(self, job, cap):
         """Stop a job at its cap after the current turn and settle it `capped`. The prompt arrives on a file, so the
-        session cannot take the stop instruction (STOP_INSTRUCTION); it is terminated after the current turn and
-        its last text kept as the summary."""
+        running session cannot take the stop instruction: it is terminated, then its session is resumed once with
+        STOP_INSTRUCTION (max 5 turns) so the work is committed and the handoff summary written (spec Part H 5: a cap
+        never cuts off a commit). The job stays `running` until that run ends."""
         with self.lock:
-            if job.get("state") != "running":
+            if job.get("state") != "running" or job.get("capping"):
                 return
+            job["capping"] = True  # refresh() must not call the killed process `lost`
             pid = job.get("pid")
             if self._group_ok(job):
                 try:
@@ -2448,25 +2463,58 @@ class JobManager:
             else:
                 self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
             self._parse_events_safe(job)
+        stop = "terminated"
+        try:
+            if self._stop_run(job):
+                stop = "resumed"
+        except Exception as exc:
+            self.audit("cap_resume_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+        with self.lock:
+            self._parse_events_safe(job)
             job.pop("max_turns_hit", None)
+            job.pop("capping", None)
             job["exit_code"] = None
-            self._mark_capped(job, {**cap, "stop": "terminated"})
+            self._mark_capped(job, {**cap, "stop": stop})
             self._save(job)
+
+    def _stop_run(self, job):
+        """Resume the capped session once with the stop instruction. Its output is appended to events.jsonl, so the
+        last assistant text (the handoff summary) is read from there. False when there is no session to resume."""
+        if not job.get("session_id"):
+            return False
+        run = {**job, "max_turns": 5}
+        cmd = self._command(run, STOP_INSTRUCTION, job.get("allowed_tools"), True)
+        env = self.agent_env(job["agent"], os.environ.copy(), job.get("profile_id"))
+        env["PATH"] = agent_search_path()
+        if lean_profile_kind(job.get("kind")) and lean_enabled():
+            env["FLEET_JOB_DIR"] = str(self._job_dir(job))
+        done = subprocess.run(cmd, cwd=job["cwd"], env=env, input=STOP_INSTRUCTION.encode(),
+                              capture_output=True, timeout=CAP_STOP_SECONDS)
+        with open(self._job_dir(job) / "events.jsonl", "ab") as log:
+            log.write(done.stdout if done.stdout.endswith(b"\n") or not done.stdout else done.stdout + b"\n")
+        return True
 
     def _start_monitor(self, job, process=None):
         def monitor():
             deadline = self._deadline(job)
             offset = job.get("events_offset")
             watch = {"pos": offset if isinstance(offset, int) and offset >= 0 else 0, "buf": b"", "ids": set(),
-                     "cap": None, "dirty": False,
+                     "cap": None, "dirty": False, "pending": set(), "stamp_from": 0,
                      "caps": token_caps(job.get("kind")) if job.get("agent") == "claude" else {}}
+
+            if process is None:  # restored after a runner restart: what is already in the log is old
+                try:
+                    watch["stamp_from"] = (self._job_dir(job) / "events.jsonl").stat().st_size
+                except OSError:
+                    pass
 
             def observe(allow_cap=True):
                 try:
                     cap = self._watch_stream(job, watch)
                     if watch["dirty"]:
                         watch["dirty"] = False
-                        self._save(job)
+                        with self.lock:
+                            self._save(job)
                     if cap is not None and allow_cap and job.get("state") == "running":
                         self._cap_stop(job, cap)
                 except Exception as exc:
@@ -2889,9 +2937,24 @@ class JobManager:
             template = WORKER_DIR / ("settings-%s.json" % profile)
             if module is None or not template.is_file() or not (WORKER_DIR / "mcp-empty.json").is_file():
                 return []
+            settings = json.loads(template.read_text(encoding="utf-8"))
+            # Tool control stays with the runner's own flags (claude_allow, --tools, plan mode): the template's
+            # permissions.allow would widen a policy-narrowed or read-only job.
+            if isinstance(settings.get("permissions"), dict):
+                settings["permissions"].pop("allow", None)
+            command = shlex.join([sys.executable, str(WORKER_DIR / "quiet_bash.py")])  # quoted, absolute
+
+            def fill(value):
+                if isinstance(value, str):
+                    return module.render_settings(value.replace("python3 " + module.QUIET_BASH_PLACEHOLDER, command),
+                                                  str(WORKER_DIR / "quiet_bash.py"))
+                if isinstance(value, list):
+                    return [fill(item) for item in value]
+                if isinstance(value, dict):
+                    return {key: fill(item) for key, item in value.items()}
+                return value
             rendered = self._job_dir(job) / "settings.json"
-            rendered.write_text(module.render_settings(template.read_text(encoding="utf-8"),
-                                                       str(WORKER_DIR / "quiet_bash.py")), encoding="utf-8")
+            rendered.write_text(json.dumps(fill(settings), indent=2), encoding="utf-8")
             return [*module.LAUNCH_ARGS, "--settings", str(rendered),
                     "--mcp-config", str(WORKER_DIR / "mcp-empty.json")]
         except Exception as exc:
@@ -3004,7 +3067,7 @@ class JobManager:
         raw = open(events_path, "ab", buffering=0)
         env = self.agent_env(job["agent"], os.environ.copy(), job.get("profile_id"))
         env["PATH"] = agent_search_path()
-        if job["agent"] == "claude" and job.get("kind"):
+        if job["agent"] == "claude" and lean_profile_kind(job.get("kind")) and lean_enabled():
             env["FLEET_JOB_DIR"] = str(job_dir)  # quiet_bash saves full test output here
         try:
             if os.name == "nt":

@@ -378,7 +378,7 @@ class ControllerTests(unittest.TestCase):
         r = self.c.get(f"/api/tasks/wait?ids={t['id']}&timeout=5").json()
         self.assertEqual(r["tasks"][0]["state"], "review")
         self.assertEqual(r["tasks"][0]["result"], "done!")
-        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
+        types = [e["type"] for e in self.c.get("/api/events/list?after=0&limit=1000").json() if e["task_id"] == t["id"]]
         self.assertEqual(types, ["task.queued", "task.starting", "task.working", "task.review"])
         self.assertEqual(self.c.get(f"/api/tasks/{t['id']}/diff").json()["diff"], "+hello")
         self.assertEqual(self.c.post(f"/api/tasks/{t['id']}/complete", headers=W).json()["state"], "done")
@@ -634,7 +634,7 @@ class ControllerTests(unittest.TestCase):
             wait_for(lambda: [b for p_, b in FakeRunner.calls if p_ == f"/jobs/{t['id']}/message"])
             msg = [b for p_, b in FakeRunner.calls if p_ == f"/jobs/{t['id']}/message"][0]
             self.assertEqual(msg["allowed_tools"], ["Bash"])
-            types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
+            types = [e["type"] for e in self.c.get("/api/events/list?after=0&limit=1000").json() if e["task_id"] == t["id"]]
             self.assertIn("task.auto_approved", types)
         finally:
             self.c.put("/api/policies/agent/claude", json={"body": {}}, headers=W)
@@ -739,7 +739,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual([(row["version"], row["body"]) for row in current], [(2, bodies[1])])
         history = self.c.get(f"/api/policies/role/{role}/history").json()
         self.assertEqual([(row["version"], row["body"]) for row in history], [(2, bodies[1]), (1, bodies[0])])
-        changed = [event for event in self.c.get("/api/events/list?limit=1000").json()
+        changed = [event for event in self.c.get("/api/events/list?after=0&limit=1000").json()
                    if event["type"] in ("instructions.changed", "policy.changed")
                    and event["data"].get("scope_id") == role]
         self.assertEqual([event["type"] for event in changed],
@@ -1219,7 +1219,7 @@ Imported body.
             refused = self.c.post("/api/pipelines", json={**body,
                 "reviewers": [{"kind": "agent", "agent": "claude"}]}, headers=W)
             self.assertEqual(refused.status_code, 400)
-            types = [event["type"] for event in self.c.get("/api/events/list?limit=1000").json()
+            types = [event["type"] for event in self.c.get("/api/events/list?after=0&limit=1000").json()
                      if event["data"].get("id") == pipeline_id]
             self.assertIn("pipeline.reviewing", types)
             self.assertIn("pipeline.resolving", types)
@@ -1728,7 +1728,7 @@ Imported body.
         self.assertEqual(sent[0]["ref"], "tiny:1b")
         self.assertEqual(sent[0]["derived"], "fleet-tiny-1b")
         self.assertEqual(sent[0]["params"], {"temperature": 0.1})
-        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json()]
+        types = [e["type"] for e in self.c.get("/api/events/list?after=0&limit=1000").json()]
         self.assertIn("model.state", types)
         # Can't drop it from the catalog while a node should have it.
         self.assertEqual(self.c.delete("/api/models/tiny-1b", headers=W).status_code, 409)
@@ -1982,7 +1982,7 @@ Imported body.
             wrong = self.c.post("/api/enroll/complete", json={"code": "AAAAAAAAAA", "hostname": "p8-host",
                                                                 "runner_token": "secret-runner-token"})
             self.assertEqual(wrong.status_code, 403)
-            audit = self.c.get("/api/events/list?limit=1000").json()
+            audit = self.c.get("/api/events/list?after=0&limit=1000").json()
             self.assertTrue(any(event["type"] == "enrollment.failed" for event in audit))
 
             completed = self.c.post("/api/enroll/complete", json={"code": enrollment["code"],
@@ -2075,7 +2075,7 @@ Imported body.
         self.assertEqual(toggled.status_code, 200, toggled.text)
         tested = self.c.post(f"/api/notify-rules/{rule['id']}/test", headers=W)
         self.assertEqual(tested.status_code, 200, tested.text)
-        self.assertTrue(any(event["type"] == "notify.test" for event in self.c.get("/api/events/list?limit=1000").json()))
+        self.assertTrue(any(event["type"] == "notify.test" for event in self.c.get("/api/events/list?after=0&limit=1000").json()))
 
     def test_retention_cleans_worktrees_prunes_events_and_only_marks_models_idle(self):
         task = self.task()

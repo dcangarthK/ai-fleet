@@ -25,8 +25,12 @@ export const useModels = () =>
     refetchInterval: (q) => (q.state.data ?? []).some((m) => Object.values(m.nodes).some((n) => n.state && BUSY.has(n.state))) ? 1500 : 30_000,
   });
 export const BUSY = new Set(["pending", "checking", "pulling", "configuring", "verifying", "draining", "removing"]);
+/** No `after`: the server returns the newest 1000 events, newest first (after=0 would return the oldest 1000). */
+export const EVENTS_URL = "/api/events/list?limit=1000";
+/** Newest first, whichever order the server used; does not mutate its input. */
+export const newestFirst = (events: FleetEvent[] | undefined): FleetEvent[] => [...(events ?? [])].sort((a, b) => b.id - a.id);
 export const useEvents = () =>
-  useQuery({ queryKey: ["events"], queryFn: () => get<FleetEvent[]>("/api/events/list?after=0&limit=1000") });
+  useQuery({ queryKey: ["events"], queryFn: () => get<FleetEvent[]>(EVENTS_URL) });
 
 /** Run a mutation, keep its error for display, then refresh every query it may have changed. */
 export function useRun() {

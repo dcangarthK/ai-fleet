@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from events import changed, emit, events_after, last_event_id, snapshot
+from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
 import policy as fleet_policy
 import presence
@@ -1896,5 +1896,9 @@ async def event_stream(request: Request, after: int | None = None) -> StreamingR
 
 
 @router.get("/api/events/list")
-def event_list(after: int = 0, limit: int = 200) -> list[dict]:
-    return events_after(after, min(limit, 1000))
+def event_list(after: int | None = None, before: int | None = None, limit: int = 200) -> list[dict]:
+    """`after=<id>` alone: ascending, for incremental consumers (unchanged). Otherwise newest first; `before=<id>` pages."""
+    limit = max(1, min(limit, 1000))
+    if after is not None and before is None:
+        return events_after(after, limit)
+    return events_newest(limit, before, after or 0)

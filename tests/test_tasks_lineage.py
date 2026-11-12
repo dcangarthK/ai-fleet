@@ -509,7 +509,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json()["state"], "working")
         self.assertIsNone(r.json()["failure_reason"])
-        resumed = [e for e in self.c.get("/api/events/list?limit=1000").json()
+        resumed = [e for e in self.c.get("/api/events/list?after=0&limit=1000").json()
                    if e["task_id"] == t["id"] and e["type"] == "task.resumed"]
         self.assertEqual(len(resumed), 1)
         self.assertEqual(resumed[0]["data"]["failure_reason"], "limit")
@@ -540,7 +540,7 @@ class LineageApiTests(unittest.TestCase):
         self.assertEqual(body["display"]["tone"], "resolved")
         self.assertIn("Done elsewhere", body["display"]["label"])
         self.assertEqual(body["state"], "failed")
-        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
+        types = [e["type"] for e in self.c.get("/api/events/list?after=0&limit=1000").json() if e["task_id"] == t["id"]]
         self.assertIn("task.resolved", types)
 
     def test_resolve_dismissed_and_wrong_state(self):
@@ -601,7 +601,7 @@ class LineageApiTests(unittest.TestCase):
         item = self.work_item(t["id"])
         self.assertEqual(item["outcome"]["commit"], "ec2ab20")
         self.assertEqual(item["display"], {"tone": "ok", "label": "Merged ec2ab20"})
-        types = [e["type"] for e in self.c.get("/api/events/list?limit=1000").json() if e["task_id"] == t["id"]]
+        types = [e["type"] for e in self.c.get("/api/events/list?after=0&limit=1000").json() if e["task_id"] == t["id"]]
         self.assertIn("task.outcome", types)
 
     def test_outcome_only_on_a_root(self):

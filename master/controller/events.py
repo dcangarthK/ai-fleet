@@ -73,6 +73,14 @@ def events_after(after: int, limit: int = 200) -> list[dict]:
     return [dict(r) | {"data": json.loads(r["data"])} for r in rows]
 
 
+def events_newest(limit: int = 200, before: int | None = None, after: int = 0) -> list[dict]:
+    """Newest first, optionally below an id (paging) and above `after`."""
+    with db() as c:
+        rows = c.execute("SELECT * FROM events WHERE id > ? AND id < ? ORDER BY id DESC LIMIT ?",
+                         (after, before if before is not None else 2**62, limit)).fetchall()
+    return [dict(r) | {"data": json.loads(r["data"])} for r in rows]
+
+
 def last_event_id() -> int:
     with db() as c:
         return c.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]

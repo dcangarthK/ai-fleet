@@ -2,7 +2,7 @@ import { useState, type ChangeEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, get, post, put, type NotifyRule } from "../lib/api";
 import { Link } from "react-router-dom";
-import { useCan, useEvents, useFleet, useRun } from "../lib/data";
+import { newestFirst, useCan, useEvents, useFleet, useRun } from "../lib/data";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 
 function when(ts: number) {
@@ -39,7 +39,7 @@ function describe(type: string, data: Record<string, unknown> | null): string {
 export function ActivityPage() {
   const events = useEvents();
   const [filter, setFilter] = useState("");
-  const rows = [...(events.data ?? [])].reverse().filter((e) => !filter || e.type.includes(filter) || (e.task_id ?? "").includes(filter));
+  const rows = newestFirst(events.data).filter((e) => !filter || e.type.includes(filter) || (e.task_id ?? "").includes(filter));
   return (
     <>
       <PageHead title="Activity" intro="Everything the controller recorded, newest first." />

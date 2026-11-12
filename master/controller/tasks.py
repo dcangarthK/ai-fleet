@@ -1056,8 +1056,6 @@ async def poll_loop() -> None:
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
             import capacity
             await capacity.tick()
-            import leader
-            await leader.tick()
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens
@@ -1351,6 +1349,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     kind = t.kind or ("build" if t.gate else "draft")
     if kind not in budget.KINDS:
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
+    if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
+        raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
@@ -1421,6 +1421,12 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         task_policy = dict(t.policy or {})
         limits = dict(task_policy.get("limits") or {})
         limits["task_minutes"] = min(limits.get("task_minutes", review_exec["task_minutes"]), review_exec["task_minutes"])
+        task_policy["limits"] = limits
+    if kind == "lead":
+        # Codex has no --max-turns flag. The runner enforces this process deadline for both providers.
+        task_policy = dict(task_policy or {})
+        limits = dict(task_policy.get("limits") or {})
+        limits["task_minutes"] = min(limits.get("task_minutes", 30), 30)
         task_policy["limits"] = limits
     on_account = [s for s in slots_for(agent) if s["account"] == decision.get("account")]
     try:

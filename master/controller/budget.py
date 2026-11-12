@@ -79,6 +79,13 @@ class Refusal(Exception):
         self.detail = detail
 
 
+def lead_allowed(agent: str, model: str | None) -> bool:
+    """The owner-amended controller-leader allowlist, enforced for manual task creation too."""
+    model = (model or "").lower()
+    return ((agent == "codex" and model == "gpt-5.6-terra") or
+            (agent == "claude" and (model.startswith("claude-opus-") or model.startswith("claude-sonnet-"))))
+
+
 # ---------- globs ----------
 
 def valid_glob(pattern) -> bool:

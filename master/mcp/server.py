@@ -271,10 +271,15 @@ def get_plan() -> str:
 
 @mcp.tool()
 def put_plan(items: list[dict]) -> str:
-    """Replace the durable controller plan with work_item, ordered next_steps and status records.
-    Lead sessions use this after each short step. They may record `pending_review`, but cannot approve,
-    unblock, push, or set budget overrides."""
+    """Upsert durable plan items. Existing items require their current revision from get_plan."""
     return _controller("PUT", "/api/plan", {"items": items}, scope="operate")
+
+
+@mcp.tool()
+def update_plan_item(work_item: str, next_steps: list[str], status: str, revision: int) -> str:
+    """Revision-checked update of one durable plan item; use this from a lead session after its one step."""
+    return _controller("PUT", f"/api/plan/{_q(work_item)}",
+                       {"next_steps": next_steps, "status": status, "revision": revision}, scope="operate")
 
 
 @mcp.tool()

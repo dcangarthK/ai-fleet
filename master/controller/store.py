@@ -85,10 +85,12 @@ CREATE TABLE IF NOT EXISTS limit_resets (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, at REAL, actor TEXT);
 CREATE TABLE IF NOT EXISTS plan_items (
     work_item TEXT PRIMARY KEY, next_steps TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'open',
-    updated_at REAL NOT NULL);
+    updated_at REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS plan_state (
+    id INTEGER PRIMARY KEY CHECK (id=1), revision INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS leader (
     id INTEGER PRIMARY KEY CHECK (id=1), account TEXT, model TEXT, since REAL, session_task_id TEXT,
-    not_before REAL);
+    not_before REAL, plan_revision INTEGER DEFAULT 0, halted INTEGER NOT NULL DEFAULT 0);
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.
@@ -137,6 +139,8 @@ MIGRATIONS = {
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
                   "budget": "TEXT DEFAULT '{}'"},
+    "plan_items": {"revision": "INTEGER NOT NULL DEFAULT 1"},
+    "leader": {"plan_revision": "INTEGER DEFAULT 0", "halted": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
@@ -167,6 +171,7 @@ def init_db() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS events_type_task ON events(type, task_id)")
         _seed_models(c)
         _seed_notify_rules(c)
+        c.execute("INSERT OR IGNORE INTO plan_state (id,revision) VALUES (1,0)")
 
 
 def _seed_notify_rules(c: sqlite3.Connection) -> None:

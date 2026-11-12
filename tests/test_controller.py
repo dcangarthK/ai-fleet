@@ -93,6 +93,8 @@ class FakeRunner(BaseHTTPRequestHandler):
     # Live (docs/SPEC-live-monitor.md): extra /health fields (metrics), and the node id the controller told us
     health_extra: dict = {}
     node_ids: list = []
+    # Part E (docs/SPEC-stall-reroute.md): what a cancel leaves the job as. None: "cancelled", group_gone true.
+    cancel_reply: dict | None = None
 
     def log_message(self, *a):
         pass
@@ -180,7 +182,7 @@ class FakeRunner(BaseHTTPRequestHandler):
         if self.path.endswith("/message"):
             self.jobs[jid].update(state="running", denials=[], runs=self.jobs[jid]["runs"] + 1)
         elif self.path.endswith("/cancel"):
-            self.jobs[jid]["state"] = "cancelled"
+            self.jobs[jid].update(FakeRunner.cancel_reply or {"state": "cancelled", "group_gone": True})
         return self._send(200, self.jobs[jid])
 
 
@@ -252,9 +254,19 @@ def reset_limits():
         c.execute("UPDATE agent_usage SET resets_at=? WHERE outcome='limit'", (time.time() - 1,))
 
 
+def fresh_loop_state():
+    """Locks bind to the event loop of the first client that contends on them. Start each suite from unbound ones, so
+    a suite that ran earlier in the same process (another TestClient, another loop) can't leave one that is bound
+    to a dead loop ("is bound to a different event loop")."""
+    controller._tick_lock = asyncio.Lock()
+    controller._pipeline_locks.clear()
+    tasks._locks.clear()
+
+
 class ControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        fresh_loop_state()
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
         unmetered_claude_rules()

@@ -690,17 +690,25 @@ class BudgetApiTests(unittest.TestCase):
         self.assertEqual([one["state"], two["state"], three["state"]], ["working", "working", "queued"])
 
     def test_the_runners_reported_default_model_is_the_admission_identity(self):
-        with db() as c:
-            row = c.execute("SELECT runner FROM nodes WHERE id='master'").fetchone()
-            runner = json.loads(row["runner"])
-            c.execute("UPDATE nodes SET runner=? WHERE id='master'",
-                      (json.dumps(runner | {"default_models": {"claude": "claude-sonnet-5-5"}}),))
-        try:
-            t = self.ok(agent="claude", kind="draft")
-            self.assertEqual((t["budget_key"], t["budget_identity"]), ("claude:claude-sonnet-*", "claude:claude-sonnet-5-5"))
-        finally:
+        # Report the default through the fake runner's /health. The controller's poll loop rewrites nodes.runner
+        # from it, so editing the row directly races the poll.
+        previous = FakeRunner.health_extra
+        FakeRunner.health_extra = {"default_models": {"claude": "claude-sonnet-5-5"}}
+
+        def reported():
             with db() as c:
-                c.execute("UPDATE nodes SET runner=? WHERE id='master'", (json.dumps(runner),))
+                row = c.execute("SELECT runner FROM nodes WHERE id='master'").fetchone()
+            return ((json.loads(row["runner"] or "null") or {}).get("default_models") or {}).get("claude")
+
+        def restore():
+            FakeRunner.health_extra = previous
+            self.c.post("/api/refresh", headers=W)
+            wait_for(lambda: reported() is None)
+        self.addCleanup(restore)
+        self.c.post("/api/refresh", headers=W)
+        wait_for(lambda: reported() == "claude-sonnet-5-5")
+        t = self.ok(agent="claude", kind="draft")
+        self.assertEqual((t["budget_key"], t["budget_identity"]), ("claude:claude-sonnet-*", "claude:claude-sonnet-5-5"))
 
     def test_a_cancelled_task_does_not_clear_an_active_limit(self):
         self.limited_codex()

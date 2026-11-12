@@ -245,8 +245,10 @@ def chain_view(chain: list[dict], members: list[dict]) -> list[dict]:
     for stage in chain:
         tries = [m for m in members if m.get("stage") == stage["stage"]]
         latest = tries[-1] if tries else None
+        # `state` stays for the chip's shape; `display` is the label and tone (same as /api/work and /api/tasks).
         out.append(stage | {"state": attempt_state(latest) if latest else "next", "count": len(tries),
-                            "task_id": latest["id"] if latest else None})
+                            "task_id": latest["id"] if latest else None,
+                            "display": latest.get("display") if latest else None})
     return out
 
 
@@ -367,6 +369,7 @@ def queue(now: float) -> list[dict]:
 
 def chains(now: float) -> list[dict]:
     out = []
+    ctx = tasks.DisplayContext(now)
     with db() as c:
         pipelines = [dict(r) for r in c.execute(
             "SELECT id, title, state, round, gate, history FROM pipelines WHERE state NOT IN "
@@ -377,10 +380,10 @@ def chains(now: float) -> list[dict]:
         roots = list(dict.fromkeys(task_root(c, i) for i in recent))[:30]
         members_by_root: dict[str, list[dict]] = {}
         for root in roots:
-            tree = [dict(r) for r in c.execute(
+            # Full task views: each stage's label and tone come from the one display (tasks.live_display).
+            tree = [tasks.task_view(r, ctx) for r in c.execute(
                 "WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id) "
-                "SELECT id, title, stage, state, resolution, link, chain, created_at, hidden FROM tasks "
-                "WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid", (root,))]
+                "SELECT * FROM tasks WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid", (root,))]
             members_by_root[root] = tree
     for p in pipelines:
         p["history"] = _json(p["history"]) or []
@@ -388,9 +391,7 @@ def chains(now: float) -> list[dict]:
     for root, members in members_by_root.items():
         if not members or members[0]["id"] != root or members[0]["hidden"]:
             continue
-        for m in members:
-            m["resolution"] = _json(m["resolution"])
-        chain = _json(members[0]["chain"])
+        chain = members[0]["chain"]  # task_view parsed it
         if chain is None:
             # No declared chain: the attempts themselves, by stage (or link) in order.
             chain = [{"stage": s} for s in dict.fromkeys(m.get("stage") or m.get("link") or "task" for m in members)]

@@ -216,7 +216,7 @@ class HandoffTests(HandoffBase):
         self.assertEqual((body["base_branch"], body["source_job"], body["profile"]), (f"fleet/{src['id']}", src["id"], "spare"))
         self.assertEqual(body["effort"], "medium")  # from the effort ladder
         source = self.get(src["id"])
-        self.assertEqual(source["display"], {"tone": "resolved", "label": "Handed off to claude-opus-5-5 (spare)"})
+        self.assertEqual(source["display"], {"tone": "resolved", "label": f"Handed off → {new}"})
         self.assertEqual((source["resolution"]["kind"], source["resolution"]["task_id"]), ("handed_off", new))
         FakeRunner.jobs[new].update(state="exited", exit_code=0, result="done", gate={"state": "passed", "exit_code": 0})
         self.c.portal.call(tasks.poll_task, new)
@@ -226,7 +226,7 @@ class HandoffTests(HandoffBase):
         self.assertEqual(items[0]["display"]["label"], "Ready for review")
         self.assertTrue(items[0]["attempts"][1]["handoff"])
         self.assertEqual(items[0]["attempts"][0]["account_label"], "owner-max")
-        self.assertEqual(self.get(src["id"])["display"]["label"], "Handed off to claude-opus-5-5 (spare)")
+        self.assertEqual(self.get(src["id"])["display"]["label"], f"Handed off → {new}")
 
     def test_two_triggers_race_for_one_claim(self):
         src = self.build()
@@ -827,7 +827,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("handed_off", lineage.RESOLUTION_KINDS)
         shown = lineage.display_status({"state": "failed", "failure_reason": "limit", "resolution": json.dumps(
             {"kind": "handed_off", "task_id": "t-1", "model": OPUS, "label": "spare"})})
-        self.assertEqual(shown, {"tone": "resolved", "label": f"Handed off to {OPUS} (spare)"})
+        self.assertEqual(shown, {"tone": "resolved", "label": "Handed off → t-1"})
 
     def test_resolved_models_for_review_independence(self):
         self.assertEqual(handoff.resolved_model({"agent": "claude", "model": None, "usage": {"model": SONNET}}),

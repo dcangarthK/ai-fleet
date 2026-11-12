@@ -33,6 +33,7 @@ from lineage import (  # noqa: F401  (re-exported: the lineage helpers are part 
     failure_reason,
     parse_reset, provider_limit, resolution_targets, tail, valid_commit,
 )
+from lineage import _json as lineage_json
 from store import db, task_root
 
 RUNNER_PORT = 11436
@@ -500,15 +501,17 @@ def get_task(task_id: str) -> dict:
     return task_view(row)
 
 
-def task_view(row) -> dict:
+def task_view(row, ctx: "DisplayContext | None" = None) -> dict:
     t = dict(row)
     t["denials"] = json.loads(t["denials"] or "[]")
     t["approved_tools"] = json.loads(t.get("approved_tools") or "[]")
     t["gate_result"] = json.loads(t["gate_result"]) if t["gate_result"] else None
     t["policy"] = json.loads(t.get("policy") or "{}")
     t["skills"] = json.loads(t.get("skills") or "[]")
-    t["resolution"] = json.loads(t["resolution"]) if t.get("resolution") else None
-    t["outcome"] = json.loads(t["outcome"]) if t.get("outcome") else None
+    # A malformed stored value reads as "set, but unreadable": truthy, so the task still counts as settled.
+    for field in ("resolution", "outcome"):
+        value = lineage_json(t[field]) if t.get(field) else None
+        t[field] = value if value is not None or not t.get(field) else {"kind": "unknown", "raw": t[field]}
     t["hidden"] = bool(t.get("hidden"))
     for field, fallback in (("usage", None), ("prompt_omitted", []), ("launch_extra", {}), ("limits_applied", None),
                             ("independence", None), ("placement", None), ("chain", None), ("stall", None)):
@@ -517,32 +520,86 @@ def task_view(row) -> dict:
         except (TypeError, ValueError):
             t[field] = fallback
     derive_reason(t)
-    t["display"] = live_display(t)
+    t["display"] = live_display(t, ctx=ctx)
     return t
 
 
-def live_display(t: dict, now: float | None = None) -> dict:
-    """display_status, plus what only the database knows (docs/SPEC-live-monitor.md 13):
-    (c) a failed attempt with a retry child shows "Retried as <newest child>" (Part C's handoff already shows itself);
-    (a) a paused limit follows the account's current limit state for that identity, not the row's saved reset."""
+class DisplayContext:
+    """What live_display needs from the database, loaded once per request and shared by every row: the work-item
+    tree (two queries: tasks and limit runs), then limit snapshots per account on demand. The count of queries does
+    not depend on how many rows are shown (docs/SPEC-dashboard-truth.md 5, batch performance)."""
+
+    def __init__(self, now: float | None = None):
+        self.now = time.time() if now is None else now
+        with db() as c:
+            rows = c.execute("SELECT id,parent_id,link,state,resolution,outcome,created_at,rowid AS rid FROM tasks").fetchall()
+            self.limit_tasks = {r[0] for r in c.execute("SELECT DISTINCT task_id FROM agent_usage WHERE outcome='limit'")}
+        self.items = {r["id"]: dict(r) for r in rows}
+        self.retry_child: dict[str, str] = {}
+        for r in sorted(rows, key=lambda r: (r["created_at"] or 0, r["rid"])):
+            if r["link"] == "retry" and r["parent_id"]:
+                self.retry_child[r["parent_id"]] = r["id"]  # the newest retry child wins
+        parents = {r["id"]: r["parent_id"] for r in rows}
+        self.roots = {i: root_in(parents, i) for i in parents}
+        self._by_root: dict[str, dict[str, dict]] = {}
+        for i, item in self.items.items():
+            self._by_root.setdefault(self.roots[i], {})[i] = item
+        self._rules: dict | None = None
+        self._snapshots: dict[str, dict] = {}
+
+    def root_outcome(self, task_id: str) -> dict | None:
+        root = self.items.get(self.roots.get(task_id, task_id))
+        value = lineage_json(root["outcome"]) if root else None
+        return value if isinstance(value, dict) else None
+
+    def superseded_by(self, t: dict) -> str | None:
+        """Row 5: the first later successful attempt in the same work item that follows on from `t`."""
+        group = self._by_root.get(self.roots.get(t["id"], t["id"]), {})
+        me = group.get(t["id"])
+        if not me:
+            return None
+        for item in sorted(group.values(), key=lambda r: (r["created_at"] or 0, r["rid"])):
+            if item["state"] in ("review", "done") and (item["created_at"] or 0, item["rid"]) > (me["created_at"] or 0, me["rid"]) \
+                    and t["id"] in resolution_targets(item, group):
+                return item["id"]
+        return None
+
+    def limit_until(self, t: dict) -> float | None:
+        if self._rules is None:
+            self._rules = budget.current_rules()
+        account = budget.task_account(t)
+        if account not in self._snapshots:
+            self._snapshots[account] = budget.limit_snapshot(self._rules, self.now, account)
+        ident = t.get("budget_identity") or budget.identity(t["agent"], t.get("model"))
+        return budget.limited_for(self._snapshots[account], t["agent"], ident, self._rules)[0]
+
+
+def live_display(t: dict, now: float | None = None, ctx: DisplayContext | None = None) -> dict:
+    """The one place a task's label and tone are derived (docs/SPEC-dashboard-truth.md 2.1). display_status holds the
+    rows that need only the task; this adds what only the database knows: a merged work item (row 1), a later
+    successful attempt (row 5), a retry child (row 6) and the account's current limit state (rows 9-10).
+    Pass one `ctx` for a batch of rows."""
     now = time.time() if now is None else now
     shown = display_status(t, now=now)
-    if t.get("resolution") or t.get("state") not in ("failed", "interrupted", "blocked"):
+    state = t.get("state")
+    if state not in ("failed", "interrupted", "blocked"):
+        return shown  # running, review, done, awaiting_approval, cancelled: no failure to rescue
+    ctx = ctx or DisplayContext(now)
+    merged = ctx.root_outcome(t["id"])
+    if merged and merged.get("kind") == "merged":
+        return outcome_display(merged)
+    if t.get("resolution"):
         return shown
-    with db() as c:
-        child = c.execute("SELECT id FROM tasks WHERE parent_id=? AND link='retry' ORDER BY created_at DESC, rowid DESC "
-                          "LIMIT 1", (t["id"],)).fetchone()
-        own_limit = (t.get("failure_reason") == "limit" and t.get("agent") in budget.PAID_AGENTS
-                     and c.execute("SELECT 1 FROM agent_usage WHERE task_id=? AND outcome='limit'",
-                                   (t["id"],)).fetchone() is not None)
+    later = ctx.superseded_by(t)
+    if later:
+        return {"tone": "muted", "label": f"Superseded by {later}"}
+    child = ctx.retry_child.get(t["id"])
     if child:
-        return {"tone": "resolved", "label": f"Retried as {child['id']}"}
+        return {"tone": "resolved", "label": f"Retried as {child}"}
+    own_limit = (t.get("failure_reason") == "limit" and t.get("agent") in budget.PAID_AGENTS and t["id"] in ctx.limit_tasks)
     if not own_limit or (t.get("resets_at") is not None and t["resets_at"] <= now):
         return shown  # no provider limit on record for this run, or its reset has passed: as before
-    rules = budget.current_rules()
-    snap = budget.limit_snapshot(rules, now, budget.task_account(t))
-    ident = t.get("budget_identity") or budget.identity(t["agent"], t.get("model"))
-    until, _ = budget.limited_for(snap, t["agent"], ident, rules)
+    until = ctx.limit_until(t)
     if until:
         return {"tone": "paused", "label": f"Paused: limit, resets {clock(until)}"}
     return {"tone": "attention", "label": "Limit cleared: resume or hand off"}
@@ -955,7 +1012,7 @@ async def auto_approve_denials(task: dict) -> None:
     update(task["id"], auto_approvals=rounds + 1)
     try:
         await resume(get_task(task["id"]), "Policy pre-approves the tools you were denied: " + ", ".join(tools)
-                     + ". Continue the task.", tools)
+                     + ". Continue the task.", tools, auto_approved=True)
     except NotAdmitted as exc:
         # Admission deferred or refused it: the task stays blocked for the owner and the round isn't spent.
         update(task["id"], auto_approvals=rounds, error=str(exc.detail))
@@ -1076,8 +1133,9 @@ def list_tasks(state: str | None = None, parent_id: str | None = None, limit: in
     if parent_id:
         q += " AND parent_id=?"
         args.append(parent_id)
+    ctx = DisplayContext()  # one load for every row's display
     with db() as c:
-        views = [task_view(r) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit))]
+        views = [task_view(r, ctx) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit))]
         parents = {r["id"]: r["parent_id"] for r in c.execute("SELECT id,parent_id FROM tasks")}
     for view in views:
         view["root_id"] = root_in(parents, view["id"])
@@ -1538,7 +1596,7 @@ class NotAdmitted(HTTPException):
 
 
 async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool = False,
-                 effort: str | None = None) -> None:
+                 effort: str | None = None, auto_approved: bool = False) -> None:
     """Caller holds the task lock. `effort` (pipelines' fix rounds) is sent only to runners that understand it.
     Every continuation passes admission here, before the runner hears of it, and holds its slot on the account
     until the task is working (raises NotAdmitted otherwise)."""
@@ -1552,13 +1610,14 @@ async def resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_
     budget.RESERVED[task["id"]] = (task["budget_key"] if paid else None,
                                    budget.task_account(task) if paid else None, task.get("node_id"))
     try:
-        await _send_resume(task, text, allowed_tools, reset_auto_approvals=reset_auto_approvals, effort=effort)
+        await _send_resume(task, text, allowed_tools, reset_auto_approvals=reset_auto_approvals, effort=effort,
+                           auto_approved=auto_approved)
     finally:
         budget.RESERVED.pop(task["id"], None)
 
 
 async def _send_resume(task: dict, text: str, allowed_tools: list[str], *, reset_auto_approvals: bool,
-                       effort: str | None) -> None:
+                       effort: str | None, auto_approved: bool = False) -> None:
     tools = approvable_tools(task, [*(task.get("approved_tools") or []), *allowed_tools])
     if tools != task.get("approved_tools"):
         update(task["id"], approved_tools=json.dumps(tools))
@@ -1578,7 +1637,8 @@ async def _send_resume(task: dict, text: str, allowed_tools: list[str], *, reset
         # The earlier run's story lives in the event log: how it ended, shown without any later resolution.
         emit(task["id"], "task.resumed", {
             "title": task["title"], "run": fields["runs"], "from": task["state"], "ended_at": task.get("ended_at"),
-            "failure_reason": task.get("failure_reason"), "display": display_status({**task, "resolution": None})})
+            "failure_reason": task.get("failure_reason"), "display": display_status({**task, "resolution": None}),
+            "auto_approved": auto_approved})
 
 
 @router.post("/api/tasks/{task_id}/message")
@@ -1733,7 +1793,7 @@ async def set_outcome(task_id: str, body: OutcomeIn, request: Request) -> dict:
 
 WORK_COLUMNS = ("id,parent_id,link,title,agent,model,state,failure_reason,resets_at,resolution,outcome,hidden,"
                 "created_at,updated_at,started_at,ended_at,runs,gate,gate_result,exit_code,error,kind,account_label,"
-                "launch_extra,"
+                "launch_extra,node_id,account,budget_identity,"
                 # The end of the output is where a usage-limit message sits (same slice derive_reason uses).
                 "CASE WHEN failure_reason IS NULL AND state IN ('failed','blocked','interrupted','cancelled') "
                 "THEN substr(result,-4000) END AS result")
@@ -1742,13 +1802,14 @@ WORK_COLUMNS = ("id,parent_id,link,title,agent,model,state,failure_reason,resets
 def outcome_display(value: dict) -> dict:
     kind = value.get("kind")
     if kind == "merged":
-        return {"tone": "ok", "label": f"Merged {(value.get('commit') or '')[:7]}".strip()}
+        commit = f" · {value['commit'][:7]}" if value.get("commit") else ""
+        return {"tone": "ok", "label": f"Merged{commit}"}
     if kind == "done":
         return {"tone": "ok", "label": "Done"}
     return {"tone": "muted", "label": "Abandoned"}
 
 
-def attempt_entries(row: dict, resumed: list[dict]) -> list[dict]:
+def attempt_entries(row: dict, resumed: list[dict], ctx: "DisplayContext | None" = None) -> list[dict]:
     """One entry per run of a task: earlier runs come from task.resumed events, the last from the row."""
     try:
         extra = json.loads(row.get("launch_extra") or "{}") or {}
@@ -1767,11 +1828,13 @@ def attempt_entries(row: dict, resumed: list[dict]) -> list[dict]:
     out, started = [], row["started_at"] or at
     for number, event in enumerate(resumed, start=1):
         data = event["data"]
-        out.append(entry(state=data.get("from"), display=data.get("display") or {"tone": "muted", "label": str(data.get("from"))},
+        shown = ({"tone": "muted", "label": "Auto-approved and resumed"} if data.get("auto_approved")
+                 else data.get("display") or {"tone": "muted", "label": str(data.get("from"))})
+        out.append(entry(state=data.get("from"), display=shown,
                          failure_reason=data.get("failure_reason"), started_at=started, ended_at=data.get("ended_at"),
                          run=number, at=at))
         at = started = event["ts"]
-    out.append(entry(state=row["state"], display=display_status(row), failure_reason=row["failure_reason"],
+    out.append(entry(state=row["state"], display=live_display(row, ctx=ctx), failure_reason=row["failure_reason"],
                      started_at=started if resumed else row["started_at"], ended_at=row["ended_at"],
                      run=len(resumed) + 1, at=at))
     return out
@@ -1803,6 +1866,7 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
         for r in c.execute(f"{scoped} SELECT task_id, ts, data FROM events WHERE type='task.resumed' "
                            "AND task_id IN (SELECT id FROM tree) ORDER BY id", roots):
             resumed[r["task_id"]].append({"ts": r["ts"], "data": json.loads(r["data"] or "{}")})
+    ctx = DisplayContext()
     by_id = {r["id"]: r for r in rows}
     parents = {r["id"]: r["parent_id"] for r in rows}
     groups: dict[str, list[dict]] = defaultdict(list)
@@ -1819,7 +1883,7 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
         for index, member in enumerate(members):
             if member["hidden"] and not include_hidden:
                 continue
-            for part in attempt_entries(member, resumed.get(member["id"], [])):
+            for part in attempt_entries(member, resumed.get(member["id"], []), ctx):
                 attempts.append((part["at"], index, part["run"], part))
         attempts.sort(key=lambda item: item[:3])
         shown = [{k: v for k, v in part.items() if k not in ("at", "created_at")} for *_, part in attempts]

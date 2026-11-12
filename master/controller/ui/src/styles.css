@@ -373,4 +373,11 @@ a.live-row:hover { background: var(--surface-2); }
 .stage-failed a { color: inherit; }
 .stage-superseded { color: var(--ink-3); text-decoration: line-through; }
 .stage-next { color: var(--ink-3); border-style: dashed; }
+/* Chips coloured by the controller's display tone (docs/SPEC-dashboard-truth.md 2.1): only "attention" is red. */
+.stage-tone-running { color: var(--action-ink); background: var(--action); border-color: var(--action); font-weight: 600; }
+.stage-tone-ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.stage-tone-paused { color: var(--warn); border-color: var(--warn); }
+.stage-tone-attention { color: var(--bad); border-color: var(--bad); }
+.stage-tone-attention a { color: inherit; }
+.stage-tone-resolved, .stage-tone-muted { color: var(--ink-3); }
 @media (max-width: 860px) { .live-row, .live-running { grid-template-columns: 1fr; } }

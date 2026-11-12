@@ -50,7 +50,7 @@ describe("handoff timeline", () => {
   it("reads as one story across accounts", () => {
     const steps = timelineSteps([
       attempt({ id: "a", link: null, kind: "build", account_label: "owner-max", state: "failed", failure_reason: "limit",
-        display: { tone: "resolved", label: "Handed off to Opus 5.5 (spare)" }, handed_off: true }),
+        display: { tone: "resolved", label: "Handed off → t-2" }, handed_off: true }),
       attempt({ id: "b", link: "retry", kind: "build", account_label: "spare", handoff: true }),
     ]);
     expect(steps.join(" → ")).toBe("Opus 5.5 (owner-max) build · paused: limit → handed off to Opus 5.5 (spare) · gate passed");

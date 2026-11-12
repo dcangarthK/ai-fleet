@@ -121,7 +121,9 @@ MIGRATIONS = {
               "link_reason": "TEXT",
               # Part E (docs/SPEC-stall-reroute.md 5.1, 12): the stall record, JSON {kind, since, last_activity_at,
               # detail, nudged_at, escalated, waiting, overrun_at}
-              "stall": "TEXT"},
+              "stall": "TEXT",
+              # Part G 4: a queued task that failed on a limit waits until this time (the limit's reset)
+              "not_before": "REAL"},
     # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
     # later cancelling, completing or resuming of the task cannot erase; `account` is whose limit it was
     # (null on older rows, which then hold every account of the agent)

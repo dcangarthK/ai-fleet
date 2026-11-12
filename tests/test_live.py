@@ -1131,6 +1131,13 @@ class FailoverTests(LiveBase):
                       (node_id, json.dumps({"pinned": False} | placement), task["id"]))
 
     def test_lease_race_between_try_start_and_replace(self):
+        # The background poll loop launches tasks.recover() every round, which try_starts every queued task: once
+        # replace() leaves this one queued on master it can start it before the test's own stale try_start runs
+        # (a race under load, also on main). Stub it so only the stale start can claim the task.
+        async def no_recover():
+            return None
+        self.addCleanup(setattr, tasks, "recover", tasks.recover)
+        tasks.recover = no_recover
         dead = self.offline()
         live.STARTED_AT = time.time() - 120
         t = self.ok(agent="claude", model=SONNET, kind="draft")

@@ -1313,6 +1313,125 @@ class JobManager:
                     break  # the last record of this file is its newest
         return best
 
+    @staticmethod
+    def _epoch(value):
+        """An epoch in seconds from a number (milliseconds when it is clearly that) or an ISO string; None otherwise."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return value / 1000.0 if value > 1e11 else float(value)
+        try:
+            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError):
+            return None
+
+    def _last_rate_limit_event(self, path):
+        """The newest stream-json `rate_limit_event` in one job log, as {windows: {"5h"|"weekly": {used_percent,
+        resets_at}}, status, rejected_until}; None when there is none. Only numbers are kept, never a line of the
+        log. utilization is 0-1 (spec Part G 1), reported here as a percent."""
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 512 * 1024))  # events are appended: the end holds the newest
+                lines = handle.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            if '"rate_limit_event"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            info = event.get("rate_limit_info") if isinstance(event, dict) and event.get("type") == "rate_limit_event" else None
+            if not isinstance(info, dict):
+                continue
+            windows = {}
+            raw = info.get("unifiedWindows") if isinstance(info.get("unifiedWindows"), dict) else {}
+            for source, name in (("five_hour", "5h"), ("seven_day", "weekly")):
+                w = raw.get(source)
+                used = w.get("utilization") if isinstance(w, dict) else None
+                reset = self._epoch(w.get("resetsAt")) if isinstance(w, dict) else None
+                if isinstance(used, (int, float)) and not isinstance(used, bool) and 0 <= used <= 1 and reset is not None:
+                    windows[name] = {"used_percent": round(used * 100.0, 3), "resets_at": reset}
+            rejected = self._epoch(info.get("resetsAt")) if info.get("status") == "rejected" else None
+            if windows or rejected:
+                return {"windows": windows, "status": info.get("status"), "rejected_until": rejected}
+        return None
+
+    def claude_usage(self, max_files=60):
+        """{profile: {windows, rejected_until, observed_at}}: the newest `rate_limit_event` per Claude profile in the
+        job logs (jobs/<id>/events.jsonl, the profile from the job's own state.json). The event has no timestamp, so
+        `observed_at` is the log's modification time. Only an account with a recent job has data; an idle one goes
+        stale on the controller (Part G 3a)."""
+        files = []
+        try:
+            folders = list(self.jobs_dir.iterdir())
+        except OSError:
+            return {}
+        for folder in folders:
+            try:
+                files.append(((folder / "events.jsonl").stat().st_mtime, folder))
+            except OSError:
+                continue
+        files.sort(key=lambda item: item[0], reverse=True)
+        newest = {}
+        for mtime, folder in files[:max_files]:
+            state = read_json(folder / "state.json", {})
+            if not isinstance(state, dict) or state.get("agent") != "claude":
+                continue
+            profile = state.get("profile") if isinstance(state.get("profile"), str) and state.get("profile") else "fleet"
+            if profile in newest:
+                continue  # newest log first: this profile already has its record
+            found = self._last_rate_limit_event(folder / "events.jsonl")
+            if found:
+                newest[profile] = {**found, "observed_at": mtime}
+        return newest
+
+    def capacity_report(self):
+        """For /health and heartbeats (Part G 1): per account this runner serves, [{agent, profile, slots_free,
+        usage: [{window, used_percent, resets_at, source, age_s}], rejected_until}]. `age_s` is on this runner's
+        clock so skew never matters; the controller turns it into its own `observed_at`."""
+        at = time.time()
+        running = sum(1 for job in list(self.jobs.values()) if job.get("state") == "running")
+        free = max(0, int(self.max_jobs) - running)
+        claude = self.claude_usage()
+        try:
+            codex = {item["profile"]: item for item in (self.codex_rate_limits_report() or [])}
+        except Exception:
+            codex = {}
+        out = []
+        for agent in ("claude", "codex"):
+            for entry in self.profile_entries(agent):
+                usage, rejected = [], None
+                if agent == "claude" and entry["id"] in claude:
+                    found = claude[entry["id"]]
+                    rejected = found.get("rejected_until")
+                    for name, w in found["windows"].items():
+                        usage.append({"window": name, "used_percent": w["used_percent"], "resets_at": w["resets_at"],
+                                      "source": "stream-json", "age_s": max(0.0, at - found["observed_at"])})
+                elif agent == "codex" and entry["id"] in codex:
+                    found = codex[entry["id"]]
+                    for source, name in (("primary", "5h"), ("secondary", "weekly")):
+                        w = found.get(source)
+                        if isinstance(w, dict) and w.get("used_percent") is not None and w.get("resets_at") is not None:
+                            usage.append({"window": name, "used_percent": w["used_percent"],
+                                          "resets_at": w["resets_at"], "source": "rollout",
+                                          "age_s": max(0.0, at - (found.get("seen_at") or at))})
+                out.append({"agent": agent, "profile": entry["id"], "slots_free": free, "usage": usage,
+                            "rejected_until": rejected})
+        return out
+
+    def capacity_cached(self, max_age=15.0):
+        """For /health and heartbeats, which run every few seconds: the job logs are scanned at most every `max_age`."""
+        cached = getattr(self, "_capacity_cache", None)
+        if cached and time.time() - cached[0] < max_age:
+            return cached[1]
+        value = self.capacity_report()
+        self._capacity_cache = (time.time(), value)
+        return value
+
     def default_models(self):
         """The model each agent CLI uses when a task names none (from its settings), when one is configured."""
         found = {}
@@ -2877,6 +2996,7 @@ def health_report(manager):
               "default_models": manager.default_models(),
               "codex_rate_limits": (manager.codex_rate_limits_cached()
                                     if callable(getattr(manager, "codex_rate_limits_cached", None)) else None),
+              "capacity": (manager.capacity_cached() if callable(getattr(manager, "capacity_cached", None)) else None),
               "engines": engine_health,
               # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
               "heartbeat": bool(getattr(manager, "controller_url", None))}

@@ -72,6 +72,10 @@ machines and alerts.
 0. **Fable never builds, fixes or tests.** It's an expensive model, so it gives guidance only: it reviews plans,
    specs and diffs, and gives the final review and green light. Builds, fixes, merges and test runs go to the
    smaller models (Sonnet, Haiku, local), or to Opus where the owner names it as the builder.
+1a. **Codex runs light by default:** every Codex task names `model: "gpt-5.6-terra"` and `effort: "medium"`
+   (`high` only for final or security reviews). Never `gpt-5.6-sol` unless the owner names it for that task.
+   Codex limits come from Codex itself (`/status`, i.e. the `rate_limits` it logs per session: 5-hour and weekly
+   `used_percent` and `resets_at`), not from parsed error text.
 1. **Codex is the scarcest model.** Use it for final reviews, security-sensitive reviews and hard builds only.
    Never use it for merges, benchmarks, availability checks or routine re-reviews.
 2. **One reviewer per round.** A second paid reviewer only for security-sensitive changes or the final review.

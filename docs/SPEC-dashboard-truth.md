@@ -50,6 +50,14 @@ every API and page.** Raw `state` stays in the data for the engine. Pages never 
 10. **Chain counts.** A chain stage `count` equals the number of runs shown for that stage, or is renamed to what it
     really counts. Covers N2.
 
+11. **Codex limits come from Codex.** The runner reads the newest `rate_limits` record in the Codex session logs
+    (`$CODEX_HOME/sessions/**/rollout-*.jsonl`: `primary` = 5-hour window, `secondary` = weekly, each with
+    `used_percent` and `resets_at`) and reports it on `/health`. This is the same data `codex /status` shows.
+    The budget page shows both windows, and admission uses them. A Codex error message only marks the model
+    limited until the next fresh `rate_limits` record; a reset time parsed from error text that has already passed
+    must never roll forward to the next day. Test: a parsed "try again at 1:47 PM" seen at 15:00 does not limit
+    Codex until tomorrow. Covers the false 22-hour Codex limit on 2026-11-12 (t-54eebb94).
+
 ## 4. Out of scope
 - Visual redesign.
 - New pages.

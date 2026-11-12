@@ -16,7 +16,7 @@ import usage
 
 # "test" (docs/SPEC-live-monitor.md 6): a test pass on someone else's build; never seeded for Fable (CLAUDE.md rule 0)
 KINDS = ("build", "fix", "review", "re_review", "final_review", "security_review", "merge", "benchmark", "check",
-         "draft", "test")
+         "draft", "test", "lead")
 REVIEW_KINDS = {"review", "re_review", "final_review", "security_review"}
 EFFORTS = ("low", "medium", "high")
 TIERS = ("cheap", "standard", "premium", "scarce")
@@ -29,11 +29,11 @@ GLOB_BAD = set("[]{}\\\x00")
 
 DEFAULT_RULES = {
     "models": {
-        "codex": {"tier": "scarce", "max_concurrent": 1, "kinds": ["final_review", "security_review", "build"],
+        "codex": {"tier": "scarce", "max_concurrent": 1, "kinds": ["final_review", "security_review", "build", "lead"],
                   "default_effort": {"final_review": "high", "security_review": "high", "build": "high", "*": "medium"},
                   "daily_tokens_soft": 2000000, "daily_tokens_hard": None},
         "claude:claude-opus-*": {"tier": "premium", "max_concurrent": 1,
-                                 "kinds": ["build", "final_review", "security_review", "review", "test"]},
+                                 "kinds": ["build", "final_review", "security_review", "review", "test", "lead"]},
         "claude:claude-fable-*": {"tier": "premium", "max_concurrent": 2,
                                   "kinds": ["review", "re_review", "final_review", "security_review"]},
         "claude:claude-sonnet-*": {"tier": "standard", "max_concurrent": 2, "kinds": ["*"]},

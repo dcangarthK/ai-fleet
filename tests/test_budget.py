@@ -447,7 +447,7 @@ class BudgetApiTests(unittest.TestCase):
     def test_codex_merge_is_refused_naming_a_cheaper_model_and_override_is_admin_only(self):
         r = self.post(agent="codex", kind="merge", gate="pytest")
         self.assertEqual(r.status_code, 400)
-        self.assertIn("codex is reserved for [final_review, security_review, build]", r.text)
+        self.assertIn("codex is reserved for [final_review, security_review, build, lead]", r.text)
         self.assertIn("use claude:claude-haiku-* for merge", r.text)
         t = self.ok(agent="codex", kind="merge", gate="pytest", budget_override="owner merging a hotfix")
         self.assertEqual(t["budget_override"], "owner merging a hotfix")

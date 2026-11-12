@@ -71,10 +71,15 @@ tier order and the independence rules that already exist. Fable never builds, fi
     - At the reset the queue drains automatically in priority order.
 11. **Controller continuity (leader).** The orchestration itself survives limits.
     - The controller keeps a `leader` role: the model session that delegates, reviews results and starts next
-      steps. Its pending plan (next steps per work item) is stored in fleet.db, not only in a chat session.
-    - If the leader's account is limited, or the leader session stops, the controller assigns the leader role to
-      the next account/model with capacity (orchestrator-capable: Opus or Sonnet; never Fable, never local), and
-      starts it with the stored plan and a short state brief.
+      steps. Its pending plan (ordered next steps and status per work item) is stored in fleet.db, not only in a
+      chat session, and the current leader record stores its account, model, since time and session task id.
+    - A lead is a chain of short sessions: one capped `lead` task per stored step, started with the plan and a
+      state brief under 4 KB. `lead` is allowed only for Codex `gpt-5.6-terra` and Claude Opus/Sonnet, with a
+      30-turn cap. Fable and local models never lead.
+    - If the leader account is limited, or its session settles or stops while plan steps remain, the controller
+      assigns the next capable model in this order: Codex `gpt-5.6-terra` when it has capacity; otherwise Opus or
+      Sonnet on any unlimited Claude account. Codex may build while leading; work it built is recorded as
+      `pending_review` in the plan for a Claude review once a Claude account returns.
     - If no capable model has capacity, the leader resumes at the earliest reset (requirement 10) and continues
       delegation, builds, reviews, gates and merges from the stored plan.
     - Every leader change is an event on Live (`leader.assigned {from, to, reason}`). Owner-only actions (approve,

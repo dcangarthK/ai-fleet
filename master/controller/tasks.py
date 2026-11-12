@@ -1056,6 +1056,8 @@ async def poll_loop() -> None:
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
             import capacity
             await capacity.tick()
+            import leader
+            await leader.tick()
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens
@@ -1455,6 +1457,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     waiting = decision["reason"] if decision["wait"] else queued_reason
     tools_at_launch = launch_tools(agent, effective["policy"], t.mode)
     extra = ({"tools": review_exec.get("tools"), "max_turns": review_exec.get("max_turns")} if review_exec else {})
+    # Part G req 11 / Part H req 4: a controller lead is always a short-lived session.
+    if kind == "lead":
+        extra["max_turns"] = 30
     ids: list[str] = []
     for index, part in enumerate(parts):
         task_id = "t-" + secrets.token_hex(4)

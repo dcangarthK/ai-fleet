@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS presence (
     session TEXT PRIMARY KEY, model TEXT, account_label TEXT, last_seen REAL);
 CREATE TABLE IF NOT EXISTS limit_resets (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT, at REAL, actor TEXT);
+CREATE TABLE IF NOT EXISTS plan_items (
+    work_item TEXT PRIMARY KEY, next_steps TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'open',
+    updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS leader (
+    id INTEGER PRIMARY KEY CHECK (id=1), account TEXT, model TEXT, since REAL, session_task_id TEXT,
+    not_before REAL);
 """
 
 # Columns added after the first release; ALTERed in on startup for existing databases.

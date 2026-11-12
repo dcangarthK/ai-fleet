@@ -84,6 +84,8 @@ def token_scope(token: str | None) -> str | None:
 
 def required_scope(request: Request) -> str:
     if request.method in ("GET", "HEAD"):
+        if request.url.path == "/api/plan":
+            return "operate"
         return "admin" if request.url.path == "/api/export" else "view"
     path = request.url.path
     if path == "/api/policies/preview":

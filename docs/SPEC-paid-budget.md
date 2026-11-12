@@ -90,7 +90,7 @@ give the owner one console page to watch and change all of it.
 These run in `create_task` before node selection, cheapest first. Each refusal gives a specific reason.
 
 1. **Kind allowed:** if `kind` is not in the model's `kinds`, return 400:
-   `"codex is reserved for [final_review, security_review, build]; use claude:claude-sonnet-* for merge"`. The
+   `"codex is reserved for [final_review, security_review, build, lead]; use claude:claude-sonnet-* for merge"`. The
    alternative named is the cheapest model whose `kinds` allows this kind. The body field
    `budget_override: "<reason>"` (admin only) bypasses this check and is recorded on the task.
 2. **No paid checks:** `kind: check` on a paid model returns 400. Local models may run checks.

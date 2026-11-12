@@ -264,6 +264,20 @@ def fleet_status() -> str:
 
 
 @mcp.tool()
+def get_plan() -> str:
+    """Read the durable controller plan. Available to the owner and the operate-scoped leader session."""
+    return _controller("GET", "/api/plan", scope="operate")
+
+
+@mcp.tool()
+def put_plan(items: list[dict]) -> str:
+    """Replace the durable controller plan with work_item, ordered next_steps and status records.
+    Lead sessions use this after each short step. They may record `pending_review`, but cannot approve,
+    unblock, push, or set budget overrides."""
+    return _controller("PUT", "/api/plan", {"items": items}, scope="operate")
+
+
+@mcp.tool()
 def assign_role(role: str, node: str, model: str, ensure_model: bool = False) -> str:
     """Route a role to a model on a node. Several assignments per role = load-balanced.
     Set ensure_model to install a missing catalog model and return its pending assignment state.
@@ -322,7 +336,7 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
     node: optional; otherwise the least-busy eligible node is picked. role selects its instruction/policy layer.
     parent_id links sub-tasks.
     kind: always name it: build, fix, review, re_review, final_review, security_review, merge, benchmark, check,
-          draft. The budget rules (console Budget page) refuse a kind a model is not for, with the cheaper model
+          draft, test, lead. The budget rules (console Budget page) refuse a kind a model is not for, with the cheaper model
           to use; a limited model's task is queued until its reset (or rerouted, per the rules).
     effort: low | medium | high; default from the budget rules.
     budget_override: the owner's (admin) decision only; this bridge's calls have operate scope, so it is refused.

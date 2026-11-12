@@ -43,6 +43,7 @@ import evaluations  # noqa: E402
 import grounding  # noqa: E402
 import handoff  # noqa: E402
 import live  # noqa: E402
+import leader  # noqa: E402
 import instructions as fleet_instructions  # noqa: E402
 import pipeline as pipeline_machine  # noqa: E402
 import policy as fleet_policy  # noqa: E402
@@ -494,7 +495,7 @@ async def lifespan(_: FastAPI):
     background = [asyncio.create_task(loop()),
                   asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
                   asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop()),
-                  asyncio.create_task(live.sweep_loop())]
+                  asyncio.create_task(live.sweep_loop()), asyncio.create_task(leader.loop())]
     if tasks.POLL_SECONDS > 0:  # FLEET_TASK_POLL_SECONDS=0 turns the task poll off; tests then drive ticks themselves
         background.append(asyncio.create_task(tasks.poll_loop()))
     yield
@@ -507,6 +508,7 @@ app.middleware("http")(auth.access_control)
 app.include_router(tasks.router)
 app.include_router(handoff.router)
 app.include_router(live.router)
+app.include_router(leader.router)
 app.include_router(__import__("tokens").router)
 auth.presence_hook = live.note_presence
 

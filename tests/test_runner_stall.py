@@ -227,13 +227,14 @@ class RootCause(Base):
         job = self.add_job(m, pid=4242, pgid=4242)
         audits = []
         with mock.patch.object(m, "_kill_group", side_effect=PermissionError("nope")), \
+                mock.patch.object(runner, "proc_start", return_value=""), \
                 mock.patch.object(runner, "process_alive", return_value=True), \
                 mock.patch.object(runner, "group_alive", return_value=True), \
                 mock.patch.object(m, "_wait_group_gone", return_value=False), \
                 mock.patch.object(runner.os, "kill") as kill, \
                 mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
             m._timeout(job)
-        kill.assert_not_called()
+        self.assertEqual([], [c for c in kill.call_args_list if c.args[1:] != (0,)])  # signal 0 probes are fine
         self.assertIn("kill_failed", [a[0] for a in audits])
         self.assertEqual(("exited", 124, False), (job["state"], job["exit_code"], job["group_gone"]))
 
@@ -489,12 +490,59 @@ class PidReuse(Base):
         done.wait()  # reaped: its pid is free
         self.assertEqual("", runner.proc_start(done.pid))
 
-    def test_proc_start_nonzero_exit_or_empty_output_means_gone(self):
-        for rc, out, err in ((1, "", ""), (1, "ps: error\n", "ps: no such process"), (0, "", ""), (2, "junk", "")):
-            done = mock.Mock(returncode=rc, stdout=out, stderr=err)
+    def test_proc_start_nonzero_exit_is_gone_only_when_a_second_probe_confirms(self):
+        for rc, out in ((1, ""), (1, "ps: error\n"), (2, "junk")):
+            done = mock.Mock(returncode=rc, stdout=out, stderr="")
             with mock.patch.object(runner.subprocess, "run", return_value=done), \
                     mock.patch.object(runner.os, "name", "posix"):
-                self.assertEqual("", runner.proc_start(4242), (rc, out))
+                with mock.patch.object(runner.os, "kill", side_effect=ProcessLookupError):
+                    self.assertEqual("", runner.proc_start(4242), (rc, out))  # confirmed absent
+                with mock.patch.object(runner.os, "kill", return_value=None):
+                    self.assertIsNone(runner.proc_start(4242), (rc, out))  # alive: ps failed, ambiguous
+                with mock.patch.object(runner.os, "kill", side_effect=PermissionError):
+                    self.assertIsNone(runner.proc_start(4242), (rc, out))
+        with mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="")), \
+                mock.patch.object(runner.os, "name", "nt"):
+            with mock.patch.object(runner, "process_alive", return_value=False):
+                self.assertEqual("", runner.proc_start(4242))
+            with mock.patch.object(runner, "process_alive", return_value=True):
+                self.assertIsNone(runner.proc_start(4242))
+
+    def test_proc_start_empty_output_with_exit_zero_means_gone(self):
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(runner.subprocess, "run", return_value=done), \
+                mock.patch.object(runner.os, "name", "posix"):
+            self.assertEqual("", runner.proc_start(4242))
+
+    def test_reused_pid_after_a_normal_exit_does_not_block_resume_forever(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242, state="exited", group_gone=None,
+                           pid_start="Mon Jan  1 00:00:00 2024")
+        with mock.patch.object(runner.os, "name", "posix"):
+            with mock.patch.object(runner, "proc_start", return_value="Tue Feb  2 00:00:00 2025"):
+                self.assertFalse(m._old_group_alive(job))  # someone else lives at the pid now
+            with mock.patch.object(runner, "proc_start", return_value=None):
+                self.assertTrue(m._old_group_alive(job))  # unreadable: fail closed
+            job["pid_start"] = None
+            with mock.patch.object(runner, "proc_start", return_value="Tue Feb  2 00:00:00 2025"):
+                self.assertTrue(m._old_group_alive(job))  # nothing saved to compare: fail closed
+        with mock.patch.object(runner.os, "name", "nt"):
+            job["pid_start"] = "2024-01-01T00:00:00.0000000Z"
+            with mock.patch.object(runner, "proc_start", return_value="2025-01-01T00:00:00.0000000Z"):
+                self.assertTrue(m._old_group_alive(job))  # Windows stays closed
+
+    def test_reap_rechecks_identity_before_the_hard_kill(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242, pid_start="Mon Jan  1 00:00:00 2024")
+        checks = iter([True, False, False, False])  # the pid is reused during the graceful wait
+        with mock.patch.object(runner.os, "name", "posix"), \
+                mock.patch.object(m, "_group_ok", side_effect=lambda j: next(checks)), \
+                mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(m.__class__, "_wait_group_gone", staticmethod(lambda p, s: False)), \
+                mock.patch.object(m, "_kill_group") as kill:
+            m._reap_group(job, graceful=True)
+        forced = [c for c in kill.call_args_list if c.kwargs.get("force") is True]
+        self.assertEqual([], forced)
 
     def test_proc_start_windows_reads_creation_time_and_refuses_when_unreadable(self):
         ok = mock.Mock(returncode=0, stdout="2024-01-01T00:00:00.0000000Z\r\n", stderr="")

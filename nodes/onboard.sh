@@ -981,8 +981,22 @@ def proc_start(pid):
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
-        return ""  # a missing pid exits non-zero; whatever it printed is error text, never a start time
+        # Error text is never a start time. A missing pid exits non-zero, but so does a broken ps/powershell:
+        # call it gone only when a second probe agrees, else unknown.
+        return "" if _pid_absent(pid) else None
     return " ".join((out.stdout or "").split())
+
+
+def _pid_absent(pid):
+    if os.name == "nt":
+        return not process_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def boot_time():
@@ -2210,6 +2224,10 @@ class JobManager:
             if not wait:
                 return group_alive(job.get("pid"))
             return not self._wait_group_gone(job.get("pid"), wait)
+        if os.name != "nt" and job.get("pid_start"):
+            live = proc_start(job.get("pid"))
+            if live and live != job["pid_start"]:
+                return False  # the pid was reused: the job's own leader (and group) is long gone
         # Identity unverifiable: fail closed. Only a job known lost (reboot) has no group to wait for.
         return job.get("state") != "lost"
 
@@ -2249,14 +2267,14 @@ class JobManager:
             if not self._group_ok(job):
                 self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
             elif os.name == "nt":
-                if process_alive(pid):
+                if process_alive(pid) and self._group_ok(job):
                     self._signal_group(job, True)
                 gone = self._wait_group_gone(pid, 2.0)
             else:
                 if graceful and group_alive(pid):
                     self._signal_group(job, False)
                     self._wait_group_gone(pid, 1.0)
-                if group_alive(pid):
+                if group_alive(pid) and self._group_ok(job):  # identity again: the graceful wait took a while
                     self._signal_group(job, True)
                     self._wait_group_gone(pid, 2.0)
                 gone = not group_alive(pid)

@@ -209,7 +209,7 @@ curl -s -X POST http://127.0.0.1:8700/api/tasks -H 'Content-Type: application/js
 curl -s -X POST http://127.0.0.1:8700/api/tasks/<id>/message -H 'Content-Type: application/json' -H 'X-Fleet: 1' -d '{"text": "..."}'
 # retry an escalated pipeline's reviews
 curl -s -X POST http://127.0.0.1:8700/api/pipelines/<id>/retry -H 'X-Fleet: 1'
-# read: /api/pipelines/<id>, /api/tasks/<id>, /api/tasks/<id>/diff, /api/tasks/<id>/log?offset=0, /api/fleet, /api/events/list?limit=1000
+# read: /api/pipelines/<id>, /api/tasks/<id>, /api/tasks/<id>/diff, /api/tasks/<id>/log?offset=0, /api/fleet, /api/events/list?limit=1000 (newest first; `before=<id>` pages; `after=<id>` alone stays ascending)
 ```
 
 Patterns that work:

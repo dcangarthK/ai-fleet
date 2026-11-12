@@ -423,8 +423,15 @@ def accounts(now: float) -> list[dict]:
             running = c.execute(f"SELECT COUNT(*) FROM tasks WHERE state IN ('starting','working') AND "
                                 f"{budget.ACCOUNT_SQL}=?", (account,)).fetchone()[0]
             snap = budget.limit_snapshot(rules, now, account)
-            until, _ = budget.limited_for(snap, acct["agent"], acct["agent"], rules)
-            if until:
+            until, scope, _subject = budget.limit_detail(snap, acct["agent"], acct["agent"], rules, None)
+            limited_model = None
+            if until and scope == "model":
+                # A model-scope limit is on that model, not the account: name the model that is limited.
+                held = [(u, m) for m, u in snap["models"].items() if m.partition(":")[0] == acct["agent"]]
+                limited_model = max(held)[1].partition(":")[2] or None if held else None
+            if until and scope == "model":
+                status = f"{limited_model or acct['agent']} limited until {budget.clock(until)}"
+            elif until:
                 status = f"limited until {budget.clock(until)}"
             elif reset and (not last or reset >= last["ts"]):
                 status = f"reset by owner at {budget.clock(reset)}"
@@ -433,7 +440,7 @@ def accounts(now: float) -> list[dict]:
             else:
                 status = "no recent limit"
             out.append(acct | {"last_limit": {"at": last["ts"], "resets_at": last["resets_at"]} if last else None,
-                               "limited_until": until, "reset_at": reset, "since": since,
+                               "limited_until": until, "limit_scope": scope, "limited_model": limited_model, "reset_at": reset, "since": since,
                                "tokens_since": {"input": fleet[0], "output": fleet[1], "cached": fleet[2]},
                                "self_reported_tokens": mine, "running": running, "status": status})
     return out
@@ -526,7 +533,9 @@ def alerts() -> list[dict]:
                 if account not in snaps:
                     snaps[account] = budget.limit_snapshot(rules, now, account)
                 agent = data.get("agent") if isinstance(data.get("agent"), str) else ""
-                if not budget.limited_for(snaps[account], agent, agent, rules)[0]:
+                model = data.get("model") if isinstance(data.get("model"), str) and data.get("model") else None
+                ident = f"{agent}:{model}" if model else agent
+                if not budget.limited_for(snaps[account], agent, ident, rules)[0]:
                     continue
             # Titles and node ids only: never result, log or limit-message text.
             out.append({"id": r["id"], "ts": r["ts"], "task_id": r["task_id"], "type": r["type"],

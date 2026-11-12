@@ -1197,25 +1197,55 @@ class JobManager:
                                        else os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")))
 
     def codex_rate_limits_cached(self, max_age=15.0):
-        """For /health and heartbeats, which run every few seconds: the log directory is scanned at most every
+        """For /health and heartbeats, which run every few seconds: the log directories are scanned at most every
         `max_age` seconds."""
         cached = getattr(self, "_rate_limits_cache", None)
         if cached and time.time() - cached[0] < max_age:
             return cached[1]
-        value = self.codex_rate_limits()
+        value = self.codex_rate_limits_report()
         self._rate_limits_cache = (time.time(), value)
         return value
 
-    def codex_rate_limits(self):
-        """The newest `rate_limits` record in the Codex session logs (sessions/**/rollout-*.jsonl): `primary` is the
-        5-hour window, `secondary` the weekly one, each {used_percent, resets_at, window_minutes}; `seen_at` is the
-        log's modification time. The same data `codex /status` shows. None when there is none. Read only; only the
-        numbers are kept, never a line of the log."""
-        try:
-            files = sorted(((p.stat().st_mtime, p) for p in (self.codex_home() / "sessions").glob("**/rollout-*.jsonl")),
-                           key=lambda item: item[0], reverse=True)
-        except OSError:
-            return None
+    def codex_rate_limits_report(self):
+        """For /health: one record per Codex profile that has one, each tagged with its profile id (a profile is an
+        account: its limits are its own), [{profile, primary, secondary, seen_at}]. Empty when there are none."""
+        out = []
+        for entry in self.profile_entries("codex"):
+            if entry["dir"]:
+                home = Path(os.path.expanduser(entry["dir"]))
+            else:
+                home = self.codex_home()
+            found = self.codex_rate_limits(home)
+            if found:
+                out.append({"profile": entry["id"], **found})
+        return out
+
+    @staticmethod
+    def _recent_rollouts(sessions, wanted=5, max_days=7):
+        """The newest rollout logs: sessions/YYYY/MM/DD/rollout-*.jsonl, newest date directories first, so a long
+        history is never walked."""
+        def subdirs(path):
+            try:
+                return sorted((p for p in path.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True)
+            except OSError:
+                return []
+
+        files, days = [], 0
+        for year in subdirs(sessions):
+            for month in subdirs(year):
+                for day in subdirs(month):
+                    days += 1
+                    files += list(day.glob("rollout-*.jsonl"))
+                    if len(files) >= wanted or days >= max_days:
+                        return files
+        return files + list(sessions.glob("rollout-*.jsonl"))
+
+    def codex_rate_limits(self, home=None):
+        """The newest `rate_limits` record in a Codex home's session logs (sessions/**/rollout-*.jsonl): `primary`
+        is the 5-hour window, `secondary` the weekly one, each {used_percent, resets_at, window_minutes}; `seen_at`
+        is the record's own timestamp (the log's modification time if it has none). The same data `codex /status`
+        shows. None when there is none. Read only; only the numbers are kept, never a line of the log."""
+        home = self.codex_home() if home is None else home
 
         def window(value):
             if not isinstance(value, dict):
@@ -1226,8 +1256,17 @@ class JobManager:
                 numbers[name] = x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
             return numbers if numbers["used_percent"] is not None and numbers["resets_at"] is not None else None
 
-        for mtime, path in files[:5]:  # the newest logs; an old one can't hold the newest record
+        def stamp(event, fallback):
+            text = event.get("timestamp")
             try:
+                return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            except (AttributeError, ValueError):
+                return fallback
+
+        best = None
+        for path in self._recent_rollouts(home / "sessions"):
+            try:
+                mtime = path.stat().st_mtime
                 with path.open("rb") as handle:
                     handle.seek(0, os.SEEK_END)
                     size = handle.tell()
@@ -1242,15 +1281,19 @@ class JobManager:
                     event = json.loads(line)
                 except ValueError:
                     continue
-                payload = event.get("payload") if isinstance(event, dict) else None
-                limits = (payload.get("rate_limits") if isinstance(payload, dict) else None) or (
-                    event.get("rate_limits") if isinstance(event, dict) else None)
+                if not isinstance(event, dict):
+                    continue
+                payload = event.get("payload")
+                limits = (payload.get("rate_limits") if isinstance(payload, dict) else None) or event.get("rate_limits")
                 if not isinstance(limits, dict):
                     continue
                 primary, secondary = window(limits.get("primary")), window(limits.get("secondary"))
                 if primary or secondary:
-                    return {"primary": primary, "secondary": secondary, "seen_at": mtime}
-        return None
+                    found = {"primary": primary, "secondary": secondary, "seen_at": stamp(event, mtime)}
+                    if best is None or found["seen_at"] > best["seen_at"]:
+                        best = found
+                    break  # the last record of this file is its newest
+        return best
 
     def default_models(self):
         """The model each agent CLI uses when a task names none (from its settings), when one is configured."""

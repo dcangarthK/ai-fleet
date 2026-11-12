@@ -7,7 +7,7 @@ import { useCan, useRun } from "../lib/data";
 import { ago, pctText } from "../lib/format";
 import {
   EFFORTS, KINDS, OTHER, TIERS, clockTime, concurrencyText, formToRules, formatBytes, formatTokens, kindRows, meter,
-  modelLabel, ruleSummary, rulesDiff, rulesFormClass, rulesToForm, stackDays, statusCard,
+  modelLabel, rateWindows, ruleSummary, rulesDiff, rulesFormClass, rulesToForm, stackDays, statusCard,
   type BudgetStatus, type BudgetUsage, type Decision, type LocalReviewer, type RulesForm, type RulesVersion,
   type Savings,
 } from "../lib/budget";
@@ -84,6 +84,17 @@ function StatusStrip({ status, loading }: { status?: BudgetStatus; loading: bool
                 <span className={`fill tone-bg-${gauge.tone}`} style={{ width: gauge.pct == null ? 0 : `${Math.round(gauge.pct * 100)}%` }} />
               </div>
               <div className="small quiet">{gauge.label}</div>
+              {(m.accounts ?? []).map((a) => (
+                <div key={a.account} className="small" data-testid="status-account">
+                  <span className="mono">{a.label ?? a.account}</span>{" "}
+                  <span className={`state tone-${a.state === "limited" ? "bad" : "ok"}`}>
+                    {a.state === "limited" ? `limited${a.limited_until ? ` until ${clockTime(a.limited_until)}` : ""}` : "ok"}
+                  </span>
+                  {rateWindows(a.rate_limits).map((w) => (
+                    <div key={w.label} className="quiet">{w.label}: {w.used}, resets {clockTime(w.resets)}</div>
+                  ))}
+                </div>
+              ))}
             </div>
           );
         })}

@@ -333,25 +333,51 @@ class CodexRateLimits(Base):
 
     def test_reports_both_windows_from_the_newest_record(self):
         now = time.time()
-        self.rollout("old", [self.record((90.0, 1), (80.0, 2))], now - 1000)
-        self.rollout("new", [self.record((10.0, 100), (20.0, 200)), "not json",
+        self.rollout("old", [self.record((90.0, 1), (80.0, 2), "2026-11-12T08:00:00Z")], now - 1000)
+        self.rollout("new", [self.record((10.0, 100), (20.0, 200), "2026-11-12T09:00:00Z"), "not json",
                              {"type": "event_msg", "payload": {"type": "agent_message"}},
-                             self.record((3.0, 1762999999), (56.0, 1763500000))], now - 10)
+                             self.record((3.0, 1762999999), (56.0, 1763500000), "2026-11-12T10:00:00Z")], now - 10)
         got = self.m.codex_rate_limits()
         self.assertEqual(got["primary"], {"used_percent": 3.0, "resets_at": 1762999999, "window_minutes": 300})
         self.assertEqual(got["secondary"], {"used_percent": 56.0, "resets_at": 1763500000, "window_minutes": 10080})
 
-    def test_health_carries_only_the_rate_limits(self):
+    def test_seen_at_is_the_records_own_timestamp_not_the_file_time(self):
+        import datetime
+        self.rollout("a", [self.record((3.0, 5), (56.0, 6), "2026-11-10T20:00:45.224Z")], time.time())
+        expected = datetime.datetime(2026, 11, 10, 20, 0, 45, 224000, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertAlmostEqual(self.m.codex_rate_limits()["seen_at"], expected, places=3)
+
+    def test_the_newest_record_wins_across_files_by_its_timestamp(self):
+        now = time.time()
+        self.rollout("a", [self.record((1.0, 5), (1.0, 6), "2026-11-12T12:00:00Z")], now - 500)  # older file, newer record
+        self.rollout("b", [self.record((99.0, 5), (1.0, 6), "2026-11-12T11:00:00Z")], now - 5)
+        self.assertEqual(self.m.codex_rate_limits()["primary"]["used_percent"], 1.0)
+
+    def test_health_reports_a_record_per_profile_tagged_with_it(self):
+        other = self.base / "codex-spare"
+        (other / "sessions" / "2026" / "11" / "12").mkdir(parents=True)
+        (other / "sessions" / "2026" / "11" / "12" / "rollout-s.jsonl").write_text(
+            json.dumps(self.record((77.0, 5), (5.0, 6))) + "\n")
+        self.m.profile_config = {"codex": [{"id": "fleet", "dir": None, "label": "a"},
+                                           {"id": "spare", "dir": str(other), "label": "b"},
+                                           {"id": "empty", "dir": str(self.base / "none"), "label": "c"}]}
         self.rollout("a", [self.record((3.0, 5), (56.0, 6))], time.time())
-        report = runner.health_report(self.m)
-        self.assertEqual(report["codex_rate_limits"]["primary"]["used_percent"], 3.0)
-        self.assertEqual(set(report["codex_rate_limits"]), {"primary", "secondary", "seen_at"})
+        report = runner.health_report(self.m)["codex_rate_limits"]
+        self.assertEqual({r["profile"]: r["primary"]["used_percent"] for r in report}, {"fleet": 3.0, "spare": 77.0})
+        self.assertEqual(set(report[0]), {"profile", "primary", "secondary", "seen_at"})
+
+    def test_only_the_newest_date_directories_are_read(self):
+        sessions = self.home / "sessions"
+        for day in range(1, 9):  # eight newer, empty days
+            (sessions / "2026" / "12" / f"{day:02d}").mkdir(parents=True)
+        self.rollout("old", [self.record((3.0, 5), (56.0, 6))], time.time())  # 2026/11/12: ninth newest
+        self.assertIsNone(self.m.codex_rate_limits())
 
     def test_none_when_there_is_no_record(self):
         self.assertIsNone(self.m.codex_rate_limits())
         self.rollout("a", ["garbage", {"type": "session_meta"}], time.time())
         self.assertIsNone(self.m.codex_rate_limits())
-        self.assertIsNone(runner.health_report(self.m)["codex_rate_limits"])
+        self.assertEqual(runner.health_report(self.m)["codex_rate_limits"], [])
 
     def test_a_malformed_window_is_dropped(self):
         record = self.record((3.0, 5), (56.0, 6))

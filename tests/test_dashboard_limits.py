@@ -23,6 +23,10 @@ def window(used, resets_in, minutes):
     return {"used_percent": used, "resets_at": time.time() + resets_in, "window_minutes": minutes}
 
 
+def record(primary, secondary, seen_at=None, profile="fleet"):
+    return {"profile": profile, "primary": primary, "secondary": secondary, "seen_at": seen_at or time.time()}
+
+
 class LimitBase(LiveBase):
     def set_rules(self, **changes):
         r = self.c.put("/api/budget/rules", json={"body": rules(**changes)}, headers=W)
@@ -35,7 +39,8 @@ class LimitBase(LiveBase):
                       (time.time(), f"t-lim{time.time_ns()}", 1, agent, model, budget.identity(agent, model), "limit",
                        time.time() + resets_in, account))
 
-    def runner_reports(self, rate_limits):
+    def runner_reports(self, *records):
+        rate_limits = list(records)
         FakeRunner.health_extra = {**FakeRunner.health_extra, "codex_rate_limits": rate_limits}
         self.c.post("/api/refresh", headers=W)
         wait_for(lambda: (next(n for n in tasks.node_rows() if n["id"] == "master")["runner"] or {})
@@ -129,7 +134,7 @@ class OneHelperTests(LimitBase):
 class CodexRateLimitTests(LimitBase):
     def test_an_exhausted_window_limits_codex_until_its_reset_everywhere(self):
         weekly = window(100.0, 7200, 10080)
-        self.runner_reports({"primary": window(40.0, 1800, 300), "secondary": weekly, "seen_at": time.time()})
+        self.runner_reports(record(window(40.0, 1800, 300), weekly))
         until, scope = self.status_until("codex")
         self.assertAlmostEqual(until, weekly["resets_at"], delta=1)
         self.assertEqual(self.fleet_until("codex"), (until, scope))
@@ -138,40 +143,99 @@ class CodexRateLimitTests(LimitBase):
         self.assertEqual(self.admission(CODEX_ACCOUNT, "codex", None, "build"), "limit")
 
     def test_the_budget_page_shows_both_windows(self):
-        self.runner_reports({"primary": window(3.0, 1800, 300), "secondary": window(56.0, 400000, 10080),
-                             "seen_at": time.time()})
+        self.runner_reports(record(window(3.0, 1800, 300), window(56.0, 400000, 10080)))
         entry = next(m for m in self.c.get("/api/budget/status", headers=W).json()["models"] if m["key"] == "codex")
         self.assertEqual(entry["state"], "ok")
-        self.assertEqual(entry["rate_limits"]["primary"]["used_percent"], 3.0)
-        self.assertEqual(entry["rate_limits"]["secondary"]["used_percent"], 56.0)
+        row = next(a for a in entry["accounts"] if a["account"] == CODEX_ACCOUNT)
+        self.assertEqual(row["rate_limits"]["primary"]["used_percent"], 3.0)
+        self.assertEqual(row["rate_limits"]["secondary"]["used_percent"], 56.0)
 
     def test_an_error_limit_ends_at_the_next_fresh_record_with_room_left(self):
         self.limit_row(CODEX_ACCOUNT, "codex", None, resets_in=3600)
         self.assertIsNotNone(self.status_until("codex")[0])  # the error text alone limits it
-        self.runner_reports({"primary": window(3.0, 1800, 300), "secondary": window(56.0, 400000, 10080),
-                             "seen_at": time.time() + 1})
+        self.runner_reports(record(window(3.0, 1800, 300), window(56.0, 400000, 10080), time.time() + 1))
         self.assertEqual(self.status_until("codex"), (None, None))
         self.assertIsNone(self.resource_until(CODEX_ACCOUNT, "codex"))
         self.assertIsNone(self.admission(CODEX_ACCOUNT, "codex", None, "build"))
 
     def test_a_record_older_than_the_error_does_not_clear_it(self):
         self.limit_row(CODEX_ACCOUNT, "codex", None, resets_in=3600)
-        self.runner_reports({"primary": window(3.0, 1800, 300), "secondary": window(56.0, 400000, 10080),
-                             "seen_at": time.time() - 600})
+        self.runner_reports(record(window(3.0, 1800, 300), window(56.0, 400000, 10080), time.time() - 600))
         self.assertIsNotNone(self.status_until("codex")[0])
 
     def test_a_passed_reset_in_the_record_is_no_limit(self):
-        self.runner_reports({"primary": {"used_percent": 100.0, "resets_at": time.time() - 60, "window_minutes": 300},
-                             "secondary": window(10.0, 400000, 10080), "seen_at": time.time()})
+        self.runner_reports(record({"used_percent": 100.0, "resets_at": time.time() - 60, "window_minutes": 300},
+                                   window(10.0, 400000, 10080)))
         self.assertEqual(self.status_until("codex"), (None, None))
 
+    def test_a_record_limits_only_its_own_account(self):
+        other = record(window(100.0, 7200, 300), window(5.0, 400000, 10080), profile="other")  # codex@master/other
+        self.runner_reports(other)
+        self.assertEqual(self.status_until("codex")[0] is not None, True)  # aggregate: any account limited
+        entry = next(m for m in self.c.get("/api/budget/status", headers=W).json()["models"] if m["key"] == "codex")
+        self.assertAlmostEqual(entry["any_account_limited_until"], entry["limited_until"], delta=1)
+        by_account = {a["account"]: a for a in entry["accounts"]}
+        self.assertEqual(by_account[CODEX_ACCOUNT]["state"], "ok")
+        self.assertIsNone(self.resource_until(CODEX_ACCOUNT, "codex"))
+        self.assertIsNone(self.live_until(CODEX_ACCOUNT))
+        self.assertIsNone(self.admission(CODEX_ACCOUNT, "codex", None, "build"))
+        self.assertEqual(self.admission("codex@master/other", "codex", None, "build"), "limit")
+
+    def test_a_fresh_record_for_one_account_keeps_another_accounts_error_limit(self):
+        self.limit_row(CODEX_ACCOUNT, "codex", None, resets_in=3600)
+        self.runner_reports(record(window(3.0, 1800, 300), window(5.0, 400000, 10080), time.time() + 1, profile="other"))
+        self.assertIsNotNone(self.resource_until(CODEX_ACCOUNT, "codex"))
+
+    def test_status_gives_a_row_per_account_and_key(self):
+        self.set_rules(limit_scope="model")
+        self.limit_row(FLEET_ACCOUNT, "claude", OPUS)
+        entry = next(m for m in self.c.get("/api/budget/status", headers=W).json()["models"]
+                     if m["key"] == "claude:claude-opus-*")
+        by_account = {a["account"]: a for a in entry["accounts"]}
+        self.assertEqual(by_account[FLEET_ACCOUNT]["state"], "limited")
+        self.assertEqual(by_account[FLEET_ACCOUNT]["limit_scope"], "model")
+        self.assertEqual(by_account[SPARE_ACCOUNT]["state"], "ok")
+        self.assertIsNotNone(entry["any_account_limited_until"])
+
+
+class LiveScopeTests(LimitBase):
+    def test_a_model_limit_is_named_and_not_shown_as_the_account(self):
+        self.set_rules(limit_scope="model")
+        self.limit_row(FLEET_ACCOUNT, "claude", OPUS)
+        row = next(a for a in self.live()["accounts"] if a["account"] == FLEET_ACCOUNT)
+        self.assertEqual(row["limit_scope"], "model")
+        self.assertEqual(row["limited_model"], OPUS)
+        self.assertIn(OPUS, row["status"])
+
+    def test_an_account_scope_limit_is_the_account(self):
+        self.set_rules(limit_scope="account")
+        self.limit_row(FLEET_ACCOUNT, "claude", OPUS)
+        row = next(a for a in self.live()["accounts"] if a["account"] == FLEET_ACCOUNT)
+        self.assertEqual((row["limit_scope"], row["limited_model"]), ("account", None))
+        self.assertTrue(row["status"].startswith("limited until"))
+
+
+class DistinctKeyTests(unittest.TestCase):
+    def test_two_models_of_one_rules_key_do_not_limit_the_account(self):
+        now = time.time()
+        rows = [{"agent": "claude", "model": m, "failure_reason": "limit", "resets_at": now + 600, "ended_at": now - 5,
+                 "state": "failed"} for m in ("claude-opus-5-5", "claude-opus-5-6")]
+        state = budget.limit_state(rows, now, "model", rules())
+        self.assertEqual(state["accounts"], {})
+        rows.append(dict(rows[0], model="claude-sonnet-5-5"))
+        self.assertEqual(set(budget.limit_state(rows, now, "model", rules())["accounts"]), {"claude"})
+
+
+class CleanerTests(unittest.TestCase):
     def test_a_malformed_report_is_dropped(self):
         self.assertIsNone(budget.clean_codex_rate_limits("lots"))
-        self.assertIsNone(budget.clean_codex_rate_limits({"primary": {"used_percent": "x"}, "secondary": None}))
-        got = budget.clean_codex_rate_limits({"primary": {"used_percent": 3, "resets_at": 5, "window_minutes": 300,
-                                                          "extra": "x"}, "secondary": None, "seen_at": 9, "junk": 1})
-        self.assertEqual(got, {"primary": {"used_percent": 3.0, "resets_at": 5.0, "window_minutes": 300.0},
-                               "secondary": None, "seen_at": 9.0})
+        self.assertIsNone(budget.clean_codex_rate_limits([{"profile": "x", "primary": {"used_percent": "x"}}]))
+        self.assertIsNone(budget.clean_codex_rate_limits([{"profile": "bad profile!", "primary": {"used_percent": 1, "resets_at": 2}}]))
+        got = budget.clean_codex_rate_limits([
+            {"profile": "fleet", "primary": {"used_percent": 3, "resets_at": 5, "window_minutes": 300, "extra": "x"},
+             "secondary": None, "seen_at": 9, "junk": 1}, "junk"])
+        self.assertEqual(got, [{"profile": "fleet", "seen_at": 9.0, "secondary": None,
+                                "primary": {"used_percent": 3.0, "resets_at": 5.0, "window_minutes": 300.0}}])
 
 
 if __name__ == "__main__":

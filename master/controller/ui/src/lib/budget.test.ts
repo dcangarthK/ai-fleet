@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  formToRules, kindRows, meter, ruleSummary, rulesDiff, rulesFormClass, rulesToForm, stackDays, statusCard,
+  formToRules, kindRows, meter, rateWindows, ruleSummary, rulesDiff, rulesFormClass, rulesToForm, stackDays, statusCard,
   type BudgetRules, type BudgetUsageRow, type ModelStatus,
 } from "./budget";
 
@@ -103,5 +103,19 @@ describe("rules form", () => {
   it("stacks to one column on a phone", () => {
     expect(rulesFormClass(true)).toBe("rules-form one-col");
     expect(rulesFormClass(false)).toBe("rules-form");
+  });
+});
+
+describe("rateWindows", () => {
+  it("gives both Codex windows, 5-hour then weekly", () => {
+    const rows = rateWindows({
+      primary: { used_percent: 3.2, resets_at: 1000, window_minutes: 300 },
+      secondary: { used_percent: 56, resets_at: 2000, window_minutes: 10080 }, seen_at: 1,
+    });
+    expect(rows.map((r) => [r.label, r.used])).toEqual([["5-hour", "3% used"], ["Weekly", "56% used"]]);
+  });
+  it("is empty without a record and skips a missing window", () => {
+    expect(rateWindows(undefined)).toEqual([]);
+    expect(rateWindows({ primary: null, secondary: { used_percent: 1, resets_at: 5, window_minutes: null }, seen_at: null })).toHaveLength(1);
   });
 });

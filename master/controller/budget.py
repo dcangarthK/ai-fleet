@@ -448,13 +448,14 @@ def _succeeded(row: dict) -> bool:
     return state in ("review", "done") if state is not None else row.get("failure_reason") is None
 
 
-def limit_state(rows: list[dict], now: float, scope: str = "model") -> dict:
+def limit_state(rows: list[dict], now: float, scope: str = "model", rules: dict | None = None) -> dict:
     """{"models": {identity: until}, "accounts": {agent: until}} from settled task rows.
 
     A model is limited while one of its tasks failed with a limit whose reset is still ahead, unless a task of
     that model settled successfully after it. A later cancel, block or other failure proves nothing about the
     limit, so it never clears one. With scope "model", two different models of one agent limited at once mean the
-    whole account is limited until the later reset; with "account" any limit does.
+    whole account is limited until the later reset; with "account" any limit does. Given `rules`, "two different
+    models" means two different rules keys: two versions of one model are one model.
     """
     last_success: dict[str, float] = {}
     limits: dict[str, list[tuple[float, float]]] = {}
@@ -475,12 +476,15 @@ def limit_state(rows: list[dict], now: float, scope: str = "model") -> dict:
         if live:
             models[ident] = max(live)
     accounts: dict[str, float] = {}
-    by_agent: dict[str, list[float]] = {}
+    by_agent: dict[str, dict[str, float]] = {}
     for ident, until in models.items():
-        by_agent.setdefault(ident.split(":", 1)[0], []).append(until)
+        agent, _, model = ident.partition(":")
+        distinct = (match_key(rules, agent, model or None) or ident) if rules is not None else ident
+        known = by_agent.setdefault(agent, {})
+        known[distinct] = max(until, known.get(distinct, 0))
     for agent, untils in by_agent.items():
         if scope == "account" or len(untils) >= 2:
-            accounts[agent] = max(untils)
+            accounts[agent] = max(untils.values())
     return {"models": models, "accounts": accounts}
 
 
@@ -510,6 +514,9 @@ def _limit(state: dict, agent: str, ident: str | None, rules: dict | None, key: 
     else:
         subject = agent if (ident == agent or other == agent) else (key or other)
     return until, "model", subject
+
+
+limit_detail = _limit  # (until, scope, subject): which model (or the account) a limit is on
 
 
 def limit_for(rules: dict, state: dict, agent: str, ident: str | None, key: str | None = None
@@ -648,40 +655,83 @@ def task_account(task: dict) -> str:
     return task.get("account") or account_key(task.get("agent") or "", task.get("node_id"), None, None)
 
 
-def clean_codex_rate_limits(value) -> dict | None:
-    """The runner's `codex_rate_limits` ({primary, secondary, seen_at}), keeping only numbers; None if it holds
-    no usable window. Heartbeats can carry anything, so this is the only way the field is stored."""
+PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def clean_codex_rate_limits(value) -> list[dict] | None:
+    """The runner's `codex_rate_limits`: a list of {profile, primary, secondary, seen_at}, one per Codex profile
+    (account) that has a record, keeping only numbers and a valid profile id. None when nothing usable is left.
+    Heartbeats can carry anything, so this is the only way the field is stored."""
     def number(x):
         return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and x >= 0 else None
 
-    if not isinstance(value, dict):
+    if not isinstance(value, list):
         return None
-    out: dict = {}
-    for name in ("primary", "secondary"):
-        w = value.get(name)
-        used = number(w.get("used_percent")) if isinstance(w, dict) else None
-        reset = number(w.get("resets_at")) if isinstance(w, dict) else None
-        out[name] = ({"used_percent": used, "resets_at": reset, "window_minutes": number(w.get("window_minutes"))}
-                     if used is not None and reset is not None else None)
-    if not (out["primary"] or out["secondary"]):
-        return None
-    out["seen_at"] = number(value.get("seen_at"))
+    out = []
+    for item in value[:16]:
+        if not isinstance(item, dict) or not isinstance(item.get("profile"), str) \
+                or not PROFILE_ID_RE.fullmatch(item["profile"]):
+            continue
+        entry: dict = {"profile": item["profile"]}
+        for name in ("primary", "secondary"):
+            w = item.get(name)
+            used = number(w.get("used_percent")) if isinstance(w, dict) else None
+            reset = number(w.get("resets_at")) if isinstance(w, dict) else None
+            entry[name] = ({"used_percent": used, "resets_at": reset, "window_minutes": number(w.get("window_minutes"))}
+                           if used is not None and reset is not None else None)
+        if entry["primary"] or entry["secondary"]:
+            entry["seen_at"] = number(item.get("seen_at"))
+            out.append(entry)
+    return out or None
+
+
+def node_accounts(agent: str | None = None) -> dict[str, dict]:
+    """Every account the approved runners report: {account: {"agent", "node", "profile", "label"}}. A runner that
+    reports no profiles has the one `fleet` profile (account_key)."""
+    with db() as c:
+        rows = c.execute("SELECT id, runner FROM nodes WHERE status='approved' AND runner IS NOT NULL").fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        try:
+            runner = json.loads(row["runner"]) or {}
+        except (ValueError, TypeError):
+            continue
+        profiles = runner.get("profiles") if isinstance(runner.get("profiles"), dict) else {}
+        for name in sorted(PAID_AGENTS):
+            if (agent and name != agent) or not (runner.get("agents") or {}).get(name):
+                continue
+            entries = profiles.get(name)
+            if not isinstance(entries, list):
+                entries = [{"id": "fleet", "label": None}]
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                    continue
+                label = entry.get("label") if isinstance(entry.get("label"), str) else None
+                out[account_key(name, row["id"], entry["id"], label)] = {
+                    "agent": name, "node": row["id"], "profile": entry["id"], "label": label}
     return out
 
 
-def codex_rate_limits() -> dict | None:
-    """The newest rate_limits record any approved runner reports (docs/SPEC-dashboard-truth.md 11), or None."""
+def codex_records() -> dict[str, dict]:
+    """{account: its newest rate_limits record} from the approved runners (docs/SPEC-dashboard-truth.md 11). A
+    record belongs to the account of the profile that wrote it (its label, else node and profile) and only limits
+    that account."""
     with db() as c:
-        rows = c.execute("SELECT runner FROM nodes WHERE status='approved' AND runner IS NOT NULL").fetchall()
-    best = None
+        rows = c.execute("SELECT id, runner FROM nodes WHERE status='approved' AND runner IS NOT NULL").fetchall()
+    out: dict[str, dict] = {}
     for row in rows:
         try:
-            found = clean_codex_rate_limits((json.loads(row["runner"]) or {}).get("codex_rate_limits"))
-        except (ValueError, TypeError, AttributeError):
+            runner = json.loads(row["runner"]) or {}
+        except (ValueError, TypeError):
             continue
-        if found and (best is None or (found["seen_at"] or 0) > (best["seen_at"] or 0)):
-            best = found
-    return best
+        labels = {e.get("id"): e.get("label") for e in ((runner.get("profiles") or {}).get("codex") or [])
+                  if isinstance(e, dict)} if isinstance(runner.get("profiles"), dict) else {}
+        for found in clean_codex_rate_limits(runner.get("codex_rate_limits")) or []:
+            label = labels.get(found["profile"])
+            account = account_key("codex", row["id"], found["profile"], label if isinstance(label, str) else None)
+            if account not in out or (found["seen_at"] or 0) > (out[account]["seen_at"] or 0):
+                out[account] = found
+    return out
 
 
 def rate_limit_until(record: dict, now: float) -> float | None:
@@ -696,9 +746,9 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
     completing or resuming a limited task changes the task but not the fact that its run hit the limit.
 
     With `account`, only that account's runs count (plus older runs recorded before accounts, which hold every
-    account of their agent). Without it, every run counts: the most conservative view."""
-    query = ("SELECT agent, model, identity AS budget_identity, outcome, resets_at, ts AS ended_at FROM agent_usage "
-             "WHERE outcome IN ('ok','limit') AND agent IN ('claude','codex')")
+    account of their agent). Without it, every run counts: the most conservative view, "any account limited"."""
+    query = ("SELECT agent, model, identity AS budget_identity, outcome, resets_at, ts AS ended_at, account "
+             "FROM agent_usage WHERE outcome IN ('ok','limit') AND agent IN ('claude','codex')")
     args: tuple = ()
     if account:
         query += " AND (account IS NULL OR account=?)"
@@ -714,15 +764,17 @@ def limit_snapshot(rules: dict, now: float, account: str | None = None) -> dict:
         rows = [dict(r) | ({"state": "failed", "failure_reason": "limit"} if r["outcome"] == "limit"
                            else {"state": "review", "failure_reason": None})
                 for r in c.execute(query, args)]
-    # Codex's own rate_limits record (Part F 11) beats error text: a limit message only holds Codex until the next
-    # record, which says what is really left.
-    record = codex_rate_limits()
-    if record and record.get("seen_at"):
-        rows = [r for r in rows if not (r["agent"] == "codex" and r["failure_reason"] == "limit"
-                                        and r["ended_at"] <= record["seen_at"])]
-    state = limit_state(rows, now, rules.get("limit_scope", "model"))
-    if record and (until := rate_limit_until(record, now)):
-        state["accounts"]["codex"] = max(until, state["accounts"].get("codex", 0))
+    # Codex's own rate_limits record (Part F 11) beats error text, per account: a limit message only holds that
+    # account's Codex until its next record, which says what is really left.
+    records = codex_records()
+    rows = [r for r in rows if not (r["agent"] == "codex" and r["failure_reason"] == "limit"
+                                    and (rec := records.get(r["account"] or account))
+                                    and rec.get("seen_at") and r["ended_at"] <= rec["seen_at"])]
+    state = limit_state(rows, now, rules.get("limit_scope", "model"), rules)
+    ends = [until for owner, rec in records.items() if (account is None or owner == account)
+            and (until := rate_limit_until(rec, now))]
+    if ends:
+        state["accounts"]["codex"] = max(ends + [state["accounts"].get("codex", 0)])
     # Past the daily hard token budget, a model behaves as limited until local midnight.
     midnight = local_midnight(now) + 86400
     for key, entry in rules.get("models", {}).items():
@@ -996,7 +1048,9 @@ def status(now: float | None = None) -> dict:
     now = time.time() if now is None else now
     rules, error = resolve_rules()
     state = limit_snapshot(rules, now)
-    record = codex_rate_limits()
+    records = codex_records()
+    accounts_by_agent = {a: node_accounts(a) for a in PAID_AGENTS}
+    per_account: dict[str, dict] = {}
     out = []
     for key, entry in rules["models"].items():
         agent = key.split(":", 1)[0]
@@ -1008,10 +1062,25 @@ def status(now: float | None = None) -> dict:
         used = today_tokens(rules, key, now)
         soft = entry.get("daily_tokens_soft")
         status_name = "limited" if until else ("soft" if soft is not None and used >= soft else "ok")
+        rows = []
+        for account in sorted(accounts_by_agent.get(agent) or {}):
+            if account not in per_account:
+                per_account[account] = limit_snapshot(rules, now, account)
+            a_until, a_scope = limit_for(rules, per_account[account], agent, None, key)
+            if not a_until and (per_account[account].get("hard") or {}).get(key):
+                a_until, a_scope = per_account[account]["hard"][key], "daily"
+            row = {"account": account, "node": accounts_by_agent[agent][account]["node"],
+                   "label": accounts_by_agent[agent][account]["label"],
+                   "state": "limited" if a_until else "ok", "limited_until": a_until, "limit_scope": a_scope,
+                   "running": running_count(key, account=account)}
+            if agent == "codex" and records.get(account):
+                row["rate_limits"] = records[account]
+            rows.append(row)
         out.append({"key": key, "agent": agent, "tier": entry.get("tier"), "state": status_name,
-                    "limited_until": until, "limit_scope": scope, "running": running_count(key),
+                    # limited_until / limit_scope: the aggregate, set when ANY account is limited
+                    "limited_until": until, "limit_scope": scope, "any_account_limited_until": until,
+                    "accounts": rows, "running": running_count(key),
                     "max_concurrent": entry.get("max_concurrent"), "today_tokens": used, "soft": soft,
-                    "hard": entry.get("daily_tokens_hard"),
-                    **({"rate_limits": record} if agent == "codex" and record else {})})
+                    "hard": entry.get("daily_tokens_hard")})
     return {"fleet_only": True, "models": out, "rules_version": rules_row()["version"],
             "rules_invalid": error is not None, "rules_error": error}

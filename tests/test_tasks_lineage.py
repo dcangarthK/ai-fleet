@@ -121,6 +121,14 @@ class ParseResetTests(unittest.TestCase):
         self.assertEqual(got, epoch(2026, 11, 11, 13, 0, utc))
         self.assertIsNone(tasks.parse_reset(CODEX_LIMIT, epoch(2026, 11, 11, 14, 0, utc), utc))
 
+    def test_a_reset_just_past_midnight_rolls_to_tomorrow_only_within_five_hours(self):
+        utc = ZoneInfo("UTC")
+        seen = epoch(2026, 11, 12, 22, 0, utc)
+        self.assertEqual(tasks.parse_reset("limit reached, resets 1am", seen, utc), epoch(2026, 11, 13, 1, 0, utc))
+        self.assertEqual(tasks.parse_reset("limit reached, resets 2:59am", seen, utc), epoch(2026, 11, 13, 2, 59, utc))
+        self.assertIsNone(tasks.parse_reset("limit reached, resets 3:30am", seen, utc))  # 5.5 h ahead: not a 5-hour reset
+        self.assertIsNone(tasks.parse_reset("try again at 1:47 PM", epoch(2026, 11, 12, 15, 0, utc), utc))
+
     def test_a_passed_time_never_limits_until_tomorrow(self):
         """t-54eebb94: "try again at 1:47 PM" seen at 15:00 gave a false 22-hour limit."""
         utc = ZoneInfo("UTC")

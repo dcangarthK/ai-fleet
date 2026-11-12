@@ -108,7 +108,7 @@ _RESET_RE = re.compile(
 
 def parse_reset(text: str | None, after: float, local_tz: datetime.tzinfo | None = None) -> float | None:
     """The time a limit message says it resets today, as epoch seconds after `after`; None if it can't be read or
-    that time has already passed (it is never rolled to the next day).
+    that time has already passed and tomorrow's is more than LIKELY_RESET_SECONDS (5 h) away.
 
     "resets 2:30pm (Africa/Johannesburg)" uses the named zone; without one the machine's (or `local_tz`).
     """
@@ -132,9 +132,12 @@ def parse_reset(text: str | None, after: float, local_tz: datetime.tzinfo | None
                 pass
         moment = datetime.datetime.fromtimestamp(after, tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
         if moment.timestamp() <= after:
-            # Already passed today: unknown, never "tomorrow" (a message seen late made a false 22-hour limit).
-            # A task that really is limited is found by the provider's own record (docs/SPEC-dashboard-truth.md 11).
-            return None
+            # Already passed today. It means tomorrow only when that is within a usage window ("resets 1am" seen at
+            # 22:00); further off is unknown, never a false 22-hour limit ("1:47 PM" seen at 15:00). A task that
+            # really is limited is found by the provider's own record (docs/SPEC-dashboard-truth.md 11).
+            moment += datetime.timedelta(days=1)
+            if moment.timestamp() - after > LIKELY_RESET_SECONDS:
+                return None
         return moment.timestamp()
     return None
 

@@ -361,7 +361,7 @@ class AccountTests(LiveBase):
         self.c.portal.call(tasks.poll_task, ok["id"])
         account = next(a for a in self.live()["accounts"] if a["label"] == "owner-max" and a["agent"] == "claude")
         self.assertIsNotNone(account["last_limit"]["at"])
-        self.assertTrue(account["status"].startswith("limited until"))
+        self.assertIn("limited until", account["status"])  # names the model when the limit is on one model
         self.assertGreaterEqual(account["tokens_since"]["input"] or 0, 0)
         self.assertIn("running", account)
 

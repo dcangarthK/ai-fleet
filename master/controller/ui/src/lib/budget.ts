@@ -42,6 +42,22 @@ export interface BudgetRules {
 
 export interface RulesVersion { version: number; body: BudgetRules; author: string | null; created_at: number | null }
 
+/** One Codex window from the runner's `rate_limits` record. */
+export interface RateWindow { used_percent: number; resets_at: number; window_minutes: number | null }
+export interface RateLimits { profile?: string; primary: RateWindow | null; secondary: RateWindow | null; seen_at: number | null }
+
+/** One account's row under a model: its own limit state, running count and (Codex) rate-limit windows. */
+export interface AccountStatus {
+  account: string;
+  node: string;
+  label: string | null;
+  state: "ok" | "limited";
+  limited_until: number | null;
+  limit_scope: "model" | "account" | "daily" | null;
+  running: number;
+  rate_limits?: RateLimits;
+}
+
 export interface ModelStatus {
   key: string;
   agent: string;
@@ -49,6 +65,9 @@ export interface ModelStatus {
   state: "ok" | "limited" | "soft";
   limited_until: number | null;
   limit_scope: "model" | "account" | "daily" | null;
+  /** Same as limited_until: set when ANY account is limited (per-account state is in `accounts`). */
+  any_account_limited_until?: number | null;
+  accounts?: AccountStatus[];
   running: number;
   max_concurrent: number | null;
   today_tokens: number;
@@ -145,6 +164,16 @@ export function modelLabel(key: string): string {
 }
 
 export type Tone = "ok" | "warn" | "bad" | "quiet";
+
+/** The two Codex windows (5-hour, weekly) of an account as display rows; empty when no record. */
+export function rateWindows(r: RateLimits | undefined | null): { label: string; used: string; resets: number }[] {
+  if (!r) return [];
+  const out: { label: string; used: string; resets: number }[] = [];
+  for (const [name, w] of [["5-hour", r.primary], ["Weekly", r.secondary]] as const) {
+    if (w) out.push({ label: name, used: `${Math.round(w.used_percent)}% used`, resets: w.resets_at });
+  }
+  return out;
+}
 
 /** One status card per paid model: OK, limited until a time, or at its soft budget. */
 export function statusCard(s: ModelStatus): { tone: Tone; label: string } {

@@ -284,7 +284,7 @@ PUBLIC_JOB_KEYS = (
     "id", "agent", "mode", "state", "exit_code", "session_id", "cwd",
     "worktree", "branch", "started_at", "ended_at", "result", "denials",
     "gate", "runs", "instructions", "policy_hash", "usage", "num_turns", "limits_applied", "error",
-    "profile", "account_label",
+    "profile", "account_label", "group_gone",
 )
 
 
@@ -386,6 +386,25 @@ def process_alive(pid):
         return True
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def group_alive(pgid):
+    """Whether any process is still in the process group `pgid` (the whole group, not just its leader).
+    POSIX: killpg(pgid, 0). ProcessLookupError means the group is gone; a permission error means it exists.
+    Windows has no process groups to probe, so it falls back to the single process."""
+    if not isinstance(pgid, int) or pgid <= 1:
+        return False
+    if os.name == "nt":
+        return process_alive(pgid)
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True  # unknown: never claim a group is gone on a doubtful answer
+    return True
 
 
 def boot_time():
@@ -971,7 +990,8 @@ class JobManager:
             started = started_epoch(job)
             if (job.get("state") == "running" and booted and started and started < booted
                     and not (self._job_dir(job) / job.get("exit_file", "exit_code")).exists()):
-                job.update({"state": "lost", "ended_at": now()})
+                # A reboot ended every process of the old boot, and the saved pgid may be reused: signal nothing.
+                job.update({"state": "lost", "ended_at": now(), "group_gone": True})
                 self._parse_events_safe(job)
                 self._save(job)
             try:
@@ -1402,6 +1422,7 @@ class JobManager:
                 if not process_alive(job.get("pid")):
                     job["state"] = "lost"
                     job["ended_at"] = now()
+                    self._reap_group(job)  # the leader is gone; children may not be (12.9)
                     self._parse_events_safe(job)
                     self._save(job)
                 elif time.time() >= self._deadline(job):
@@ -1471,6 +1492,57 @@ class JobManager:
         else:
             os.killpg(pid, signal.SIGKILL if force else signal.SIGTERM)
 
+    def _group_ok(self, job):
+        """Only a job's own process group may be signalled: the pgid it was started with must still be its pid
+        (it is a session leader from start_new_session), so a reused pid can never aim a signal elsewhere."""
+        pid = job.get("pid")
+        return isinstance(pid, int) and pid > 1 and job.get("pgid", pid) == pid
+
+    @staticmethod
+    def _wait_group_gone(pgid, seconds):
+        end = time.monotonic() + seconds
+        while group_alive(pgid):
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.05)
+        return True
+
+    def _signal_group(self, job, force):
+        try:
+            self._kill_group(job.get("pid"), force=force)
+        except ProcessLookupError:
+            pass  # already gone
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.audit("kill_failed", "%s: group %s failed: %s" % (
+                job.get("id"), "SIGKILL" if force else "SIGTERM", error_line(exc)))
+
+    def _reap_group(self, job, graceful=False):
+        """Stop whatever is left of the job's process group and record `group_gone` (true only when the runner
+        saw the whole group disappear). Returns it. Never raises; failures are audited (12.9)."""
+        gone = False
+        try:
+            pid = job.get("pid")
+            if not self._group_ok(job):
+                self.audit("kill_skipped", "%s: pid %s is not the job's recorded group leader" % (job.get("id"), pid))
+            elif os.name == "nt":
+                if process_alive(pid):
+                    self._signal_group(job, True)
+                gone = self._wait_group_gone(pid, 2.0)
+            else:
+                if graceful and group_alive(pid):
+                    self._signal_group(job, False)
+                    self._wait_group_gone(pid, 1.0)
+                if group_alive(pid):
+                    self._signal_group(job, True)
+                    self._wait_group_gone(pid, 2.0)
+                gone = not group_alive(pid)
+            if not gone and self._group_ok(job):
+                self.audit("group_survived", "%s: process group %s is still alive" % (job.get("id"), job.get("pid")))
+        except Exception as exc:
+            self.audit("kill_failed", "%s: group check failed: %s" % (job.get("id"), error_line(exc)))
+        job["group_gone"] = gone
+        return gone
+
     def _timeout(self, job):
         with self.lock:
             if job.get("state") != "running":
@@ -1485,6 +1557,9 @@ class JobManager:
                         os.kill(pid, signal.SIGKILL)
                     except OSError as inner:
                         self.audit("kill_failed", "%s: pid kill failed: %s" % (job.get("id"), error_line(inner)))
+            job["group_gone"] = self._group_ok(job) and self._wait_group_gone(pid, 2.0)
+            if not job["group_gone"]:
+                self.audit("group_survived", "%s: process group %s is still alive after the timeout" % (job.get("id"), pid))
             self._parse_events_safe(job)
             message = "Job timed out after %s minutes" % job.get("timeout_minutes", self.max_job_minutes)
             job.update({"state": "exited", "exit_code": 124, "ended_at": now(),
@@ -1843,6 +1918,8 @@ class JobManager:
             raw.close()
             prompt_in.close()
         job["pid"] = process.pid
+        job["pgid"] = process.pid  # a session leader (start_new_session): its group id is its pid
+        job["group_gone"] = None
         self._save(job)
         self._start_monitor(job, process)
 
@@ -1877,7 +1954,7 @@ class JobManager:
                 "ended_at": None, "runs": job["runs"] + 1,
                 "allowed_tools": body.get("allowed_tools") or [],
                 "exit_file": "exit_code.%d" % (job["runs"] + 1),
-                "run_started_at": now(),
+                "run_started_at": now(), "group_gone": None,
             })
             if job.get("gate"):
                 job["gate"].update({"state": "pending", "exit_code": None, "output_tail": ""})
@@ -1894,20 +1971,9 @@ class JobManager:
         with self.lock:
             self.refresh(job)
             if job["state"] == "running":
-                pid = job.get("pid")
-                try:
-                    if os.name == "nt":
-                        self._kill_group(pid)
-                    else:
-                        self._kill_group(pid, force=False)
-                        for _ in range(20):
-                            if not process_alive(pid):
-                                break
-                            time.sleep(0.05)
-                        if process_alive(pid):
-                            self._kill_group(pid)
-                except (OSError, subprocess.SubprocessError):
-                    pass
+                # SIGTERM, then SIGKILL to the whole group; "cancelled" stays, but group_gone says whether the
+                # runner saw every process in the group disappear (12.9: only then may the controller reroute).
+                self._reap_group(job, graceful=True)
                 job.update({"state": "cancelled", "ended_at": now()})
                 self._parse_events_safe(job)
                 self._save(job)

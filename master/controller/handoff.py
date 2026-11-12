@@ -727,6 +727,15 @@ async def handle_handoff(task_id: str, reason: str = "limit", *, now: float | No
             return {"action": "wait", "reason": record["waiting"], "retry_at": record["retry_at"]}  # backing off
         if reason == "interrupted" and job_alive(node, task_id):
             return wait_for_slot(task, "interrupted; the runner still reports the process alive", now)
+        if reason == "interrupted":  # 12.9: the leader is lost; reroute only once the whole group is confirmed gone
+            try:
+                job = await tasks.runner_call(node, "GET", f"/jobs/{task_id}")
+            except HTTPException as exc:
+                if getattr(exc, "transport", False):
+                    return wait_for_slot(task, "interrupted; the runner did not answer", now)
+                job = None
+            if not (isinstance(job, dict) and job.get("group_gone") is True):
+                return escalate(task, "the runner could not confirm the process group is gone", now)
         choices = rank_slots(task.get("kind") or "draft", [slot_identity(task)], task, now=now,
                              exclude_models=exclude_models)
         if not choices:

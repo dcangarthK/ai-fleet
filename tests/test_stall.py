@@ -406,13 +406,23 @@ class ResponseTests(StallBase):
 
     def test_interrupted_also_reroutes(self):
         t = self.running()
-        FakeRunner.jobs[t["id"]].update(state="lost")
+        FakeRunner.jobs[t["id"]].update(state="lost", group_gone=True)
         wait_for(lambda: self.children(t["id"]))
         old = tasks.get_task(t["id"])
         self.assertEqual(old["state"], "interrupted")
         self.assertEqual(old["resolution"]["kind"], "handed_off")
         new = tasks.get_task(self.children(t["id"])[0])
         self.assertEqual(new["launch_extra"]["stall_reason"], "interrupted")
+
+    def test_interrupted_without_group_gone_is_escalated_not_rerouted(self):
+        for extra in ({}, {"group_gone": False}):  # an older runner (no field), and a surviving child
+            t = self.running()
+            FakeRunner.jobs[t["id"]].update(state="lost", **extra)
+            wait_for(lambda: tasks.get_task(t["id"])["state"] == "interrupted")
+            wait_for(lambda: self.record(t["id"]).get("escalated"))
+            self.assertEqual(self.children(t["id"]), [])
+            self.assertFalse(self.posts(t["id"], "checkpoint"))
+            self.assertEqual(len(self.events(t["id"], "task.escalated")), 1)
 
     def test_no_free_slot_waits_and_the_sweep_retries(self):
         body = rules()
@@ -491,6 +501,28 @@ class ResponseTests(StallBase):
 
 
 class FixRoundTests(StallBase):
+    def test_group_gone_false_or_missing_on_cancel_does_not_reroute(self):
+        for reply in ({"state": "cancelled", "group_gone": False}, {"state": "cancelled"},
+                      {"state": "lost", "group_gone": False}):
+            t = self.running()
+            FakeRunner.cancel_reply = reply
+            self.set_jobs(job(t["id"], alive=False))
+            self.sweep()
+            old = tasks.get_task(t["id"])
+            self.assertEqual((old["state"], old["failure_reason"]), ("failed", "stalled"), reply)
+            self.assertTrue(old["stall"]["escalated"], reply)
+            self.assertEqual(self.children(t["id"]), [], reply)
+            self.assertFalse(self.posts(t["id"], "checkpoint"), reply)
+            self.assertEqual(len(self.events(t["id"], "task.escalated")), 1)
+
+    def test_group_gone_true_on_cancel_reroutes(self):
+        t = self.running()
+        FakeRunner.cancel_reply = {"state": "cancelled", "group_gone": True}
+        self.set_jobs(job(t["id"], alive=False))
+        self.sweep()
+        self.assertEqual(len(self.children(t["id"])), 1)
+        self.assertFalse(self.record(t["id"]).get("escalated"))
+
     def test_fix3_stop_during_the_gate_phase_leaves_the_task_working(self):
         t = self.running()
         FakeRunner.cancel_reply = {"state": "exited", "exit_code": 0, "result": "done", "gate": {"state": "running"}}

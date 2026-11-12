@@ -357,3 +357,110 @@ class Activity(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(os.name == "nt", "process groups are POSIX only")
+class GroupGone(Base):
+    """Spec 12.9: the runner confirms the whole process group is gone, not just its leader."""
+
+    def spawn(self, script):
+        import subprocess
+        proc = subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(self.kill_group, proc.pid)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.stdout.close)
+        childpid = int(proc.stdout.readline())  # the script prints its child's pid once the child is set up
+        return proc, childpid
+
+    @staticmethod
+    def kill_group(pgid):
+        try:
+            os.killpg(pgid, runner.signal.SIGKILL)
+        except OSError:
+            pass
+
+    def reap_in_background(self, proc):
+        import threading
+        threading.Thread(target=proc.wait, daemon=True).start()  # as the monitor thread does for the leader
+
+    def test_group_alive(self):
+        self.assertFalse(runner.group_alive(0))
+        self.assertFalse(runner.group_alive(999999))
+        proc, _ = self.spawn("sleep 30 & echo $!; wait")
+        self.assertTrue(runner.group_alive(proc.pid))
+        with mock.patch.object(runner.os, "killpg", side_effect=PermissionError):
+            self.assertTrue(runner.group_alive(proc.pid))
+
+    def test_cancel_kills_a_child_that_ignores_sigterm(self):
+        m = self.manager()
+        proc, child = self.spawn("(trap '' TERM; exec sleep 60) & echo $!; wait")
+        self.reap_in_background(proc)
+        job = self.add_job(m, pid=proc.pid, pgid=proc.pid)
+        public = m.cancel(job)
+        self.assertEqual("cancelled", public["state"])
+        self.assertIs(True, public["group_gone"])
+        self.assertFalse(runner.group_alive(proc.pid))
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+
+    def test_kill_failure_is_audited_and_group_gone_is_false(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242)
+        audits = []
+        with mock.patch.object(m, "_kill_group", side_effect=PermissionError("nope")), \
+                mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(runner, "process_alive", return_value=True), \
+                mock.patch.object(m, "_wait_group_gone", return_value=False), \
+                mock.patch.object(m, "audit", side_effect=lambda *a: audits.append(a)):
+            public = m.cancel(job)
+        self.assertEqual("cancelled", public["state"])
+        self.assertIs(False, public["group_gone"])
+        events = [a[0] for a in audits]
+        self.assertIn("kill_failed", events)
+        self.assertIn("group_survived", events)
+
+    def test_a_job_whose_pid_is_not_its_group_leader_is_never_signalled(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=1111)
+        with mock.patch.object(m, "_kill_group") as kill, mock.patch.object(runner, "process_alive", return_value=True):
+            public = m.cancel(job)
+        kill.assert_not_called()
+        self.assertIs(False, public["group_gone"])
+
+    def test_an_ended_job_is_not_signalled_again(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242, state="exited", exit_code=0, group_gone=None)
+        with mock.patch.object(m, "_kill_group") as kill:
+            m.cancel(job)
+        kill.assert_not_called()
+
+    def test_lost_job_with_a_surviving_child_is_reaped(self):
+        m = self.manager()
+        proc, child = self.spawn("sleep 60 & echo $!; wait")
+        job = self.add_job(m, pid=proc.pid, pgid=proc.pid)
+        os.kill(proc.pid, runner.signal.SIGKILL)  # the leader dies; its child lives on in the group
+        proc.wait()
+        self.assertTrue(runner.group_alive(proc.pid))
+        public = m.public(job)
+        self.assertEqual("lost", public["state"])
+        self.assertIs(True, public["group_gone"])
+        self.assertFalse(runner.group_alive(proc.pid))
+
+    def test_lost_job_whose_group_cannot_be_killed_reports_false(self):
+        m = self.manager()
+        job = self.add_job(m, pid=4242, pgid=4242)
+        with mock.patch.object(runner, "process_alive", return_value=False), \
+                mock.patch.object(runner, "group_alive", return_value=True), \
+                mock.patch.object(m, "_kill_group", side_effect=PermissionError("nope")), \
+                mock.patch.object(m, "_wait_group_gone", return_value=False), \
+                mock.patch.object(m, "audit"):
+            public = m.public(job)
+        self.assertEqual(("lost", False), (public["state"], public["group_gone"]))
+
+    def test_timeout_records_group_gone(self):
+        m = self.manager()
+        proc, child = self.spawn("sleep 60 & echo $!; wait")
+        self.reap_in_background(proc)
+        job = self.add_job(m, pid=proc.pid, pgid=proc.pid)
+        m._timeout(job)
+        self.assertEqual(("exited", 124, True), (job["state"], job["exit_code"], job["group_gone"]))

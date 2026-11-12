@@ -157,12 +157,14 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
                 tasks.record_usage(task_id)
                 return "settled_failed" if new in ("failed", "interrupted") else "settled"
             return "gone"
-        confirmed = state in ("cancelled", "lost")
+        # Gone means the runner saw the whole process group disappear (group_gone is true). A reply without the
+        # field (an older runner), or with false, is not confirmation: a surviving child may still be running.
+        confirmed = state in ("cancelled", "lost") and (job or {}).get("group_gone") is True
         record = handoff.stall_record(task)
         record.update(stopped_at=now)
         if not confirmed:
             record.update(escalated=True, escalated_at=now,
-                          escalated_reason="the runner could not confirm the process is gone")
+                          escalated_reason="the runner could not confirm the process group is gone")
         fields = {"failure_reason": "stalled", "error": f"stalled ({verdict['kind']}): {verdict['detail']}"[:500],
                   "stall": json.dumps(record)}
         if job and isinstance(job.get("usage"), dict):

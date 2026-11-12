@@ -569,9 +569,56 @@ def agreement_rows(hints: list[dict], paid_issues: list[dict]) -> list[dict]:
 
 # ---------- stored rules ----------
 
+def ensure_hold_column(c) -> None:
+    """Part G req 9: `hold` is a column on budget_rules (a JSON list of account keys), not part of the body, so a
+    rules PUT cannot change it. Idempotent: adds the column only when it is missing."""
+    if "hold" not in {r[1] for r in c.execute("PRAGMA table_info(budget_rules)")}:
+        try:
+            c.execute("ALTER TABLE budget_rules ADD COLUMN hold TEXT")
+        except Exception:  # a concurrent starter added it first
+            if "hold" not in {r[1] for r in c.execute("PRAGMA table_info(budget_rules)")}:
+                raise
+
+
+def valid_hold_key(key) -> bool:
+    """An account key as account_key() builds it (agent/label or agent@node/profile), with the model-key rules."""
+    if not isinstance(key, str) or not 0 < len(key) <= 128 or (set(key) & GLOB_BAD) or " " in key:
+        return False
+    return bool(re.fullmatch(r"(claude|codex|ollama)(@[^/]+)?/.+", key)) and key.split("/", 1)[0].split("@")[0] in KEY_AGENTS
+
+
+def held_accounts() -> set[str]:
+    """Accounts the owner froze: placement moves nothing onto or off them."""
+    with db() as c:
+        ensure_hold_column(c)
+        row = c.execute("SELECT hold FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+    try:
+        value = json.loads(row["hold"]) if row and row["hold"] else []
+    except (ValueError, TypeError):
+        return set()
+    return {k for k in value if valid_hold_key(k)} if isinstance(value, list) else set()
+
+
+def set_hold(accounts, author: str) -> dict:
+    """The owner's freeze list, as a new rules version (same body, new hold). Only the owner's admin route may call it."""
+    if not isinstance(accounts, list) or not all(valid_hold_key(a) for a in accounts):
+        raise ValueError("hold must be a list of account keys like claude/spare")
+    now = time.time()
+    with db() as c:
+        ensure_hold_column(c)
+        c.execute("BEGIN IMMEDIATE")
+        latest = c.execute("SELECT version, body FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+        version = (latest["version"] if latest else 0) + 1
+        body = latest["body"] if latest else json.dumps(DEFAULT_RULES)
+        c.execute("INSERT INTO budget_rules (version, body, author, created_at, hold) VALUES (?,?,?,?,?)",
+                  (version, body, author, now, json.dumps(sorted(set(accounts)))))
+    return {"version": version, "hold": sorted(set(accounts)), "author": author, "created_at": now}
+
+
 def seed_rules() -> None:
     """First start only: the owner's later edits are never overwritten."""
     with db() as c:
+        ensure_hold_column(c)
         if not c.execute("SELECT 1 FROM budget_rules LIMIT 1").fetchone():
             c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (1, ?, 'seed', ?)",
                       (json.dumps(DEFAULT_RULES), time.time()))
@@ -649,9 +696,11 @@ def save_rules(body: dict, author: str) -> dict:
     now = time.time()
     with db() as c:
         c.execute("BEGIN IMMEDIATE")
+        ensure_hold_column(c)
         version = c.execute("SELECT COALESCE(MAX(version),0)+1 FROM budget_rules").fetchone()[0]
-        c.execute("INSERT INTO budget_rules (version, body, author, created_at) VALUES (?,?,?,?)",
-                  (version, json.dumps(body), author, now))
+        prior = c.execute("SELECT hold FROM budget_rules ORDER BY version DESC LIMIT 1").fetchone()
+        c.execute("INSERT INTO budget_rules (version, body, author, created_at, hold) VALUES (?,?,?,?,?)",
+                  (version, json.dumps(body), author, now, prior["hold"] if prior else None))  # hold carries forward
     return {"version": version, "body": body, "author": author, "created_at": now}
 
 

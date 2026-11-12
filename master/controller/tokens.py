@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -140,8 +142,34 @@ def _caps() -> dict[str, dict[str, int]]:
     return caps
 
 
+_META: ContextVar[dict[str, tuple[str | None, str | None]] | None] = ContextVar("token_meta", default=None)
+SUMMARY_WINDOW_S = 24 * 3600
+MAX_ROWS = 500
+
+
+def _load_meta(ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Kind and model for many tasks in one query (not two queries per row)."""
+    meta: dict[str, tuple[str | None, str | None]] = {i: (None, None) for i in ids}
+    try:
+        from store import db
+        with db() as c:
+            for start in range(0, len(ids), 400):
+                chunk = ids[start:start + 400]
+                marks = ",".join("?" * len(chunk))
+                for r in c.execute(f"SELECT id, kind, model FROM tasks WHERE id IN ({marks})", chunk):
+                    kind, model = r["kind"], r["model"]
+                    meta[r["id"]] = (kind if isinstance(kind, str) and kind else None,
+                                     model if isinstance(model, str) and model else None)
+    except Exception:
+        pass
+    return meta
+
+
 def _kind(task_id: str) -> str | None:
     """Task kind from the tasks table; None when unknown (never guessed from the id)."""
+    batch = _META.get()
+    if batch is not None and task_id in batch:
+        return batch[task_id][0]
     try:
         from store import db
         with db() as c:
@@ -153,6 +181,9 @@ def _kind(task_id: str) -> str | None:
 
 
 def _model(task_id: str) -> str | None:
+    batch = _META.get()
+    if batch is not None and task_id in batch:
+        return batch[task_id][1]
     try:
         from store import db
         with db() as c:
@@ -201,7 +232,13 @@ def _event_paths() -> list[Path]:
     jobs_dir = _jobs_dir()
     if not jobs_dir.is_dir():
         return []
-    return sorted(jobs_dir.glob("*/events.jsonl"))
+    stamped = []
+    for path in jobs_dir.glob("*/events.jsonl"):
+        try:
+            stamped.append((path.stat().st_mtime, path.parent.name, path))
+        except FileNotFoundError:
+            continue
+    return [path for _mtime, _name, path in sorted(stamped)]  # oldest first, newest last
 
 
 def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -226,7 +263,10 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 @router.get("/api/tokens/summary")
 def tokens_summary(since: float | None = Query(default=None)) -> dict[str, Any]:
-    return summarise(tokens_since(since)["tasks"])
+    # Bounded: the last 24 h unless the caller names a window.
+    if since is None:
+        since = time.time() - SUMMARY_WINDOW_S
+    return summarise(tokens_since(since, MAX_ROWS)["tasks"])
 
 
 @router.get("/api/tokens/{task_id}")
@@ -244,13 +284,27 @@ def task_tokens(task_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/tokens")
-def tokens_since(since: float | None = Query(default=None)) -> dict[str, list[dict[str, Any]]]:
-    rows = []
+def tokens_since(since: float | None = Query(default=None),
+                 limit: int | None = Query(default=None)) -> dict[str, list[dict[str, Any]]]:
+    """Rows oldest first; `limit` keeps the newest N (by file mtime)."""
+    paths = []
     for path in _event_paths():
         try:
             if since is not None and path.stat().st_mtime < since:
                 continue
-            rows.append(_row(path))
         except FileNotFoundError:
             continue
+        paths.append(path)
+    if isinstance(limit, int) and limit > 0:
+        paths = paths[-limit:]
+    token = _META.set(_load_meta([p.parent.name for p in paths]))
+    try:
+        rows = []
+        for path in paths:
+            try:
+                rows.append(_row(path))
+            except FileNotFoundError:
+                continue
+    finally:
+        _META.reset(token)
     return {"tasks": rows}

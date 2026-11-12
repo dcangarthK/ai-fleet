@@ -100,6 +100,8 @@ export interface TokenRow {
   turns: number;
   peak_context: number;
   turn1_context: number;
+  input: number;
+  output: number;
   cache_read: number;
   cache_write: number;
   caps: { turns: number | null; context: number | null; turn1: number };

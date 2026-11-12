@@ -438,9 +438,12 @@ def fleet_usage(days: int = 1) -> str:
 @mcp.tool()
 def run_pipeline(title: str, spec: str, repo: str, gate: str, builder: str = "codex",
                  reviewers: list[str] | None = None, max_rounds: int = 3,
-                 mode: str = "auto-edit", node: str = "") -> str:
+                 mode: str = "auto-edit", node: str = "", spec_sections: list[str] | None = None,
+                 spec_path: str = "") -> str:
     """Run a build/gate/cross-review pipeline. Reviewers are 'role:<name>' or 'agent:<name>' strings;
-    the builder cannot also be an agent reviewer. Returns immediately; use pipeline_status for progress."""
+    the builder cannot also be an agent reviewer. Returns immediately; use pipeline_status for progress.
+    Optional spec_sections (e.g. ['3.8', '6']) plus spec_path make review prompts carry section numbers
+    instead of the spec text."""
     parsed = []
     for reviewer in reviewers or ["role:reviewer", "agent:claude"]:
         kind, separator, name = reviewer.partition(":")
@@ -450,6 +453,10 @@ def run_pipeline(title: str, spec: str, repo: str, gate: str, builder: str = "co
     body = {"title": title, "spec": spec, "repo": repo, "gate": gate, "mode": mode,
             "builder": {"agent": builder, **({"node": node} if node else {})},
             "reviewers": parsed, "max_rounds": max_rounds}
+    if spec_sections:
+        body["spec_sections"] = spec_sections
+    if spec_path:
+        body["spec_path"] = spec_path
     return _controller("POST", "/api/pipelines", body)
 
 

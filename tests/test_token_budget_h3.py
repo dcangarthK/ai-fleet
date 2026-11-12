@@ -86,6 +86,20 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIsNone(machine.new(base)["spec_sections"])
 
 
+class McpPassthroughTests(unittest.TestCase):
+    def test_run_pipeline_forwards_spec_sections_and_path(self):
+        # master/mcp/server.py needs the mcp package; check the tool's source with ast instead.
+        import ast
+        tree = ast.parse((ROOT / "master" / "mcp" / "server.py").read_text())
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "run_pipeline")
+        params = [a.arg for a in fn.args.args]
+        self.assertIn("spec_sections", params)
+        self.assertIn("spec_path", params)
+        keys = {n.slice.value for n in ast.walk(fn) if isinstance(n, ast.Subscript)
+                and isinstance(n.value, ast.Name) and n.value.id == "body" and isinstance(n.slice, ast.Constant)}
+        self.assertEqual(keys, {"spec_sections", "spec_path"})
+
+
 class IdleBurnerTests(unittest.TestCase):
     def test_every_worker_settings_file_turns_idle_features_off(self):
         files = sorted(WORKER.glob("settings-*.json"))
@@ -156,6 +170,61 @@ class TelemetryTests(unittest.TestCase):
     def test_turn_cap_alert_at_80_percent(self):
         self.write("t-aa0003", [(1_000, 0, 0, 1)] * 12, "re_review", "opus")  # cap 15 turns -> 12 = 80%
         self.assertIn("turns_80_percent", self.tokens.task_tokens("t-aa0003")["alerts"])
+
+    def test_rows_ordered_by_mtime_and_limit_keeps_newest(self):
+        import os
+        # Ids sort opposite to age: the sort must follow mtime, not the name.
+        for task_id, stamp in (("t-ff0001", 100), ("t-aa0010", 300), ("t-bb0011", 200)):
+            self.write(task_id, [(1, 0, 0, 1)], "build", "sonnet")
+            os.utime(Path(self.temp.name) / task_id / "events.jsonl", (stamp, stamp))
+        ids = [r["task_id"] for r in self.tokens.tokens_since(None, None)["tasks"]]
+        self.assertEqual(ids, ["t-ff0001", "t-bb0011", "t-aa0010"])
+        newest = [r["task_id"] for r in self.tokens.tokens_since(None, 2)["tasks"]]
+        self.assertEqual(newest, ["t-bb0011", "t-aa0010"])
+        since = [r["task_id"] for r in self.tokens.tokens_since(150, None)["tasks"]]
+        self.assertEqual(since, ["t-bb0011", "t-aa0010"])
+
+    def test_summary_defaults_to_last_24h(self):
+        import os
+        self.write("t-aa0020", [(1, 0, 0, 1)], "build", "sonnet")
+        self.write("t-aa0021", [(1, 0, 0, 1)], "build", "sonnet")
+        os.utime(Path(self.temp.name) / "t-aa0021" / "events.jsonl", (1, 1))
+        self.assertEqual(self.tokens.tokens_summary(None)["by_kind"]["build"]["tasks"], 1)
+
+    def test_kind_and_model_come_from_one_query(self):
+        import contextlib
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.row_factory = sqlite3.Row
+        db.execute("CREATE TABLE tasks (id TEXT, kind TEXT, model TEXT)")
+        db.executemany("INSERT INTO tasks VALUES (?,?,?)",
+                       [("t-aa0030", "review", "opus"), ("t-aa0031", "build", None)])
+        statements = []
+        db.set_trace_callback(statements.append)
+
+        @contextlib.contextmanager
+        def fake_db():
+            yield db
+        store = types.ModuleType("store")
+        store.db = fake_db
+        previous = sys.modules.get("store")
+        sys.modules["store"] = store
+        self.addCleanup(lambda: sys.modules.__setitem__("store", previous) if previous else sys.modules.pop("store"))
+        fresh = load("tokens_h3_real", CTRL / "tokens.py")  # unpatched _kind/_model
+        for task_id in ("t-aa0030", "t-aa0031", "t-aa0032"):
+            self.write(task_id, [(1, 0, 0, 1)], "x", "x")
+        rows = {r["task_id"]: r for r in fresh.tokens_since(None, None)["tasks"]}
+        selects = [s for s in statements if s.startswith("SELECT")]
+        self.assertEqual(len(selects), 1, selects)
+        self.assertEqual((rows["t-aa0030"]["kind"], rows["t-aa0030"]["model"]), ("review", "opus"))
+        self.assertEqual(rows["t-aa0031"]["kind"], "build")
+        self.assertNotIn("model", rows["t-aa0031"])
+        self.assertNotIn("kind", rows["t-aa0032"])
+
+    def test_row_reports_input_and_output(self):
+        self.write("t-aa0040", [(7, 0, 0, 3), (9, 0, 0, 4)], "build", "sonnet")
+        row = self.tokens.task_tokens("t-aa0040")
+        self.assertEqual((row["input"], row["output"]), (16, 7))
 
     def test_spend_summary_per_kind_and_model(self):
         self.write("t-aa0004", [(100, 200, 300, 10)], "build", "sonnet")

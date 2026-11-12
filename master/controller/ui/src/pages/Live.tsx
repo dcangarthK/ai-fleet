@@ -141,7 +141,7 @@ function Bar({ label, value, share, cap }: { label: string; value: number; share
 }
 
 function TokensSection() {
-  const rows = useQuery({ queryKey: ["tokens"], queryFn: () => get<{ tasks: TokenRow[] }>("/api/tokens"),
+  const rows = useQuery({ queryKey: ["tokens"], queryFn: () => get<{ tasks: TokenRow[] }>(`/api/tokens?since=${Math.floor(Date.now() / 1000) - 86400}&limit=30`),
     refetchInterval: 30000 });
   const spend = useQuery({ queryKey: ["tokens-spend"], queryFn: () => get<TokenSpend>("/api/tokens/summary"),
     refetchInterval: 60000 });
@@ -150,7 +150,7 @@ function TokensSection() {
     <Section title="Token use" aside={`${tasks.length} tasks`}>
       {tasks.length === 0 && <p className="empty panel">No task token logs yet.</p>}
       <div className="live-rows">
-        {tasks.slice(-30).reverse().map((t) => (
+        {tasks.slice().reverse().map((t) => (
           <div key={t.task_id} className="live-row">
             <Link to={`/tasks?task=${t.task_id}`}><b>{t.kind ?? "task"} {t.task_id}</b></Link>
             <Bar label="turns" value={t.turns} share={t.usage.turns} cap={t.caps.turns} />

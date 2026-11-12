@@ -849,6 +849,68 @@ def started_epoch(job):
         return None
 
 
+SCAN_CAP = 20000
+SCAN_INTERVAL = 60
+CPU_GROWTH_MIN = 0.5
+JOBS_REPORT_MAX = 32
+SCAN_SKIP = frozenset((".git", "node_modules", ".venv", "dist"))
+
+
+def parse_cpu_time(text):
+    """Seconds from a `ps -o time` value: MM:SS, MM:SS.ss, HH:MM:SS or D-HH:MM:SS. None if it is not one."""
+    if not isinstance(text, str):
+        return None
+    match = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)", text.strip())
+    if not match:
+        return None
+    days, hours, minutes, seconds = match.groups()
+    return int(days or 0) * 86400 + int(hours or 0) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def group_cpu_seconds(pgid, run=None):
+    """CPU seconds used so far by every process in a process group (`ps`, no psutil), or None if unknown."""
+    if not isinstance(pgid, int) or pgid <= 1 or os.name == "nt":
+        return None
+    out = (run or run_capped)(["ps", "-A", "-o", "pgid=,time="])
+    if out is None:
+        return None
+    total = 0.0
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == str(pgid):
+            seconds = parse_cpu_time(parts[1])
+            if seconds is not None:
+                total += seconds
+    return total
+
+
+def scan_worktree(root, cap):
+    """(newest mtime, entries seen, capped) for a worktree. Never follows symlinks, so it cannot leave the root;
+    skips .git, node_modules, .venv and dist; stops after `cap` entries."""
+    newest, count = 0.0, 0
+    stack = [str(root)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    count += 1
+                    if count > cap:
+                        return newest, count, True
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in SCAN_SKIP:
+                                stack.append(entry.path)
+                            continue
+                        newest = max(newest, entry.stat(follow_symlinks=False).st_mtime)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return newest, count, False
+
+
 def agent_search_path():
     home = Path.home()
     dirs = [
@@ -1126,6 +1188,11 @@ class JobManager:
         self.lock = threading.RLock()
         self.jobs = {}
         self.gate_threads = set()
+        self.clock = time.time  # runner clock for idle_s; tests replace these three
+        self.cpu_probe = group_cpu_seconds
+        self.scan_cap = SCAN_CAP
+        self.activity = {}
+        self.activity_lock = threading.Lock()
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.worktrees_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1325,9 +1392,12 @@ class JobManager:
             if (job.get("state") == "running" and booted and started and started < booted
                     and not (self._job_dir(job) / job.get("exit_file", "exit_code")).exists()):
                 job.update({"state": "lost", "ended_at": now()})
-                self._parse_events(job)
+                self._parse_events_safe(job)
                 self._save(job)
-            self.refresh(job)
+            try:
+                self.refresh(job)
+            except Exception as exc:  # one bad job must never stop the runner from starting
+                self.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
             if job["state"] == "running":
                 self._start_monitor(job)
             elif (job["state"] == "exited" and job.get("exit_code") == 0
@@ -1344,8 +1414,83 @@ class JobManager:
                     self._start_gate(job)
 
     def public(self, job):
-        self.refresh(job)
-        return {key: job.get(key) for key in PUBLIC_JOB_KEYS}
+        try:
+            self.refresh(job)
+        except Exception as exc:  # a dead or odd job answers with its record, never a 500 (t-253101a7)
+            self.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+        record = {key: job.get(key) for key in PUBLIC_JOB_KEYS}
+        record["alive"] = self._alive(job)
+        return record
+
+    def _alive(self, job):
+        """The agent process or the gate is still running (docs/SPEC-stall-reroute.md 12.2)."""
+        agent = job.get("state") == "running" and process_alive(job.get("pid"))
+        return bool(agent or job.get("id") in self.gate_threads)
+
+    def _gate_alive(self, job):
+        return job.get("id") in self.gate_threads
+
+    def _activity_of(self, job, now_s):
+        """Update and return the runtime activity record of a job. Idle time runs on the runner's clock."""
+        job_id = job["id"]
+        with self.activity_lock:
+            act = self.activity.get(job_id)
+            if act is None:
+                act = self.activity[job_id] = {"last": now_s, "src": "output", "out": None, "cpu": None,
+                                               "cpu_s": None, "scan_at": None, "mtime": None}
+            def touch(src):
+                act["last"], act["src"] = now_s, src
+            try:
+                size = (self._job_dir(job) / "events.jsonl").stat().st_size
+            except OSError:
+                size = None
+            if act["out"] is not None and size is not None and size > act["out"]:
+                touch("output")
+            if size is not None:
+                act["out"] = size
+            if self._gate_alive(job):
+                touch("output")  # gate output counts as activity (12.2)
+            cpu = None
+            if job.get("state") == "running":
+                try:
+                    cpu = self.cpu_probe(job.get("pid"))
+                except Exception:
+                    cpu = None
+            if cpu is not None:
+                if act["cpu"] is not None and cpu - act["cpu"] >= CPU_GROWTH_MIN:
+                    touch("cpu")
+                act["cpu"] = act["cpu_s"] = cpu
+            if act["scan_at"] is None or now_s - act["scan_at"] >= SCAN_INTERVAL:
+                act["scan_at"] = now_s
+                try:
+                    newest, _count, capped = scan_worktree(job.get("cwd") or "", self.scan_cap)
+                except Exception:
+                    newest, capped = None, True
+                if not capped and newest is not None:
+                    if act["mtime"] is not None and newest > act["mtime"]:
+                        touch("files")
+                    act["mtime"] = max(newest, act["mtime"] or 0)
+            return dict(act)
+
+    def jobs_report(self):
+        """The "jobs" list of /health: running jobs and jobs whose gate still runs, at most JOBS_REPORT_MAX."""
+        now_s = self.clock()
+        entries = []
+        for job in sorted(list(self.jobs.values()), key=lambda item: item.get("started_at") or ""):
+            gate = self._gate_alive(job)
+            if job.get("state") != "running" and not gate:
+                continue
+            act = self._activity_of(job, now_s)
+            cpu = act["cpu_s"]
+            entries.append({"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
+                            "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
+                            "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)})
+            if len(entries) >= JOBS_REPORT_MAX:
+                break
+        with self.activity_lock:  # forget finished jobs
+            for job_id in [key for key in self.activity if key not in {e["id"] for e in entries}]:
+                del self.activity[job_id]
+        return entries
 
     def get(self, job_id):
         with self.lock:
@@ -1612,6 +1757,8 @@ class JobManager:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):  # stderr lines such as `null` or `7` are valid JSON but not events
+                continue
             event_type = event.get("type")
             if event_type in ("system", "result") and event.get("session_id"):
                 session_id = event["session_id"]
@@ -1620,14 +1767,15 @@ class JobManager:
             if event_type == "result":
                 if isinstance(event.get("result"), str):
                     result = event["result"]
-                current = event.get("permission_denials") or []
+                found = event.get("permission_denials")
                 denials = [
                     {"tool": item.get("tool_name") or item.get("tool") or "",
                      "input": item.get("tool_input", item.get("input"))}
-                    for item in current if isinstance(item, dict)
+                    for item in (found if isinstance(found, list) else []) if isinstance(item, dict)
                 ]
             if event_type in ("item.completed", "item.updated"):
-                item = event.get("item") or {}
+                item = event.get("item")
+                item = item if isinstance(item, dict) else {}
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                     result = item["text"]
             if event_type == "ollama.result":
@@ -1635,6 +1783,17 @@ class JobManager:
         job["session_id"] = session_id or job.get("session_id")
         job["result"] = trim(result or job.get("result", ""))
         job["denials"] = denials
+
+    def _parse_events_safe(self, job):
+        """Parsing events must never keep a job from being settled (t-253101a7)."""
+        try:
+            self._parse_events(job)
+        except Exception as exc:
+            self.audit("parse_failed", "%s: %s" % (job.get("id"), error_line(exc)))
+
+    def _deadline(self, job):
+        minutes = min(self.max_job_minutes, job.get("timeout_minutes", self.max_job_minutes))
+        return (started_epoch(job) or time.time()) + minutes * 60
 
     def refresh(self, job):
         with self.lock:
@@ -1650,13 +1809,16 @@ class JobManager:
                 if not process_alive(job.get("pid")):
                     job["state"] = "lost"
                     job["ended_at"] = now()
-                    self._parse_events(job)
+                    self._parse_events_safe(job)
                     self._save(job)
+                elif time.time() >= self._deadline(job):
+                    # The monitor thread normally does this; if it is gone (crashed, or not restarted), a poll must.
+                    self._timeout(job)
                 return
             job["state"] = "exited"
             job["exit_code"] = exit_code
             job["ended_at"] = now()
-            self._parse_events(job)
+            self._parse_events_safe(job)
             self._save(job)
             if exit_code == 0 and job.get("gate"):
                 self._start_gate(job)
@@ -1666,15 +1828,22 @@ class JobManager:
 
     def _start_monitor(self, job, process=None):
         def monitor():
-            timeout_minutes = min(self.max_job_minutes, job.get("timeout_minutes", self.max_job_minutes))
-            deadline = (started_epoch(job) or time.time()) + timeout_minutes * 60
+            deadline = self._deadline(job)
+
             def alive():
                 return process.poll() is None if process is not None else process_alive(job.get("pid"))
 
-            while job.get("state") == "running" and alive():
-                if time.time() >= deadline:
-                    self._timeout(job)
-                    return
+            # An exception must never end this thread: it is what enforces max_job_minutes (t-253101a7).
+            while job.get("state") == "running":
+                try:
+                    if not alive():
+                        break
+                    if time.time() >= deadline:
+                        self._timeout(job)
+                        if job.get("state") != "running":
+                            return
+                except Exception as exc:
+                    self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
                 time.sleep(0.2)
             if process is not None:
                 try:
@@ -1683,7 +1852,10 @@ class JobManager:
                     pass
             # The wrapper writes its code immediately before exiting; allow that write to land.
             for _ in range(20):
-                self.refresh(job)
+                try:
+                    self.refresh(job)
+                except Exception as exc:
+                    self.audit("monitor_error", "%s: %s" % (job.get("id"), error_line(exc)))
                 if job.get("state") != "running":
                     break
                 time.sleep(0.05)
@@ -1705,7 +1877,7 @@ class JobManager:
                 self._kill_group(job.get("pid"))
             except (OSError, subprocess.SubprocessError):
                 pass
-            self._parse_events(job)
+            self._parse_events_safe(job)
             message = "Job timed out after %s minutes" % job.get("timeout_minutes", self.max_job_minutes)
             job.update({"state": "exited", "exit_code": 124, "ended_at": now(),
                         "result": trim(((job.get("result") or "") + "\n" + message).strip())})
@@ -2129,7 +2301,7 @@ class JobManager:
                 except (OSError, subprocess.SubprocessError):
                     pass
                 job.update({"state": "cancelled", "ended_at": now()})
-                self._parse_events(job)
+                self._parse_events_safe(job)
                 self._save(job)
             return self.public(job)
 
@@ -2875,7 +3047,10 @@ def health_report(manager):
     manager.agents = agents
     running = 0
     for job in list(manager.jobs.values()):  # a snapshot: jobs are added from request threads
-        manager.refresh(job)
+        try:
+            manager.refresh(job)
+        except Exception as exc:  # one odd job must not take /health or the heartbeat down
+            manager.audit("refresh_failed", "%s: %s" % (job.get("id"), error_line(exc)))
         running += job.get("state") == "running"
     power = system_power()
     power["min_battery_pct"] = manager.min_battery_pct
@@ -2883,7 +3058,7 @@ def health_report(manager):
                        and power["battery_pct"] < manager.min_battery_pct)
     report = {"ok": True, "version": VERSION, "digest": RUNNER_DIGEST,
               "power": power, "max_mode": manager.max_mode,
-              "agents": agents, "running": running,
+              "agents": agents, "running": running, "jobs": manager.jobs_report(),
               "gate_profiles": sorted(manager.gate_profiles),
               "allow_raw_gates": manager.allow_raw_gates,
               "allowed_roots": manager.allowed_roots,

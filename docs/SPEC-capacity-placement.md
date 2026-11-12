@@ -1,6 +1,6 @@
 # Spec: capacity-driven placement (Part G)
 
-Status: draft v3 (Claude usage source), v2 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
+Status: draft v4 (usage watcher, leader continuity), v3 (Claude usage source), v2 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
 merged into main, together with the open fixes. Depends on Part E's `rank_slots` and stall handling, and on Part F
 requirements 6 (one limit helper) and 11 (Codex limits from Codex).
 
@@ -61,6 +61,24 @@ tier order and the independence rules that already exist. Fable never builds, fi
    with its reason. Each one counts in the spend report.
 9. **Owner override.** The Budget page can freeze placement per account (`hold`). Nothing moves onto or off a held
    account. `budget_override` stays owner-only.
+10. **Usage watcher and timed queue.** A watcher reads live usage (requirement 1) for every account and model key.
+    - When an account nears its limit (default 90% of the 5h or weekly window), new work is not placed there.
+    - If any account or model has headroom, eligible queued tasks move there (requirement 3), cheapest capable
+      first, within budget rules.
+    - When every eligible model is near or at its limit, tasks are queued with `not_before` = the earliest reset
+      time of an eligible model and a target model, so nothing fails or spins. The plan is shown on Live
+      ("waiting for <model> at <time>").
+    - At the reset the queue drains automatically in priority order.
+11. **Controller continuity (leader).** The orchestration itself survives limits.
+    - The controller keeps a `leader` role: the model session that delegates, reviews results and starts next
+      steps. Its pending plan (next steps per work item) is stored in fleet.db, not only in a chat session.
+    - If the leader's account is limited, or the leader session stops, the controller assigns the leader role to
+      the next account/model with capacity (orchestrator-capable: Opus or Sonnet; never Fable, never local), and
+      starts it with the stored plan and a short state brief.
+    - If no capable model has capacity, the leader resumes at the earliest reset (requirement 10) and continues
+      delegation, builds, reviews, gates and merges from the stored plan.
+    - Every leader change is an event on Live (`leader.assigned {from, to, reason}`). Owner-only actions (approve,
+      unblock, push, budget override) stay with the owner whoever leads.
 
 ## 3a. Safety constraints (from spec review t-fcd07719)
 - **Claude usage source (verified, t-77a287f5).** Stream-json `rate_limit_event` (requirement 1). Only an account with
@@ -105,13 +123,17 @@ tier order and the independence rules that already exist. Fable never builds, fi
 - **Self-heal:**
   - A fake service restarts and verifies once.
   - A second failure within 15 minutes alerts and stops.
+- **Usage watcher:** with every account at 95% (fake usage), a new task queues with `not_before` = earliest reset and
+  starts after it with a fake clock; with one account free, it moves there.
+- **Leader:** the leader account goes limited mid-plan; a new leader starts on another account with the stored plan
+  and continues the next step; with none free, it resumes at the reset. Never Fable.
 - **Gate and watcher:** the gate passes, and the Haiku watcher confirms on Live that moves and restarts show with reasons.
 
 ## 6. Delivery
 | Step | Who |
 |---|---|
 | Spec review | Sonnet, low effort |
-| Build | fleet Sonnet. Order: req 1 (shadow), req 2, req 3 (shadow, then live, with a real move test), req 4, reqs 5–6, req 7, req 9; req 8 events throughout |
+| Build | fleet Sonnet. Order: req 1 (shadow), req 2, req 3 (shadow, then live, with a real move test), req 4, reqs 5–6, req 7, req 9, req 10 (shadow, then live), req 11; req 8 events throughout |
 | Review | Codex `gpt-5.6-terra`, medium effort (placement touches admission, so it is design-sensitive) |
 | Final | Fable, delta green light |
 | Check | Haiku watcher pass, plus a real migration test: queue on a limited account and watch it move |

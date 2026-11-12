@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -13,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 
 router = APIRouter()
+log = logging.getLogger("fleet.tokens")
 
 DEFAULT_CAPS = {
     "build": {"turns": 120, "context": 150_000},
@@ -160,8 +162,8 @@ def _load_meta(ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
                     kind, model = r["kind"], r["model"]
                     meta[r["id"]] = (kind if isinstance(kind, str) and kind else None,
                                      model if isinstance(model, str) and model else None)
-    except Exception:
-        pass
+    except Exception as exc:  # rows still render, without kind/model; say why
+        log.warning("token telemetry: kind/model lookup failed: %r", exc)
     return meta
 
 

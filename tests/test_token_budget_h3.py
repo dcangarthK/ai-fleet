@@ -221,6 +221,23 @@ class TelemetryTests(unittest.TestCase):
         self.assertNotIn("model", rows["t-aa0031"])
         self.assertNotIn("kind", rows["t-aa0032"])
 
+    def test_failed_meta_lookup_is_logged_and_rows_still_render(self):
+        store = types.ModuleType("store")
+
+        def broken():
+            raise RuntimeError("db down")
+        store.db = broken
+        previous = sys.modules.get("store")
+        sys.modules["store"] = store
+        self.addCleanup(lambda: sys.modules.__setitem__("store", previous) if previous else sys.modules.pop("store"))
+        fresh = load("tokens_h3_log", CTRL / "tokens.py")
+        self.write("t-aa0050", [(1, 0, 0, 1)], "x", "x")
+        with self.assertLogs("fleet.tokens", level="WARNING") as logged:
+            rows = fresh.tokens_since(None, None)["tasks"]
+        self.assertIn("db down", logged.output[0])
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("kind", rows[0])
+
     def test_row_reports_input_and_output(self):
         self.write("t-aa0040", [(7, 0, 0, 3), (9, 0, 0, 4)], "build", "sonnet")
         row = self.tokens.task_tokens("t-aa0040")

@@ -1,6 +1,6 @@
 # Spec: capacity-driven placement (Part G)
 
-Status: draft v1, 2026-11-12. The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
+Status: draft v2, 2026-11-12 (Haiku spec review t-fcd07719 folded in). The build starts only after Part E and Part F (`docs/SPEC-dashboard-truth.md`) have
 merged into main, together with the open fixes. Depends on Part E's `rank_slots` and stall handling, and on Part F
 requirements 6 (one limit helper) and 11 (Codex limits from Codex).
 
@@ -58,6 +58,24 @@ tier order and the independence rules that already exist. Fable never builds, fi
 9. **Owner override.** The Budget page can freeze placement per account (`hold`). Nothing moves onto or off a held
    account. `budget_override` stays owner-only.
 
+## 3a. Safety constraints (from spec review t-fcd07719)
+- **Claude usage source is unverified.** Find a real, readable source before building requirement 1 for Claude.
+  Until then Claude usage is `source: "inferred"` only, and inferred data never clears a limit.
+- **Shadow mode first.** Requirements 1–3 first run in shadow mode: they record what they would decide, and act
+  only once the logged decisions match what the orchestrator would have done.
+- **Idempotent with recovery.** A move or re-queue is one compare-and-set on the task row
+  (`state='queued' AND node/profile = old`). This keeps it safe against `recover()` (tasks.py:728-745) and against two
+  ticks running at once. A task can never be dispatched twice.
+- **Lock order.** Moves and self-heal take locks in the existing order, pipeline → work item → task (handoff.py:6).
+- **Reservations.** The in-memory `RESERVED` (budget.py:685) is lost on a restart, so placement re-derives it from
+  running tasks at startup.
+- **Persisted self-heal counters.** Restart counters live in fleet.db, not in memory. Requirement 7 waits out the
+  controller's startup grace (tasks.py:251-254), so a controller restart cannot start a restart loop.
+- **No duplicate fix loop.** The gate bounce (requirement 6) reuses the existing fix rounds in pipeline.py and does
+  not add a second counter.
+- **Hold storage.** `hold` is a column on the budget rules, which only the owner can write, with keys like the
+  existing ones (budget.py:150, :182).
+
 ## 4. Out of scope
 - Buying or switching plans.
 - Cross-machine model pulls (the owner does those).
@@ -88,7 +106,7 @@ tier order and the independence rules that already exist. Fable never builds, fi
 | Step | Who |
 |---|---|
 | Spec review | Sonnet, low effort |
-| Build | fleet Sonnet; requirements 1–2 first, then 3–4, then 5–9 |
+| Build | fleet Sonnet. Order: req 1 (shadow), req 2, req 3 (shadow, then live, with a real move test), req 4, reqs 5–6, req 7, req 9; req 8 events throughout |
 | Review | Codex `gpt-5.6-terra`, medium effort (placement touches admission, so it is design-sensitive) |
 | Final | Fable, delta green light |
 | Check | Haiku watcher pass, plus a real migration test: queue on a limited account and watch it move |

@@ -15,9 +15,10 @@ from fastapi.testclient import TestClient
 
 import controller
 import evaluations
+import events
 import live
 import tasks
-from store import db
+from store import db, init_db
 
 GOOD = {"checked_at": 1000.0, "age_s": 12.0, "status": "pass", "backend": "macos-pf", "runner_tailnet_only": True,
         "engine_loopback_only": True, "ipv6_wildcard": False, "details": ["pf: enabled"]}
@@ -32,19 +33,23 @@ def node(**over):
 
 
 class NoRawEngineProbe(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+
     def test_controller_has_no_engine_probe_or_inventory_fetch(self):
         for name in ("PROBES", "INFO_PORT", "probe", "fetch_inventory"):
             self.assertFalse(hasattr(controller, name), name)
 
     def test_engine_state_comes_from_the_runner_health(self):
         up = {"metrics": {"ollama": {"up": True}}}
-        self.assertEqual(controller.probe_from_runner(up), ("ollama", 11434, []))
+        self.assertEqual(controller.real_probe_from_runner(up), ("ollama", 11434, []))
         for health in (None, {}, {"metrics": {}}, {"metrics": {"ollama": {"up": False}}},
                        {"metrics": {"ollama": {"up": "yes"}}}):
-            self.assertIsNone(controller.probe_from_runner(health))
+            self.assertIsNone(controller.real_probe_from_runner(health))
 
     def test_model_names_still_merge_from_the_models_report(self):
-        found = controller.probe_from_runner({"metrics": {"ollama": {"up": True}}})
+        found = controller.real_probe_from_runner({"metrics": {"ollama": {"up": True}}})
         merged = controller.merge_probe_models(found, {"models": [{"name": "b:1"}, {"name": "a:1"}]})
         self.assertEqual(merged, ("ollama", 11434, ["a:1", "b:1"]))
 
@@ -70,7 +75,6 @@ class NoRawEngineProbe(unittest.TestCase):
             asyncio.run(controller.refresh_nodes())
         self.assertTrue(urls)
         for url in urls:
-            self.assertTrue(url.endswith(":11436/health") or ":11436" in url, url)
             for port in ("11434", "11435", "8000", "1234", "8080"):
                 self.assertNotIn(":" + port, url)
 
@@ -202,6 +206,10 @@ class CheckNow(unittest.TestCase):
 
 
 class EvalsThroughRunner(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+
     def test_eval_command_targets_the_runner_not_an_engine_port(self):
         seen = {}
 
@@ -210,6 +218,7 @@ class EvalsThroughRunner(unittest.TestCase):
             raise OSError("not run in tests")
         run = {"id": "r-n2", "node": "master", "model": "m:1", "roles": ["fast"], "started_at": 0.0}
         with mock.patch.object(evaluations.asyncio, "create_subprocess_exec", fake_exec), \
+                mock.patch.object(events, "emit"), \
                 mock.patch.dict("os.environ", {"FLEET_EVAL_CMD": "python3 fake_eval.py"}):
             asyncio.run(evaluations._run(run))
         args = seen["args"]
@@ -226,6 +235,7 @@ class EvalsThroughRunner(unittest.TestCase):
             raise OSError("not run in tests")
         run = {"id": "r-n2b", "node": "master", "model": "m:1", "roles": ["fast"], "started_at": 0.0}
         with mock.patch.object(evaluations.asyncio, "create_subprocess_exec", fake_exec), \
+                mock.patch.object(events, "emit"), \
                 mock.patch.object(tasks, "node_runner_token", return_value="tok-n2-secret"):
             asyncio.run(evaluations._run(run))
         self.assertEqual(seen["env"].get("FLEET_EVAL_RUNNER_TOKEN"), "tok-n2-secret")

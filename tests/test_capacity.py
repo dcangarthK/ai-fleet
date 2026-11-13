@@ -5,6 +5,7 @@ uv run --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unitt
 import os
 import time
 import unittest
+import unittest.mock
 
 from tests.test_budget import events_of, rules
 from tests.test_limit_handoff import HandoffBase, OPUS, FABLE, FakeRunner
@@ -150,6 +151,13 @@ class MigrationTests(CapacityBase):
     def test_a_stale_move_loses_the_compare_and_set(self):
         self.mode("live")
         a, b, c = self.queued_behind_busy_accounts()
+
+        async def idle_tick(*_args, **_kw):
+            return []  # the app's background poll (every 0.2 s) must not migrate c before this test's own move
+
+        patcher = unittest.mock.patch.object(capacity, "tick", idle_tick)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.free(b if c["account"] != "claude/spare" else a)
         ranked = tasks.get_task(c["id"])
         slot = capacity.choose_move(ranked, usage.now())

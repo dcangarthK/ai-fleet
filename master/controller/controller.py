@@ -4,8 +4,8 @@
 # ///
 """Fleet controller for the master node.
 
-Finds nodes via `tailscale status` (devices tagged tag:llm-node), probes their model servers,
-inventory and agent runner over the tailnet, keeps LiteLLM's role groups (coder/reviewer/fast/...)
+Finds nodes via `tailscale status` (devices tagged tag:llm-node), asks each node's agent runner (over the tailnet,
+port 11436 only) for engine state, inventory and posture, keeps LiteLLM's role groups (coder/reviewer/fast/...)
 in sync with role assignments and node health, and runs agent tasks (tasks.py).
 
 Run:    uv run --script controller.py              (dashboard on http://127.0.0.1:8700)
@@ -62,15 +62,12 @@ MODEL_REF_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63
 KEEP_ALIVE_RE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
 FLEET_PREFIX = "fleet--"
 MASTER_MODEL_HOST = os.environ.get("FLEET_MASTER_MODEL_HOST", "")  # e.g. host.docker.internal
-INFO_PORT = 11435  # onboard script publishes /fleet.json here (hardware, agents, model files)
 RUNNER_SOURCE = Path(__file__).resolve().parents[2] / "nodes" / "runner.py"
 ENROLL_TTL = 30 * 60
 KEEP_WORKTREE_DAYS = int(os.environ.get("FLEET_KEEP_WORKTREE_DAYS", "7"))
 _enroll_failures: dict[str, list[float]] = {}
 
-# (engine, port, path): first that answers wins.
-PROBES = [("ollama", 11434, "/api/tags"), ("openai", 8000, "/v1/models"), ("openai", 1234, "/v1/models"),
-          ("openai", 8080, "/v1/models")]
+OLLAMA_PORT = 11434  # recorded for the node row only: the controller never connects to it (docs/SPEC-networking.md 4)
 
 
 def healthy(row: sqlite3.Row) -> bool:
@@ -107,40 +104,43 @@ def tailnet_nodes() -> list[dict]:
     ]
 
 
-async def probe(client: httpx.AsyncClient, ip: str) -> tuple[str, int, list[str]] | None:
-    # First server with models wins; an empty one only counts if nothing else answers.
-    empty = None
-    for engine, port, path in PROBES:
-        try:
-            r = await client.get(f"http://{ip}:{port}{path}", timeout=3)
-            r.raise_for_status()
-            body = r.json()
-            if engine == "ollama":
-                models = [str(m["name"]) for m in body["models"]]
-            else:
-                models = [str(m["id"]) for m in body["data"]]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
-            continue  # not this engine, or an unexpected response
-        if models:
-            return engine, port, sorted(models)
-        empty = empty or (engine, port, [])
-    return empty
+def probe_from_runner(health: dict | None) -> tuple[str, int, list[str]] | None:
+    """The node's engine as its own runner observed it (cached /health metrics). The controller no longer probes
+    engine ports (11434/8000/1234/8080) or the retired inventory server (11435); the model names come from the
+    runner's /models report through merge_probe_models."""
+    metrics = health.get("metrics") if isinstance(health, dict) else None
+    ollama = metrics.get("ollama") if isinstance(metrics, dict) else None
+    if isinstance(ollama, dict) and ollama.get("up") is True:
+        return "ollama", OLLAMA_PORT, []
+    return None
 
 
-async def fetch_inventory(client: httpx.AsyncClient, ip: str) -> dict | None:
+def merge_health_inventory(c: sqlite3.Connection, node_id: str, health: dict | None) -> None:
+    """Hardware facts the runner reports in /health (replacing the :11435 fleet.json). Existing values stay when the
+    runner has nothing better; a later /models report overrides ram_gb."""
+    reported = ((health or {}).get("inventory") or {}).get("hardware")
+    if not isinstance(reported, dict):
+        return
+    row = c.execute("SELECT inventory FROM nodes WHERE id=?", (node_id,)).fetchone()
     try:
-        r = await client.get(f"http://{ip}:{INFO_PORT}/fleet.json", timeout=3)
-        r.raise_for_status()
-        inv = r.json()
-        return inv if isinstance(inv, dict) else None
-    except (httpx.HTTPError, ValueError):
-        return None
+        inventory = json.loads(row["inventory"]) if row and row["inventory"] else {}
+    except (ValueError, TypeError):
+        inventory = {}
+    if not isinstance(inventory, dict):
+        inventory = {}
+    hardware = inventory.get("hardware") if isinstance(inventory.get("hardware"), dict) else {}
+    for key in ("ram_gb", "cores"):
+        value = reported.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            hardware[key] = value
+    inventory["hardware"] = hardware
+    c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory), node_id))
 
 
 async def refresh_master(client: httpx.AsyncClient) -> None:
     """The master's own runner is a node too (id 'master'), so its Claude/Codex/Ollama can take tasks."""
     health = await tasks.runner_health(client, tasks.LOCAL_RUNNER, tasks.MASTER_ID)
-    found = await probe(client, "127.0.0.1")
+    found = probe_from_runner(health)
     report = await runner_models({"id": tasks.MASTER_ID, "ip": "127.0.0.1"}) if health and health.get("models") else None
     found = merge_probe_models(found, report)
     with db() as c:
@@ -158,6 +158,7 @@ async def refresh_master(client: httpx.AsyncClient) -> None:
                       (found[0], found[1], json.dumps(found[2]), tasks.MASTER_ID))
         else:
             c.execute("UPDATE nodes SET fails=fails+1 WHERE id=?", (tasks.MASTER_ID,))
+        merge_health_inventory(c, tasks.MASTER_ID, health)
         merge_model_inventory(c, tasks.MASTER_ID, report)
 
 
@@ -207,14 +208,10 @@ async def refresh_nodes() -> None:
         return
     online = [n for n in seen if n["online"]]
     async with httpx.AsyncClient(trust_env=False) as client:  # tailnet only: never via a proxy
-        results = await asyncio.gather(*(probe(client, n["ip"]) for n in online))
-        inventories = await asyncio.gather(*(fetch_inventory(client, n["ip"]) for n in online))
         runners = await asyncio.gather(*(tasks.runner_health(client, f"http://{n['ip']}:{tasks.RUNNER_PORT}", n["id"])
                                          for n in online))
     model_reports = await asyncio.gather(*(runner_models(n) if runners[index] and runners[index].get("models") else
                                            asyncio.sleep(0, result=None) for index, n in enumerate(online)))
-    probed = dict(zip([n["id"] for n in online], results))
-    inventory = dict(zip([n["id"] for n in online], inventories))
     runner = dict(zip([n["id"] for n in online], runners))
     model_report = dict(zip([n["id"] for n in online], model_reports))
     with db() as c:
@@ -222,14 +219,13 @@ async def refresh_nodes() -> None:
             c.execute("INSERT OR IGNORE INTO nodes (id) VALUES (?)", (n["id"],))
             c.execute("UPDATE nodes SET name=?, ip=?, os=? WHERE id=?", (n["name"], n["ip"], n["os"], n["id"]))
             _bind_enrollment(c, n["id"], n["name"])
-            if inventory.get(n["id"]):
-                c.execute("UPDATE nodes SET inventory=? WHERE id=?", (json.dumps(inventory[n["id"]]), n["id"]))
             if runner.get(n["id"]):
                 c.execute("UPDATE nodes SET runner=?, runner_fails=0, polled_at=?, runner_age_s=? WHERE id=?",
                           (json.dumps(runner[n["id"]]), time.time(), tasks.health_age(runner[n["id"]]), n["id"]))
             else:
                 c.execute("UPDATE nodes SET runner_fails=runner_fails+1 WHERE id=?", (n["id"],))
-            found = merge_probe_models(probed.get(n["id"]), model_report.get(n["id"]))
+            merge_health_inventory(c, n["id"], runner.get(n["id"]))
+            found = merge_probe_models(probe_from_runner(runner.get(n["id"])), model_report.get(n["id"]))
             if found:
                 engine, port, models = found
                 c.execute("UPDATE nodes SET engine=?, port=?, models=?, fails=0, last_seen=? WHERE id=?",

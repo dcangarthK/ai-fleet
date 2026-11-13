@@ -160,6 +160,49 @@ export interface Machine {
   warnings: ("swap" | "disk" | "load")[];
   offline: string | null;
   heartbeat: "ok" | "lost, polling" | null;
+  /** Read-only firewall posture reported by the node's runner (docs/SPEC-networking.md 5.2). */
+  firewall?: Firewall;
+  /** Where to look: the runner/network/host firewall, the firewall posture, or the local engine. */
+  failures?: FailureDomain[];
+  failure?: FailureDomain | null;
+}
+
+export type FailureDomain = "runner_network" | "firewall" | "engine";
+export type FirewallStatus = "pass" | "warn" | "fail" | "unknown";
+
+export interface Firewall {
+  status: FirewallStatus;
+  backend: string;
+  age_s: number | null;
+  runner_tailnet_only: boolean | null;
+  engine_loopback_only: boolean | null;
+  ipv6_wildcard: boolean | null;
+  details: string[];
+}
+
+const FIREWALL_LABEL: Record<FirewallStatus, { tone: Tone; label: string }> = {
+  pass: { tone: "ok", label: "Firewall: pass" },
+  warn: { tone: "warn", label: "Firewall: warning" },
+  fail: { tone: "bad", label: "Firewall: fail" },
+  unknown: { tone: "quiet", label: "Firewall: unknown" },
+};
+
+/** The per-node firewall badge: status, observation age and the non-secret details. A node that has not reported
+ * posture reads "unknown", never a guess. */
+export function firewallBadge(m: Machine): { tone: Tone; label: string; age: string; details: string[] } {
+  const fw = m.firewall;
+  const base = FIREWALL_LABEL[fw?.status ?? "unknown"];
+  return { ...base, age: fw?.age_s == null ? "not observed" : `observed ${duration(fw.age_s)} ago`, details: fw?.details ?? [] };
+}
+
+const FAILURE_LABEL: Record<FailureDomain, string> = {
+  runner_network: "Runner / network failure: the runner is unreachable (network, host firewall or the runner itself)",
+  firewall: "Firewall failure: the runner answers but its firewall posture failed",
+  engine: "Engine failure: the runner answers but its local engine is down",
+};
+
+export function failureLabels(m: Machine): string[] {
+  return (m.failures ?? []).map((f) => FAILURE_LABEL[f]);
 }
 
 export interface Alert {

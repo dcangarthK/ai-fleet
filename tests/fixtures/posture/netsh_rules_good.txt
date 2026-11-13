@@ -1,0 +1,21 @@
+
+Rule Name:                            AI Fleet runner (master only)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Profiles:                             Domain,Private,Public
+Protocol:                             TCP
+LocalPort:                            11436
+RemotePort:                           Any
+RemoteIP:                             100.64.1.2/32
+Action:                               Allow
+
+Rule Name:                            Core Networking - DNS (UDP-In)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Protocol:                             UDP
+LocalPort:                            Any
+RemoteIP:                             Any
+Action:                               Allow
+Ok.

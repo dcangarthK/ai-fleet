@@ -22,7 +22,7 @@ FAKE_EVAL.write_text('''
 import argparse, json, time
 from pathlib import Path
 p = argparse.ArgumentParser()
-p.add_argument("--models"); p.add_argument("--roles"); p.add_argument("--ollama"); p.add_argument("--out")
+p.add_argument("--models"); p.add_argument("--roles"); p.add_argument("--runner"); p.add_argument("--out")
 a = p.parse_args()
 time.sleep(0.25)
 path = Path(a.out) / "results.json"
@@ -95,6 +95,9 @@ class FakeRunner(BaseHTTPRequestHandler):
     node_ids: list = []
     # Part E (docs/SPEC-stall-reroute.md): what a cancel leaves the job as. None: "cancelled", group_gone true.
     cancel_reply: dict | None = None
+    # Networking N2: what POST /posture/check answers (the runner's read-only posture object).
+    posture: dict = {"status": "pass", "backend": "macos-pf", "age_s": 0.0, "checked_at": 1.0,
+                     "runner_tailnet_only": True, "engine_loopback_only": True, "ipv6_wildcard": False, "details": []}
 
     def log_message(self, *a):
         pass
@@ -152,6 +155,8 @@ class FakeRunner(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         FakeRunner.tokens.append(self.headers.get("X-Runner-Token"))
         FakeRunner.calls.append((self.path, body))
+        if self.path == "/posture/check":
+            return self._send(200, FakeRunner.posture)
         if self.path in ("/models/ensure", "/models/remove"):
             oid = f"op-{len(FakeRunner.ops) + 1}"
             kind = self.path.rsplit("/", 1)[1]
@@ -201,7 +206,8 @@ from store import db  # noqa: E402
 
 # Never probe the real model servers on this machine: a locally installed model (e.g. qwen3:8b) would leak into
 # the master node's inventory and break the install tests. The fake runner's /models report is the only source.
-controller.PROBES = []
+controller.real_probe_from_runner = controller.probe_from_runner  # kept for the N2 unit tests
+controller.probe_from_runner = lambda health: None  # the fake runner's /models report is the only engine source
 
 W = {"X-Fleet": "1"}
 

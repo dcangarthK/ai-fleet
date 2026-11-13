@@ -458,6 +458,34 @@ SWAP_GB, SWAP_SHARE, DISK_GB, LOAD_FACTOR, METRICS_STALE = 4.0, 0.25, 10.0, 2.0,
 METRIC_KEYS = ("mem_total_gb", "mem_used_gb", "swap_used_gb", "disk_free_gb", "load5", "cores")
 
 
+FIREWALL_STALE = 600.0  # a posture observation older than this (by this controller's clock) shows as unknown
+
+
+def firewall_view(runner: dict, seen: float, now: float) -> dict:
+    """The runner's posture with its age on this controller's clock; stale or absent observations read "unknown"."""
+    fw = tasks.clean_firewall(runner.get("firewall"))
+    own = fw["age_s"]
+    age = (now - seen + own) if seen and own is not None else None
+    if age is None or age > FIREWALL_STALE:
+        fw = dict(fw, status="unknown")
+    return dict(fw, age_s=round(age) if age is not None else None)
+
+
+def failure_domains(node: dict, offline, firewall: dict, ollama_up, engines: dict) -> list[str]:
+    """Why a machine is not serving, split so the owner knows where to look: "runner_network" (the runner is
+    unreachable: network, host firewall or the runner itself), "firewall" (reachable but the posture failed) and
+    "engine" (the runner answers but its local engine does not)."""
+    if offline:
+        return ["runner_network"]
+    out = []
+    if firewall["status"] == "fail":
+        out.append("firewall")
+    engine_up = ollama_up is True or any(isinstance(e, dict) and e.get("reachable") is True for e in engines.values())
+    if node.get("engine") and ollama_up is False and not engine_up:
+        out.append("engine")
+    return out
+
+
 def machine_row(node: dict, now: float) -> dict:
     runner = node.get("runner") or {}
     metrics = runner.get("metrics") if isinstance(runner.get("metrics"), dict) else {}
@@ -482,12 +510,17 @@ def machine_row(node: dict, now: float) -> dict:
     heartbeat = None
     if beat:
         heartbeat = "ok" if now - beat <= tasks.HEARTBEAT_TTL else "lost, polling"
+    engines = runner.get("engines") if isinstance(runner.get("engines"), dict) else {}
+    offline = tasks.runner_offline(node, now)
+    firewall = firewall_view(runner, seen, now)
+    failures = failure_domains(node, offline, firewall, ollama.get("up"), engines)
     return {"node": node["id"], "name": node.get("name"), "age_s": round(age) if age is not None else None,
             "unknown": unknown, **values, "ollama_up": ollama.get("up"),
             "loaded": [m for m in ollama.get("loaded") or [] if isinstance(m, str)],
-            "engines": runner.get("engines") if isinstance(runner.get("engines"), dict) else {},
+            "engines": engines, "firewall": firewall, "failures": failures,
+            "failure": failures[0] if failures else None,
             "warm": sorted(tasks.warm_models(node, now)), "warnings": warnings,
-            "offline": tasks.runner_offline(node, now), "heartbeat": heartbeat}
+            "offline": offline, "heartbeat": heartbeat}
 
 
 ALERT_TYPES = ("task.awaiting_approval", "task.blocked", "task.failed", "budget.limit", "budget.rules_invalid",

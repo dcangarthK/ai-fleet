@@ -1,0 +1,6 @@
+COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+ollama    410 dev    3u  IPv4 0x1a2b3c4d5e6f7081      0t0  TCP 127.0.0.1:11434 (LISTEN)
+ollama    410 dev    4u  IPv6 0x1a2b3c4d5e6f7082      0t0  TCP [::1]:11434 (LISTEN)
+python3   522 dev    5u  IPv4 0x1a2b3c4d5e6f7083      0t0  TCP 100.101.102.103:11436 (LISTEN)
+com.docke 633 dev   20u  IPv4 0x1a2b3c4d5e6f7084      0t0  TCP 127.0.0.1:12434 (LISTEN)
+rapportd  701 dev    8u  IPv4 0x1a2b3c4d5e6f7085      0t0  TCP *:49152 (LISTEN)

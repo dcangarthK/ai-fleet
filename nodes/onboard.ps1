@@ -1004,6 +1004,295 @@ class MetricsCollector:
             return dict(self.values, age_s=round(time.monotonic() - self.at, 1))
 
 
+# ---------- firewall posture (docs/SPEC-networking.md 5.2): read-only observation, never a change ----------
+
+RUNNER_PORT = 11436
+ENGINE_PORTS = (11434, 11435, 12434)  # Ollama, the retired inventory server, Docker Model Runner
+POSTURE_SECONDS = 60
+POSTURE_TIMEOUT = 3
+POSTURE_MIN_GAP = 5  # "check now" never re-runs the commands more often than this
+SOCKETFILTER = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+# The only commands the posture collector may run. Every one only reads state; anything else is refused.
+POSTURE_COMMANDS = frozenset({
+    ("lsof", "-nP", "-iTCP", "-sTCP:LISTEN"),
+    ("ss", "-ltn"),
+    ("netstat", "-ano", "-p", "tcp"),
+    ("pfctl", "-s", "info"),
+    (SOCKETFILTER, "--getglobalstate"),
+    ("netsh", "advfirewall", "show", "allprofiles", "state"),
+    ("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in"),
+})
+
+
+def read_only_runner(run):
+    """Wrap a command runner so only POSTURE_COMMANDS can run through it; anything else raises."""
+    def guarded(argv, timeout=POSTURE_TIMEOUT):
+        if tuple(argv) not in POSTURE_COMMANDS:
+            raise PermissionError("not a read-only posture command: %s" % (argv[0] if argv else ""))
+        return run(list(argv), timeout=timeout)
+    return guarded
+
+
+def posture_unknown(detail=None):
+    return {"checked_at": None, "age_s": None, "status": "unknown", "backend": "unknown",
+            "runner_tailnet_only": None, "engine_loopback_only": None, "ipv6_wildcard": None,
+            "details": [detail] if detail else []}
+
+
+_LISTEN_ADDR = re.compile(r"(\*|\[[0-9A-Fa-f:.%a-z]+\]|\d{1,3}(?:\.\d{1,3}){3}):(\d+)(?=\s|$)")
+
+
+def parse_listeners(text):
+    """Listening TCP sockets as [{"addr", "port", "family"}] from lsof, ss or netstat output; None for no output."""
+    if not text:
+        return None
+    out = []
+    for line in text.splitlines():
+        if "LISTEN" not in line:
+            continue
+        found = _LISTEN_ADDR.search(line)
+        if not found:
+            continue
+        addr = found.group(1).strip("[]")
+        family = 6 if ":" in addr or (addr == "*" and "IPv6" in line) else 4
+        out.append({"addr": addr, "port": int(found.group(2)), "family": family})
+    return out
+
+
+def address_kind(addr):
+    """loopback, wildcard, tailnet or other (a LAN or public address) for a bound address."""
+    import ipaddress
+    if addr in ("*", "0.0.0.0", "::"):
+        return "wildcard"
+    try:
+        ip = ipaddress.ip_address(addr.split("%")[0])
+    except ValueError:
+        return "other"
+    if ip.is_loopback:
+        return "loopback"
+    if ip in ipaddress.ip_network("100.64.0.0/10") or ip in ipaddress.ip_network("fd7a:115c:a1e0::/48"):
+        return "tailnet"
+    return "other"
+
+
+def listener_facts(listeners, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS):
+    """{"runner_tailnet_only", "engine_loopback_only", "ipv6_wildcard", "details"}; None means not observable."""
+    if listeners is None:
+        return {"runner_tailnet_only": None, "engine_loopback_only": None, "ipv6_wildcard": None,
+                "details": ["listening sockets not readable"]}
+    details = []
+    runner = [item for item in listeners if item["port"] == runner_port]
+    engines = [item for item in listeners if item["port"] in engine_ports]
+    watched = runner + engines
+    if not runner:
+        runner_ok = None
+        details.append("runner port %d not seen listening" % runner_port)
+    else:
+        bad = [item for item in runner if address_kind(item["addr"]) not in ("tailnet", "loopback")]
+        runner_ok = not bad
+        if bad:
+            details.append("runner port %d bound to %s" % (runner_port, ", ".join(sorted({i["addr"] for i in bad}))))
+    bad_engines = [item for item in engines if address_kind(item["addr"]) != "loopback"]
+    for item in sorted(bad_engines, key=lambda i: i["port"]):
+        details.append("engine port %d bound to %s (not loopback)" % (item["port"], item["addr"]))
+    if not engines:
+        details.append("no engine port listening")
+    wildcard6 = any(item["family"] == 6 and address_kind(item["addr"]) == "wildcard" for item in watched)
+    if wildcard6:
+        details.append("IPv6 wildcard listener on a fleet port")
+    return {"runner_tailnet_only": runner_ok, "engine_loopback_only": not bad_engines,
+            "ipv6_wildcard": wildcard6, "details": details}
+
+
+def parse_pf_info(text):
+    """`pfctl -s info`: "enabled", "disabled" or None."""
+    found = re.search(r"^Status:\s*(Enabled|Disabled)", text or "", re.M | re.I)
+    return found.group(1).lower() if found else None
+
+
+def parse_socketfilter_state(text):
+    """`socketfilterfw --getglobalstate`: "enabled" (State 1 or 2), "disabled" (State 0) or None."""
+    found = re.search(r"\(State\s*=\s*(\d)\)", text or "")
+    if not found:
+        return None
+    return "enabled" if found.group(1) in ("1", "2") else "disabled"
+
+
+def parse_defender_profiles(text):
+    """`netsh advfirewall show allprofiles state`: {"domain": "on", ...}; empty when nothing parses."""
+    out, current = {}, None
+    for line in (text or "").splitlines():
+        head = re.match(r"^\s*(Domain|Private|Public) Profile Settings", line, re.I)
+        if head:
+            current = head.group(1).lower()
+            continue
+        state = re.match(r"^\s*State\s+(ON|OFF)\s*$", line, re.I)
+        if state and current:
+            out[current] = state.group(1).lower()
+    return out
+
+
+def parse_defender_rules(text):
+    """`netsh advfirewall firewall show rule name=all dir=in`: enabled inbound allow TCP rules as
+    [{"name", "ports", "remote"}]. Only these fields are kept."""
+    rules, block = [], {}
+
+    def close():
+        if (block.get("enabled", "").lower() == "yes" and block.get("action", "").lower() == "allow"
+                and block.get("protocol", "").lower() in ("tcp", "any")):
+            rules.append({"name": block.get("rule name", ""),
+                          "ports": [p.strip() for p in block.get("localport", "").split(",") if p.strip()],
+                          "remote": [r.strip() for r in block.get("remoteip", "any").split(",") if r.strip()]})
+    for line in (text or "").splitlines():
+        key, sep, value = line.partition(":")
+        key = key.strip().lower()
+        if key == "rule name" and sep:
+            if block:
+                close()
+            block = {"rule name": value.strip()}
+        elif sep and block and key in ("enabled", "action", "protocol", "localport", "remoteip"):
+            block[key] = value.strip()
+    if block:
+        close()
+    return rules
+
+
+def _ports_admitted(rule_ports, wanted):
+    """Which of the wanted ports a netsh LocalPort list ("Any", "80,443", "11430-11440") admits."""
+    hit = set()
+    for entry in rule_ports:
+        if entry.lower() == "any":
+            return set(wanted)
+        low, _, high = entry.partition("-")
+        try:
+            low_n, high_n = int(low), int(high or low)
+        except ValueError:
+            continue
+        hit |= {port for port in wanted if low_n <= port <= high_n}
+    return hit
+
+
+def defender_posture(profiles_text, rules_text, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS):
+    """(state, findings): state enabled/disabled/unknown; findings [("fail"|"warn", text)]."""
+    profiles = parse_defender_profiles(profiles_text)
+    if not profiles:
+        return "unknown", []
+    state = "enabled" if all(v == "on" for v in profiles.values()) else "disabled"
+    findings = []
+    if state == "disabled":
+        findings.append(("warn", "Defender Firewall off for: " + ", ".join(sorted(k for k, v in profiles.items() if v != "on"))))
+    if rules_text is None:
+        return state, findings + [("warn", "inbound rules not readable")]
+    rules = parse_defender_rules(rules_text)
+    for rule in rules:
+        exposed = _ports_admitted(rule["ports"], engine_ports)
+        if exposed:
+            findings.append(("fail", "inbound allow admits engine port(s) %s (rule: %s)" % (
+                ", ".join(str(p) for p in sorted(exposed)), rule["name"][:60])))
+    runner_rules = [r for r in rules if runner_port in _ports_admitted(r["ports"], (runner_port,))]
+    if not runner_rules:
+        findings.append(("warn", "no inbound allow rule for runner port %d" % runner_port))
+    elif any(any(x.lower() == "any" for x in r["remote"]) for r in runner_rules):
+        findings.append(("warn", "runner port %d allowed from any source" % runner_port))
+    return state, findings
+
+
+def collect_posture(run, platform=None, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS, wall=time.time):
+    """One read-only observation. `run(argv, timeout=)` returns stdout or None (failure, permission denied, missing);
+    it is wrapped so nothing outside POSTURE_COMMANDS can run. Unreadable things stay unknown, never inferred."""
+    platform = platform or sys.platform
+    run = read_only_runner(run)
+    if platform == "darwin":
+        listing = run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"])
+    elif platform.startswith("win"):
+        listing = run(["netstat", "-ano", "-p", "tcp"])
+    else:
+        listing = run(["ss", "-ltn"])
+    facts = listener_facts(parse_listeners(listing), runner_port, engine_ports)
+    details, findings, backend = list(facts["details"]), [], "unknown"
+    if platform == "darwin":
+        pf = parse_pf_info(run(["pfctl", "-s", "info"]))
+        app = parse_socketfilter_state(run([SOCKETFILTER, "--getglobalstate"]))
+        details.append("pf: %s" % (pf or "unreadable"))
+        details.append("application firewall: %s" % (app or "unreadable"))
+        if pf == "enabled":
+            state, backend = "enabled", "macos-pf"
+        elif app == "enabled":
+            state, backend = "enabled", "macos-application-firewall"
+            findings.append(("warn", "application firewall cannot restrict by source address; tailnet ACL is primary"))
+        elif pf == "disabled" and app == "disabled":
+            state, backend = "disabled", "macos-pf"
+            findings.append(("warn", "no host firewall enabled"))
+        else:
+            state = "unknown"
+    elif platform.startswith("win"):
+        state, findings = defender_posture(
+            run(["netsh", "advfirewall", "show", "allprofiles", "state"]),
+            run(["netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in"]),
+            runner_port, engine_ports)
+        backend = "windows-defender" if state != "unknown" else "unknown"
+        if state == "unknown":
+            details.append("Defender Firewall state unreadable")
+    else:
+        state = "unknown"
+        details.append("no firewall collector for this platform")
+    details.extend(text for _, text in findings)
+    if (facts["runner_tailnet_only"] is False or facts["engine_loopback_only"] is False
+            or facts["ipv6_wildcard"] or any(level == "fail" for level, _ in findings)):
+        status = "fail"
+    elif state == "unknown" or facts["runner_tailnet_only"] is None:
+        status = "unknown"
+    elif state == "disabled" or findings:
+        status = "warn"
+    else:
+        status = "pass"
+    return {"checked_at": wall(), "age_s": 0.0, "status": status, "backend": backend,
+            "runner_tailnet_only": facts["runner_tailnet_only"], "engine_loopback_only": facts["engine_loopback_only"],
+            "ipv6_wildcard": facts["ipv6_wildcard"], "details": details[:12]}
+
+
+class PostureCollector:
+    """Collects off the request path every POSTURE_SECONDS; /health serves the cache with its age. `check_now` is the
+    controller's read-only refresh; it runs only the allowlisted read commands."""
+    def __init__(self, run=None, platform=None, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS,
+                 interval=POSTURE_SECONDS, wall=time.time, mono=time.monotonic):
+        self.run = run or run_capped
+        self.platform, self.runner_port, self.engine_ports = platform, runner_port, engine_ports
+        self.interval, self.wall, self.mono = interval, wall, mono
+        self.lock = threading.Lock()
+        self.values, self.at = None, None
+
+    def once(self):
+        try:
+            values = collect_posture(self.run, self.platform, self.runner_port, self.engine_ports, self.wall)
+        except Exception as exc:  # a permission error or odd output must never stop collection
+            values = posture_unknown("collector error: %s" % exc.__class__.__name__)
+            values["checked_at"], values["age_s"] = self.wall(), 0.0
+        with self.lock:
+            self.values, self.at = values, self.mono()
+        return self.snapshot()
+
+    def check_now(self):
+        with self.lock:
+            recent = self.at is not None and self.mono() - self.at < POSTURE_MIN_GAP
+        return self.snapshot() if recent else self.once()
+
+    def run_forever(self):
+        while True:
+            self.once()
+            time.sleep(self.interval)
+
+    def start(self):
+        threading.Thread(target=self.run_forever, name="posture", daemon=True).start()
+        return self
+
+    def snapshot(self):
+        with self.lock:
+            if self.values is None:
+                return posture_unknown("not collected yet")
+            return dict(self.values, age_s=round(self.mono() - self.at, 1))
+
+
 def allowed_controller(url):
     """https anywhere; plain http only to a loopback or tailnet address (12.1)."""
     import ipaddress
@@ -3569,6 +3858,44 @@ def system_power():
     return {"on_battery": None, "battery_pct": None}
 
 
+EVAL_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+EVAL_CHAT_KEYS = {"model", "messages", "stream", "keep_alive", "think", "options", "format", "logprobs"}
+
+
+def ollama_relay(ollama_url, body, urlopen=None):
+    """Controller evals reach the node's loopback Ollama through the runner (docs/SPEC-networking.md 4: raw engine ports
+    are never exposed). Only four fixed paths, no streaming, a validated model and a loopback engine URL."""
+    path = body.get("path")
+    payload = body.get("body")
+    if path not in ("/api/chat", "/api/ps", "/api/generate", "/api/tags"):
+        raise HttpError(400, "engine path not allowed")
+    try:
+        base = loopback_base_url(ollama_url)
+    except ValueError as exc:
+        raise HttpError(502, str(exc))
+    if path in ("/api/ps", "/api/tags"):
+        payload, method = None, "GET"
+    else:
+        method = "POST"
+        if not isinstance(payload, dict) or not isinstance(payload.get("model"), str) or not EVAL_MODEL.fullmatch(payload["model"]):
+            raise HttpError(400, "a valid model is required")
+        if path == "/api/chat":
+            if set(payload) - EVAL_CHAT_KEYS or payload.get("stream") is not False or not isinstance(payload.get("messages"), list):
+                raise HttpError(400, "chat request not allowed")
+        elif set(payload) - {"model", "keep_alive"} or payload.get("keep_alive") != 0:
+            raise HttpError(400, "only an unload (keep_alive 0) is allowed")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    try:
+        with (urlopen or loopback_urlopen)(request, timeout=900) as response:
+            raw = response.read()
+        return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raise HttpError(502, "engine returned HTTP %s" % exc.code)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "FleetRunner/2"
 
@@ -3615,6 +3942,14 @@ class Handler(BaseHTTPRequestHandler):
             return health_report(self.manager)
         if method == "GET" and parts == ["engines"]:
             return self.manager.engine_catalog(refresh=True)
+        if method == "GET" and parts == ["posture"]:
+            return posture_of(self.manager)
+        if method == "POST" and parts == ["posture", "check"]:
+            self._body()
+            collector = getattr(self.manager, "posture", None)
+            return collector.check_now() if collector else posture_unknown("posture collector not running")
+        if method == "POST" and parts == ["engines", "ollama", "request"]:
+            return ollama_relay(self.manager.ollama_url, self._body())
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:
@@ -3848,6 +4183,11 @@ def restart_service(service, manager=None):
     return {"ok": True, "service": service}
 
 
+def posture_of(manager):
+    collector = getattr(manager, "posture", None)
+    return collector.snapshot() if collector else posture_unknown("posture collector not running")
+
+
 def health_report(manager):
     """/health, also the body of a heartbeat. Metrics and Ollama come from the metrics thread's cache when it runs,
     so no slow command or probe sits on this path (docs/SPEC-live-monitor.md 4.1)."""
@@ -3890,6 +4230,9 @@ def health_report(manager):
                                     if callable(getattr(manager, "codex_rate_limits_cached", None)) else None),
               "capacity": (manager.capacity_cached() if callable(getattr(manager, "capacity_cached", None)) else None),
               "engines": engine_health,
+              "firewall": posture_of(manager),
+              "inventory": {"hardware": {"ram_gb": round(metrics["mem_total_gb"]) if metrics and metrics.get("mem_total_gb") else None,
+                                         "cores": os.cpu_count()}},
               # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
               "heartbeat": bool(getattr(manager, "controller_url", None))}
     if metrics is not None:
@@ -4009,6 +4352,7 @@ def main():
     server.runner_token = runner_token(fleet_dir)
     server.manager.metrics = MetricsCollector(server.manager.root, ollama_url).start()
     EngineCollector(server.manager).start()
+    server.manager.posture = PostureCollector(runner_port=address[1]).start()
     Heartbeat(server.manager, server.runner_token, lambda: health_report(server.manager)).start()
 
     def stop(_signum, _frame):

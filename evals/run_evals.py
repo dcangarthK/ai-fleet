@@ -90,7 +90,17 @@ SANDBOX_MODE = "auto"  # set from --sandbox / --unsafe-exec in main()
 
 # ---------- Ollama ----------
 
+RELAY: str | None = None  # a node runner URL: engine calls go through its token-checked /engines/ollama/request
+
+
 def ollama(base: str, path: str, body: dict | None = None, timeout: float = 600) -> dict:
+    if RELAY:  # the engine is loopback-only on the node; only the runner (11436) is reachable (docs/SPEC-networking.md)
+        req = urllib.request.Request(RELAY.rstrip("/") + "/engines/ollama/request",
+                                     data=json.dumps({"path": path, "body": body}).encode(), method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "X-Runner-Token": os.environ.get("FLEET_EVAL_RUNNER_TOKEN", "")})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base.rstrip("/") + path, data=data, headers={"Content-Type": "application/json"},
                                  method="POST" if body is not None else "GET")
@@ -673,6 +683,8 @@ def main() -> int:
     ap.add_argument("--models", default="")
     ap.add_argument("--roles", default="coder,reviewer,fast")
     ap.add_argument("--ollama", default=os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434"))
+    ap.add_argument("--runner", default=None,
+                    help="node runner URL; engine calls are relayed by it (token in FLEET_EVAL_RUNNER_TOKEN)")
     ap.add_argument("--out", default=str(HERE / "results"))
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--sandbox", choices=["auto", "macos", "docker"], default="auto")
@@ -680,6 +692,8 @@ def main() -> int:
     ap.add_argument("--report-only", action="store_true",
                     help="regenerate LEADERBOARD.md and GROUNDING.md from results.json; calls no model")
     args = ap.parse_args()
+    global RELAY
+    RELAY = args.runner
     if not args.report_only and not args.models:
         ap.error("--models is required unless --report-only is given")
     global SANDBOX_MODE

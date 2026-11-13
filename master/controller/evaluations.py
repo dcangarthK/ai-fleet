@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import events
+import tasks
 from store import db
 
 
@@ -231,17 +232,18 @@ def _refresh_catalog(row: dict) -> None:
 
 async def _run(run: dict) -> None:
     command = shlex.split(os.environ["FLEET_EVAL_CMD"]) if os.environ.get("FLEET_EVAL_CMD") else DEFAULT_COMMAND
-    node_ip = "127.0.0.1"
+    # The engine is loopback-only on its node: the eval reaches it through that node's runner (port 11436), with the
+    # runner token passed in the environment, never on the command line.
     with db() as c:
-        node = c.execute("SELECT ip FROM nodes WHERE id=?", (run["node"],)).fetchone()
-        if node and run["node"] != "master":
-            node_ip = node["ip"]
+        found = c.execute("SELECT * FROM nodes WHERE id=?", (run["node"],)).fetchone()
+    node = dict(found) if found else {"id": run["node"], "ip": "127.0.0.1"}
     out = results_path().parent
     args = [*command, "--models", run["model"], "--roles", ",".join(run["roles"]),
-            "--ollama", f"http://{node_ip}:11434", "--out", str(out)]
+            "--runner", tasks.runner_url(node), "--out", str(out)]
     try:
-        process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
-                                                       stderr=asyncio.subprocess.STDOUT)
+        process = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=dict(os.environ, FLEET_EVAL_RUNNER_TOKEN=tasks.node_runner_token(node)))
         output, _ = await process.communicate()
         log = output.decode("utf-8", "replace")[-16_384:]
         result = _matching_result(run["model"], run["started_at"])

@@ -1,0 +1,16 @@
+
+Domain Profile Settings:
+----------------------------------------------------------------------
+State                                 ON
+Firewall Policy                       BlockInbound,AllowOutbound
+
+Private Profile Settings:
+----------------------------------------------------------------------
+State                                 ON
+Firewall Policy                       BlockInbound,AllowOutbound
+
+Public Profile Settings:
+----------------------------------------------------------------------
+State                                 ON
+Firewall Policy                       BlockInbound,AllowOutbound
+Ok.

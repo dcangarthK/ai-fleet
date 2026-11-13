@@ -1,0 +1,19 @@
+
+Rule Name:                            AI Fleet runner
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Protocol:                             TCP
+LocalPort:                            11436
+RemoteIP:                             Any
+Action:                               Allow
+
+Rule Name:                            Disabled old rule
+----------------------------------------------------------------------
+Enabled:                              No
+Direction:                            In
+Protocol:                             TCP
+LocalPort:                            11434
+RemoteIP:                             Any
+Action:                               Allow
+Ok.

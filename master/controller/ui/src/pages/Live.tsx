@@ -2,13 +2,13 @@
 // Read-only: actions stay on the existing pages, which every row links to.
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { get } from "../lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { get, post } from "../lib/api";
 import { LoadError, PageHead, Section } from "../components/bits";
 import { ago, duration } from "../lib/format";
 import { clockTime } from "../lib/budget";
 import {
-  accountTone, alertText, barPercent, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
+  accountTone, alertText, barPercent, failureLabels, fill, firewallBadge, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
   stageTitle, tokenAlertText, workerText, type Live, type Machine, type TokenRow, type TokenSpend,
 } from "../lib/live";
 
@@ -268,8 +268,29 @@ function Meter({ label, used, total, unit }: { label: string; used: number | nul
   );
 }
 
+function FirewallBadge({ m }: { m: Machine }) {
+  const client = useQueryClient();
+  const badge = firewallBadge(m);
+  // Read-only: asks the node's runner to re-read its firewall state; nothing is applied.
+  const check = useMutation({
+    mutationFn: () => post(`/api/nodes/${encodeURIComponent(m.node)}/posture/check`),
+    onSettled: () => client.invalidateQueries(),
+  });
+  return (
+    <span className="row" style={{ gap: 8 }} title={badge.details.join("\n") || undefined}>
+      <span className={`state small tone-${badge.tone}`}>{badge.label}</span>
+      <span className="small quiet">{badge.age}</span>
+      <button className="btn small" disabled={check.isPending || !!m.offline} onClick={() => check.mutate()}>
+        {check.isPending ? "Checking…" : "Check now"}
+      </button>
+      {check.isError && <span className="small tone-bad">check failed</span>}
+    </span>
+  );
+}
+
 function MachineRow({ m }: { m: Machine }) {
   const warnings = machineWarnings(m);
+  const failures = failureLabels(m);
   return (
     <div className="live-row live-machine">
       <Link to={`/nodes/${encodeURIComponent(m.node)}`}><b>{m.name ?? m.node}</b></Link>
@@ -283,6 +304,9 @@ function MachineRow({ m }: { m: Machine }) {
         Ollama {m.ollama_up == null ? "unknown" : m.ollama_up ? "up" : "down"}
         {m.loaded.length > 0 && <> · loaded {m.loaded.map((x) => <span key={x} className="mono">{x}{m.warm.includes(x) ? " (warm)" : ""} </span>)}</>}
       </span>
+      <FirewallBadge m={m} />
+      {failures.map((f) => <span key={f} className="small tone-bad">{f}</span>)}
+      {(m.firewall?.details ?? []).length > 0 && <span className="small quiet">{(m.firewall?.details ?? []).join(" · ")}</span>}
       <span className="row" style={{ gap: 8 }}>
         {warnings.map((w) => <span key={w.label} className={`state small tone-${w.tone}`}>{w.label}</span>)}
         <span className="small quiet">{m.age_s == null ? "" : `data ${m.age_s}s old`}</span>

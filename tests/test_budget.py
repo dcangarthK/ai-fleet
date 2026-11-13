@@ -724,6 +724,30 @@ class BudgetApiTests(unittest.TestCase):
         self.assertEqual(t["state"], "queued")
         self.assertIn("limited until", t["error"])
 
+    def test_a_task_with_no_model_gets_its_kinds_default_never_the_parents(self):
+        for kind, model in (("build", "claude-sonnet-5-5"), ("test", "claude-haiku-5-5"),
+                            ("final_review", "claude-opus-5-5")):
+            t = self.ok(agent="claude", kind=kind, mode="read-only", worktree=False)
+            self.assertEqual(self.sent(t["id"]).get("model"), model, kind)
+            self.settle_all()
+        named = self.ok(agent="claude", kind="build", model="claude-haiku-5-5", mode="read-only", worktree=False)
+        self.assertEqual(self.sent(named["id"]).get("model"), "claude-haiku-5-5")  # an explicit model is kept
+
+    def test_a_lead_is_refused_without_an_allowed_model_and_gets_the_30_turn_cap(self):
+        r = self.post(agent="claude", kind="lead", model="claude-haiku-5-5")
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("lead tasks require", r.text)
+        lead = self.ok(agent="claude", kind="lead", model="claude-sonnet-5-5")
+        self.assertEqual(self.sent(lead["id"]).get("max_turns"), 30)
+
+    def test_continue_job_must_be_the_replaced_task_with_a_worktree(self):
+        first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
+        self.settle_all()
+        r = self.post(agent="claude", kind="build", continue_job=first["id"], worktree=True)  # no replaces
+        self.assertEqual(r.status_code, 400, r.text)
+        r = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"], worktree=False)
+        self.assertEqual(r.status_code, 400, r.text)
+
     def test_tasks_record_the_profile_and_account_label_when_known(self):
         plain = self.ok(agent="codex", kind="build", gate="pytest")
         self.assertEqual((plain["profile"], plain["account_label"]), ("fleet", None))

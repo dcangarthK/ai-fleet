@@ -2426,10 +2426,16 @@ class JobManager:
             if module is None or not template.is_file() or not (WORKER_DIR / "mcp-empty.json").is_file():
                 return []
             settings = json.loads(template.read_text(encoding="utf-8"))
-            # Tool control stays with the runner's own flags (claude_allow, --tools, plan mode): the template's
-            # permissions.allow would widen a policy-narrowed or read-only job.
-            if isinstance(settings.get("permissions"), dict):
-                settings["permissions"].pop("allow", None)
+            # The settings file grants the job's tools itself: `--allowedTools` alone left build and test jobs on any
+            # profile asking for approval on python3 and git. The list is the explicit review list or the kind's lean
+            # list, already narrowed by the policy; a read-only job never gets more than the read tools.
+            allow = self._review_tools(job) if job.get("tools") is not None else self._lean_tools(job)
+            allow = list(allow or [])
+            if job.get("mode") == "read-only":
+                allow = [item for item in allow if str(item).split("(")[0] in ("Read", "Grep", "Glob")]
+            perms = settings.get("permissions") if isinstance(settings.get("permissions"), dict) else {}
+            perms["allow"] = allow
+            settings["permissions"] = perms
             command = shlex.join([sys.executable, str(WORKER_DIR / "quiet_bash.py")])  # quoted, absolute
 
             def fill(value):

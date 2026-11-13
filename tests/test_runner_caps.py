@@ -46,7 +46,9 @@ sys.exit(1)
 '''
 
 
-class Caps(Base):
+class CapsHelpers:
+    """Fake-claude helpers shared by Caps and Continuation (a mixin, so tests are not collected twice)."""
+
     def setUp(self):
         super().setUp()
         self.saved = {k: os.environ.get(k) for k in ("FLEET_TOKEN_CAPS", "FLEET_LEAN_PROFILE")}
@@ -78,6 +80,8 @@ class Caps(Base):
         return {"id": "cap1", "agent": "claude", "prompt": "x", "mode": "auto-edit", "cwd": str(self.code),
                 "kind": "build"} | kw
 
+
+class Caps(CapsHelpers, Base):
     def test_job_at_its_turn_cap_settles_capped_with_a_summary(self):
         self.fake(ENDLESS)
         os.environ["FLEET_TOKEN_CAPS"] = json.dumps({"build": {"turns": 2}})
@@ -118,9 +122,12 @@ class Caps(Base):
         self.wait(job)
         old = before - 86400
         os.utime(self.fleet / "jobs" / "cap4" / "events.jsonl", (old, old))  # an old mtime changes nothing
-        seen = self.m.claude_usage()["fleet"]
+        seen = self.m.claude_usage()[self.job_profile(job)]
         self.assertGreaterEqual(seen["observed_at"], before)
         self.assertAlmostEqual(seen["windows"]["5h"]["used_percent"], 30.0)
+
+    def job_profile(self, job):
+        return job.get("profile") or "fleet"
 
     def test_old_job_without_a_live_stamp_gives_no_usage(self):
         folder = self.m.jobs_dir / "old1"
@@ -197,13 +204,28 @@ class Launch(Base):
             self.assertEqual(settings.parent, self.m._job_dir(job))
             text = settings.read_text()
             self.assertNotIn("{{", text)
-            self.assertNotIn("allow", json.loads(text).get("permissions", {}))  # tool control: runner flags only
+            self.assertEqual(json.loads(text)["permissions"]["allow"], list(runner.lean_module().TOOLS[profile]), kind)
             if profile != "review":
                 hook = json.loads(text)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
                 import shlex
                 self.assertEqual(shlex.split(hook), [sys.executable, str(runner.WORKER_DIR / "quiet_bash.py")])
             mcp = Path(cmd[cmd.index("--mcp-config") + 1])
             self.assertTrue(mcp.is_absolute() and mcp.name == "mcp-empty.json")
+
+    def allow(self, **kw):
+        cmd = self.m._command(self.job(**kw), "p", [], False)
+        return json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"]
+
+    def test_settings_allow_lets_build_and_test_run_python_and_git(self):
+        self.assertEqual(self.allow(kind="build"), ["Read", "Edit", "Write", "Bash", "Grep", "Glob"])
+        self.assertEqual(self.allow(kind="test"), ["Bash"])
+        self.assertEqual(self.allow(kind="review"), ["Read", "Grep", "Glob"])
+
+    def test_settings_allow_follows_policy_and_read_only(self):
+        self.assertEqual(self.allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}}),
+                         ["Read", "Bash"])
+        self.assertEqual(self.allow(kind="build", mode="read-only"), ["Read", "Grep", "Glob"])
+        self.assertEqual(self.allow(kind="re_review", tools=["Read", "Grep"]), ["Read", "Grep"])
 
     def test_flag_off_or_no_kind_keeps_the_old_launch(self):
         os.environ["FLEET_LEAN_PROFILE"] = "off"
@@ -361,7 +383,7 @@ def git(*args, cwd):
                    capture_output=True)
 
 
-class Continuation(Caps):
+class Continuation(CapsHelpers, Base):
     """Part H 3.3: a continuation job reuses the capped job's worktree and branch."""
 
     def setUp(self):

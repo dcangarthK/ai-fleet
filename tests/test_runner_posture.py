@@ -191,10 +191,9 @@ class WindowsPosture(unittest.TestCase):
         self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]))
 
     def test_runner_rule_from_whole_tailnet_subnet_warns(self):
-        rules = ("Rule Name: AI Fleet Runner 11436\n----------\nEnabled: Yes\nDirection: In\nProfiles: Private\n"
-                 "Protocol: TCP\nLocalPort: 11436\nRemoteIP: 100.64.0.0/10\nAction: Allow\n")
-        state, findings = runner.defender_posture("State ON\n", rules)
-        self.assertTrue(any(k == "warn" and "outside the master's tailnet" in t for k, t in findings), findings)
+        out = collect(windows(rules="netsh_rules_runner_tailnet_subnet.txt"), "win32")
+        self.assertEqual(out["status"], "warn")
+        self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]), out["details"])
 
     def test_remote_entry_forms(self):
         for entry in ("100.64.1.2", "100.64.1.2/32", "100.64.1.2/255.255.255.255",

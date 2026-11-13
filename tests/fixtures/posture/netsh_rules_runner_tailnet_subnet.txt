@@ -1,0 +1,9 @@
+
+Rule Name:                            AI Fleet runner (tailnet subnet)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Protocol:                             TCP
+LocalPort:                            11436
+RemoteIP:                             100.64.0.0/10
+Action:                               Allow

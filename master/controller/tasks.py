@@ -860,8 +860,10 @@ async def recover() -> None:
     import handoff  # local import: handoff builds on this module
     await handoff.recover_claims()
     with db() as c:
-        pending = [r[0] for r in c.execute(
-            "SELECT id FROM tasks WHERE state IN ('queued','starting') ORDER BY created_at, rowid")]
+        rows = list(c.execute(
+            "SELECT id, not_before FROM tasks WHERE state IN ('queued','starting') ORDER BY created_at, rowid"))
+    timed = [r["id"] for r in rows if r["not_before"] is not None]
+    pending = [r["id"] for r in rows if r["not_before"] is None]
 
     async def one(task_id: str) -> None:
         async with _locks[task_id]:
@@ -872,6 +874,13 @@ async def recover() -> None:
             if get_task(task_id)["state"] == "starting":
                 await start(get_task(task_id))
 
+    # Timed queues drain by their established creation ordering when a reset makes several tasks eligible. Other
+    # recovery work remains concurrent, so one slow runner cannot delay unrelated starts.
+    for task_id in timed:
+        try:
+            await one(task_id)
+        except Exception:
+            continue
     await asyncio.gather(*(one(i) for i in pending), return_exceptions=True)
 
 

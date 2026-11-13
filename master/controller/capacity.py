@@ -104,7 +104,11 @@ def choose_move(task: dict, now: float, claimed: dict | None = None, nodes: list
         moved = {**task, "account": slot["account"], "profile": slot["profile"], "account_label": slot["label"],
                  "budget_key": slot["key"], "model": slot["model"],
                  "budget_identity": budget.identity(task["agent"], slot["model"])}
-        if budget.start_wait(moved, now) != (None, None):
+        wait, _reason = budget.start_wait(moved, now)
+        # rank_slots reports near-limit accounts as physically free; admission is the authoritative watcher check.
+        if wait == "limit":
+            continue
+        if wait is not None:
             continue
         return slot
     return None
@@ -188,8 +192,9 @@ async def _apply_timed_wait(task: dict, reset: float, target: dict) -> bool:
                  target.get("key"), budget.identity(task["agent"], target.get("model")), reset, reason, time.time(),
                  task["id"], task.get("not_before"))).rowcount == 1
     if changed:
-        emit(task["id"], "task.queued_for_usage", {"title": task.get("title"), "not_before": reset,
-                                                      "model": model, "target": _view({**task, **target}), "reason": reason})
+        emit(task["id"], "task.queued_for_usage",
+             {"title": task.get("title"), "not_before": reset, "model": model,
+              "target": _view({**task, **target}), "reason": reason})
     return changed
 
 

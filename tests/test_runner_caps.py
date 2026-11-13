@@ -204,7 +204,8 @@ class Launch(Base):
             self.assertEqual(settings.parent, self.m._job_dir(job))
             text = settings.read_text()
             self.assertNotIn("{{", text)
-            self.assertEqual(json.loads(text)["permissions"]["allow"], list(runner.lean_module().TOOLS[profile]), kind)
+            granted = flag(cmd, "--allowedTools")
+            self.assertEqual(json.loads(text)["permissions"]["allow"], granted.split(",") if granted else [], kind)
             if profile != "review":
                 hook = json.loads(text)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
                 import shlex
@@ -212,20 +213,36 @@ class Launch(Base):
             mcp = Path(cmd[cmd.index("--mcp-config") + 1])
             self.assertTrue(mcp.is_absolute() and mcp.name == "mcp-empty.json")
 
-    def allow(self, **kw):
+    def settings_allow(self, **kw):
         cmd = self.m._command(self.job(**kw), "p", [], False)
-        return json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"]
+        allow = json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"]
+        granted = flag(cmd, "--allowedTools")
+        self.assertEqual(allow, granted.split(",") if granted else [])  # never wider than --allowedTools
+        return allow
 
-    def test_settings_allow_lets_build_and_test_run_python_and_git(self):
-        self.assertEqual(self.allow(kind="build"), ["Read", "Edit", "Write", "Bash", "Grep", "Glob"])
-        self.assertEqual(self.allow(kind="test"), ["Bash"])
-        self.assertEqual(self.allow(kind="review"), ["Read", "Grep", "Glob"])
+    def test_settings_allow_lets_build_and_test_run_python_and_git_scoped(self):
+        build = self.settings_allow(kind="build")
+        self.assertIn("Bash(python3:*)", build)
+        self.assertIn("Bash(git:*)", build)
+        self.assertNotIn("Bash", build)  # H1: no plain Bash
+        self.assertEqual(self.settings_allow(kind="test"), SCOPED_BASH.split(","))
+        self.assertEqual(self.settings_allow(kind="review"), ["Read", "Grep", "Glob"])
 
-    def test_settings_allow_follows_policy_and_read_only(self):
-        self.assertEqual(self.allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}}),
-                         ["Read", "Bash"])
-        self.assertEqual(self.allow(kind="build", mode="read-only"), ["Read", "Grep", "Glob"])
-        self.assertEqual(self.allow(kind="re_review", tools=["Read", "Grep"]), ["Read", "Grep"])
+    def test_settings_allow_follows_mode(self):
+        self.assertEqual(self.settings_allow(kind="build", mode="supervised"), [])
+        self.assertEqual(self.settings_allow(kind="build", mode="read-only"), ["Read", "Grep", "Glob"])
+
+    def test_policy_scoped_git_does_not_widen_to_plain_bash_or_python(self):
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Bash(git:*)"]}})
+        self.assertEqual(allow, ["Bash(git:*)"])  # H2: not "Bash", not python3
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}})
+        self.assertIn("Bash(python3:*)", allow)  # a policy that lists plain Bash covers the scoped rules
+        self.assertEqual(self.settings_allow(kind="re_review", tools=["Read", "Grep"]), ["Read", "Grep"])
+
+    def test_controller_approved_tools_cap_the_settings_allow(self):
+        cmd = self.m._command(self.job(kind="build"), "p", ["Read"], False)
+        self.assertEqual(json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"], ["Read"])
+        self.assertEqual(flag(cmd, "--allowedTools"), "Read")
 
     def test_flag_off_or_no_kind_keeps_the_old_launch(self):
         os.environ["FLEET_LEAN_PROFILE"] = "off"
@@ -272,6 +289,11 @@ class Launch(Base):
                 os.environ["FLEET_TOKEN_CAPS"] = saved
 
 
+SCOPED_BASH = "Bash(python3:*),Bash(git:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*)," \
+              "Bash(npx vitest:*)"
+SCOPED_BUILD = "Read,Edit,Write," + SCOPED_BASH + ",Grep,Glob"
+
+
 def flag(cmd, name):
     return cmd[cmd.index(name) + 1] if name in cmd else None
 
@@ -290,17 +312,23 @@ class LeanTools(Base):
         for kind in ("build", "fix"):
             cmd = self.cmd(kind)
             self.assertEqual(flag(cmd, "--tools"), "Read,Edit,Write,Bash,Grep,Glob", kind)
-            self.assertEqual(flag(cmd, "--allowedTools"), "Read,Edit,Write,Bash,Grep,Glob", kind)
+            self.assertEqual(flag(cmd, "--allowedTools"), SCOPED_BUILD, kind)  # Bash only as scoped rules
 
     def test_test_kind_gets_bash_so_a_haiku_test_can_run(self):
         cmd = self.cmd("test", model="claude-haiku-5-5")
         self.assertEqual(flag(cmd, "--tools"), "Bash")
-        self.assertEqual(flag(cmd, "--allowedTools"), "Bash")
+        self.assertEqual(flag(cmd, "--allowedTools"), SCOPED_BASH)
 
     def test_policy_still_narrows_the_lean_list(self):
         cmd = self.cmd("build", policy={"tools": {"claude_allow": ["Read", "Grep"]}})
         self.assertEqual(flag(cmd, "--tools"), "Read,Grep")
         self.assertEqual(flag(cmd, "--allowedTools"), "Read,Grep")
+
+    def test_supervised_pre_approves_nothing_in_flags_or_settings(self):
+        cmd = self.cmd("build", mode="supervised")
+        self.assertNotIn("--allowedTools", cmd)
+        self.assertEqual(flag(cmd, "--tools"), "Read,Edit,Write,Bash,Grep,Glob")  # the tools exist, each call asks
+        self.assertEqual(json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"], [])
 
     def test_an_explicit_review_tool_list_is_unchanged(self):
         cmd = self.cmd("re_review", tools=["Read", "Grep", "Glob"])
@@ -371,6 +399,26 @@ class QuietBashRepeat(unittest.TestCase):
             self.run_hook("python3 -m unittest tests/test_a.py ", d)
             out = self.run_hook("python3   -m unittest tests/test_a.py", d)["hookSpecificOutput"]
             self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_flags_prefixes_python_and_argument_order_do_not_hide_a_repeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.run_hook("python3 -m unittest tests/a.py tests/b.py", d)
+            self.run_hook("cd . && python -m unittest -v tests/b.py tests/a.py", d)
+            out = self.run_hook("python3 -m unittest -q tests/a.py   tests/b.py && echo done", d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_calling_the_wrapper_directly_still_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            cmd = "python3 -m unittest tests/a.py"
+            self.run_hook(cmd, d)
+            self.run_hook(cmd, d)
+            wrapped = "python3 %s --wrap /tmp/x.log -- %s" % (self.HOOK, cmd)
+            out = self.run_hook(wrapped, d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_first_direct_wrapper_call_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d))
 
     def test_non_test_commands_are_never_counted(self):
         with tempfile.TemporaryDirectory() as d:

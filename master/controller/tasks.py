@@ -776,10 +776,7 @@ async def start(task: dict) -> None:
     if "task_minutes" in (policy.get("limits") or {}):
         runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
-            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None,
-            # Part H 3.7: a task that names no model runs on its kind's default, never the parent's. Filled here, at
-            # dispatch, so admission and routing see model-less tasks exactly as before.
-            "model": task["model"] or budget.default_model(task["agent"], task.get("kind")),
+            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":
@@ -1328,7 +1325,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         if t.parent_id and t.parent_id != t.replaces or t.link not in (None, "retry"):
             raise HTTPException(400, "replaces sets parent_id and link itself")
         with db() as c:
-            old = c.execute("SELECT state, resolution FROM tasks WHERE id=?", (t.replaces,)).fetchone()
+            old = c.execute("SELECT state, resolution, node_id, agent, profile FROM tasks WHERE id=?",
+                            (t.replaces,)).fetchone()
         if not old:
             raise HTTPException(400, f"unknown task {t.replaces} to replace")
         if old["state"] in RUNNING:
@@ -1336,6 +1334,26 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         if old["resolution"]:
             raise HTTPException(409, f"{t.replaces} is already resolved")
         t.parent_id, t.link = t.replaces, "retry"
+        if t.continue_job:
+            # The worktree and branch live on the old task's node, under its account: run there or not at all.
+            if t.agent != old["agent"]:
+                raise HTTPException(400, f"a continuation runs the same agent as {t.replaces} ({old['agent']})")
+            if t.node and t.node != old["node_id"]:
+                raise HTTPException(400, f"a continuation runs on node {old['node_id']}, where {t.replaces} left its worktree")
+            if t.profile and t.profile != (old["profile"] or "fleet"):
+                raise HTTPException(400, f"a continuation runs on profile {old['profile'] or 'fleet'}")
+            t.node = old["node_id"]
+            if (old["profile"] or "fleet") != "fleet" and not t.profile:
+                t.profile = old["profile"]
+            with db() as c:
+                row = c.execute("SELECT runner FROM nodes WHERE id=?", (t.node,)).fetchone()
+            try:
+                runner_info = json.loads(row["runner"] or "null") if row else None
+            except (TypeError, ValueError):
+                runner_info = None
+            if not budget_support({"runner": runner_info or {}}):
+                raise HTTPException(400, f"node {t.node}'s runner can't continue a worktree (it needs a newer runner); "
+                                         "update it first")
     if t.link is not None and t.link not in LINKS:
         raise HTTPException(400, f"link must be one of {list(LINKS)}")
     if t.link and t.link != "check" and not t.parent_id:
@@ -1353,7 +1371,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             raise HTTPException(400, "profile is for Claude and Codex tasks")
         if not PROFILE_RE.fullmatch(t.profile):
             raise HTTPException(400, "profile must be a runner profile id")
-        if t.profile != "fleet" and not t.model:
+        if t.profile != "fleet" and not t.model and not (t.kind and budget.default_model(t.agent, t.kind)):
             # A named profile has its own config dir: the runner's reported default (the fleet profile's) may not be
             # what it runs, so budget identity, kinds, limits and independence need the model named (Codex review).
             raise HTTPException(400, f"name a model for a task pinned to profile {t.profile}")
@@ -1372,6 +1390,11 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
     if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
         raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
+    if not t.model and t.kind and (fallback := budget.default_model(t.agent, kind)):
+        # Part H 3.7: a task that names a kind but no model runs on the kind's default, never the parent's or the
+        # node's. Set before admission, so budget, independence and the task row all see the model that really runs.
+        # (A task with no kind keeps its old routing: its inferred "draft" kind is not a request for Haiku.)
+        t.model = fallback
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):

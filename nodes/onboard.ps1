@@ -2644,7 +2644,7 @@ class JobManager:
                 raise HttpError(500, "could not start agent")
             return self.public(job)
 
-    def _lean_args(self, job):
+    def _lean_args(self, job, granted=()):
         """Part H 3.1: launch args of the lean worker profile (settings rendered into the job dir with the absolute
         quiet_bash path, an empty MCP config, no user settings/skills). [] when off, kindless, or the worker files
         are missing from this install (the old launch)."""
@@ -2657,15 +2657,10 @@ class JobManager:
             if module is None or not template.is_file() or not (WORKER_DIR / "mcp-empty.json").is_file():
                 return []
             settings = json.loads(template.read_text(encoding="utf-8"))
-            # The settings file grants the job's tools itself: `--allowedTools` alone left build and test jobs on any
-            # profile asking for approval on python3 and git. The list is the explicit review list or the kind's lean
-            # list, already narrowed by the policy; a read-only job never gets more than the read tools.
-            allow = self._review_tools(job) if job.get("tools") is not None else self._lean_tools(job)
-            allow = list(allow or [])
-            if job.get("mode") == "read-only":
-                allow = [item for item in allow if str(item).split("(")[0] in ("Read", "Grep", "Glob")]
+            # The settings file grants exactly what --allowedTools grants (`granted`), no more: build and test jobs
+            # on any profile can then run python3 and git without approval, and a supervised job pre-approves nothing.
             perms = settings.get("permissions") if isinstance(settings.get("permissions"), dict) else {}
-            perms["allow"] = allow
+            perms["allow"] = list(granted or [])
             settings["permissions"] = perms
             command = shlex.join([sys.executable, str(WORKER_DIR / "quiet_bash.py")])  # quoted, absolute
 
@@ -2685,6 +2680,27 @@ class JobManager:
         except Exception as exc:
             self.audit("lean_failed", "%s: %s" % (job.get("id"), error_line(exc)))
             return []
+
+    @staticmethod
+    def _policy_permits(item, permitted):
+        """An entry stays if the policy lists it exactly, or lists its bare tool name (plain "Bash" covers a scoped
+        Bash(git:*)). A scoped policy entry never widens a scoped or bare lean entry the policy did not list."""
+        return item in permitted or str(item).split("(")[0] in permitted
+
+    @staticmethod
+    def _lean_grant(tools, mode):
+        """What a lean job's tool list pre-approves, by mode (Part H 3.1). supervised: nothing, every call needs
+        approval. read-only: the read tools. auto-edit/full: the list with Bash scoped to the rules in
+        profile.BASH_RULES (python3, git, uv run, the gate's runners), not every shell command."""
+        if mode == "supervised":
+            return []
+        if mode == "read-only":
+            return [item for item in tools if item in ("Read", "Grep", "Glob")]
+        rules = list(getattr(lean_module(), "BASH_RULES", ()) or ["Bash"])
+        out = []
+        for item in tools:
+            out.extend(rules if item == "Bash" else [item])
+        return out
 
     @staticmethod
     def _lean_tools(job):
@@ -2726,10 +2742,11 @@ class JobManager:
             else:
                 requested = [str(item) for item in (allowed_tools or [])]
                 if not requested and lean_tools:
-                    requested = list(lean_tools)  # Part H 3.7: a Haiku test task gets Bash from the lean list
+                    requested = self._lean_grant(lean_tools, mode)  # Part H 3.7: a Haiku test task can run Bash
                 if "claude_allow" in policy_tools:
-                    permitted = policy_tools["claude_allow"]
-                    requested = ([item for item in requested if item in permitted] if requested else list(permitted))
+                    permitted = [str(item) for item in policy_tools["claude_allow"]]
+                    requested = ([item for item in requested if self._policy_permits(item, permitted)]
+                                 if requested else list(permitted))
             if requested:
                 cmd += ["--allowedTools", ",".join(requested)]
             if review_tools is not None and self._has_flag("claude", "--tools"):
@@ -2748,7 +2765,7 @@ class JobManager:
                 cmd += ["--disallowedTools", ",".join(denied)]
             if job.get("model"):
                 cmd += ["--model", job["model"]]
-            cmd += self._lean_args(job)
+            cmd += self._lean_args(job, requested)
             return cmd  # prompt arrives on stdin
         if agent == "codex":
             sandbox = "read-only" if mode in ("read-only", "supervised") else "workspace-write"

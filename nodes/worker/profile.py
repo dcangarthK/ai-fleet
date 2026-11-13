@@ -22,6 +22,13 @@ TOOLS = {
     "test": ["Bash"],
 }
 
+# What a build/fix/test job's plain Bash is pre-approved as (auto-edit and full only; supervised pre-approves
+# nothing): the interpreters and runners the gate uses, not every shell command.
+BASH_RULES = [
+    "Bash(python3:*)", "Bash(git:*)", "Bash(uv run:*)", "Bash(scripts/gate.sh:*)", "Bash(./scripts/gate.sh:*)",
+    "Bash(npx vitest:*)",
+]
+
 # Placeholder in settings-*.json hook commands; the runner substitutes the absolute path of quiet_bash.py.
 QUIET_BASH_PLACEHOLDER = "{{QUIET_BASH}}"
 

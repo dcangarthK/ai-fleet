@@ -92,11 +92,44 @@ def job_dir():
     return _private_dir
 
 
+def test_key(cmd):
+    """What makes two test commands "the same" (Part H 3.6): the test-runner segments only, so a `cd x &&` prefix
+    or other commands around them don't matter; `python` is `python3`; flags (-v, -q ...) are dropped; file
+    arguments are sorted. Falls back to the whitespace-normalised command when no segment parses."""
+    keys = []
+    for seg in split_segments(cmd or ""):
+        if not TEST_RE.match(seg):
+            continue
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        while toks and re.match(r"^\w+=", toks[0]):
+            toks.pop(0)
+        if toks and toks[0] == "npx":
+            toks.pop(0)
+        if toks and toks[0] == "python":
+            toks[0] = "python3"
+        if toks and toks[0].startswith("./"):
+            toks[0] = toks[0][2:]
+        head, args, i = toks[:1], [], 1
+        while i < len(toks):
+            tok = toks[i]
+            if tok == "-m" and i + 1 < len(toks):
+                head += [tok, toks[i + 1]]
+                i += 1
+            elif not tok.startswith("-"):
+                args.append(tok)
+            i += 1
+        keys.append(" ".join(head + sorted(args)))
+    return " && ".join(sorted(keys)) if keys else " ".join((cmd or "").split())
+
+
 def repeat_count(cmd):
     """How many times this exact test command has been asked for in this job, this one included (Part H 3.6).
     Counted in test-runs.json in the job dir; whitespace differences don't make a new command. A counter that
     can't be read or written counts as a first run: it must never block work by mistake."""
-    key = " ".join((cmd or "").split())
+    key = test_key(cmd)
     path = os.path.join(job_dir(), "test-runs.json")
     try:
         with open(path, encoding="utf-8") as f:
@@ -193,6 +226,13 @@ def run_head(log, cmd):
     return p.returncode
 
 
+def deny_repeat():
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": "the gate will run this (this exact test command already ran %d times; "
+                                    "the runner runs the gate once after you finish)" % MAX_TEST_RUNS}}
+
+
 def hook_output(payload):
     """The hook's JSON reply, or None to leave the command unchanged."""
     if payload.get("tool_name") != "Bash":
@@ -200,6 +240,14 @@ def hook_output(payload):
     ti = payload.get("tool_input") or {}
     cmd = ti.get("command") or ""
     if "quiet_bash.py" in cmd and ("--wrap" in cmd or "--head" in cmd):
+        # The model called the wrapper itself. The hook doesn't rewrite it, but the test command inside still counts.
+        try:
+            toks = shlex.split(cmd)
+            inner = " ".join(toks[toks.index("--") + 1:]) if "--" in toks else ""
+        except ValueError:
+            inner = ""
+        if is_test_command(inner) and repeat_count(inner) > MAX_TEST_RUNS:
+            return deny_repeat()
         return None
     new = dict(ti)
     gk = git_kind(cmd)
@@ -209,10 +257,7 @@ def hook_output(payload):
         new["command"] = rewrite_command(cmd, new_log_path(), "--head")
     elif is_test_command(cmd):
         if repeat_count(cmd) > MAX_TEST_RUNS:
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                "permissionDecisionReason": "the gate will run this (this exact test command already ran %d times; "
-                                            "the runner runs the gate once after you finish)" % MAX_TEST_RUNS}}
+            return deny_repeat()
         new["command"] = rewrite_command(cmd, new_log_path())
     else:
         return None

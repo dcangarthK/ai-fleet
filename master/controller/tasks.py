@@ -860,8 +860,6 @@ async def recover() -> None:
     import handoff  # local import: handoff builds on this module
     await handoff.recover_claims()
     with db() as c:
-        # The schema has no separate priority column; creation order is the queue priority used by start_wait.
-        # Keep recovery in that order so timed queues drain deterministically at a reset.
         pending = [r[0] for r in c.execute(
             "SELECT id FROM tasks WHERE state IN ('queued','starting') ORDER BY created_at, rowid")]
 
@@ -874,12 +872,7 @@ async def recover() -> None:
             if get_task(task_id)["state"] == "starting":
                 await start(get_task(task_id))
 
-    for task_id in pending:
-        try:
-            await one(task_id)
-        except Exception:
-            # A runner can be unavailable during recovery; it remains queued for the next poll.
-            continue
+    await asyncio.gather(*(one(i) for i in pending), return_exceptions=True)
 
 
 # ---------- polling runners ----------

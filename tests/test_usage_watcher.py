@@ -29,10 +29,17 @@ class UsageWatcherTests(CapacityBase):
         queued = tasks.get_task(task["id"])
         self.assertEqual(queued["state"], "queued")
         self.assertEqual(queued["not_before"], resets["claude/spare"])
+        self.assertEqual(queued["account"], "claude/spare")
         self.assertIn("waiting for", queued["error"])
         shown = next(row for row in live.queue(usage.now()) if row["task_id"] == task["id"])
         self.assertEqual(shown["until"], resets["claude/spare"])
         self.assertIn("waiting for", shown["reason"])
+
+        with patch.object(capacity.budget, "usage_records", return_value=near):
+            self.c.portal.call(capacity.tick)
+        before_reset = tasks.get_task(task["id"])
+        self.assertEqual((before_reset["state"], before_reset["account"], before_reset["not_before"]),
+                         ("queued", "claude/spare", resets["claude/spare"]))
 
         usage.clock = lambda: resets["claude/spare"] + 1
         clear = self.records({"claude/owner-max": 10, "claude/spare": 10}, resets)
@@ -54,6 +61,22 @@ class UsageWatcherTests(CapacityBase):
         moved = tasks.get_task(task["id"])
         self.assertEqual((moved["state"], moved["profile"]), ("working", "spare"))
         self.assertIsNone(moved["not_before"])
+
+    def test_multiple_near_windows_wait_for_the_last_reset_on_the_target_account(self):
+        self.mode("live")
+        now = time.time()
+        records = {
+            "claude/owner-max": {"agent": "claude", "windows": {
+                "5h": {"used_percent": 95, "resets_at": now + 300, "observed_at": now, "source": "test"},
+                "weekly": {"used_percent": 95, "resets_at": now + 2000, "observed_at": now, "source": "test"}}},
+            "claude/spare": {"agent": "claude", "windows": {
+                "5h": {"used_percent": 95, "resets_at": now + 100, "observed_at": now, "source": "test"},
+                "weekly": {"used_percent": 95, "resets_at": now + 900, "observed_at": now, "source": "test"}}},
+        }
+        with patch.object(capacity.budget, "usage_records", return_value=records):
+            task = self.build()
+        queued = tasks.get_task(task["id"])
+        self.assertEqual((queued["account"], queued["not_before"]), ("claude/spare", now + 900))
 
 
 if __name__ == "__main__":

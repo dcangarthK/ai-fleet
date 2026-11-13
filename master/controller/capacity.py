@@ -120,7 +120,7 @@ def _waiting(now: float) -> list[dict]:
     return [tasks.get_task(i) for i in ids]
 
 
-def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, str] | None:
+def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, dict] | None:
     """The earliest fresh reset among this queued task's eligible, free placement targets.
 
     This is deliberately the req-3 ranking surface: its eligibility rules include capability, rule 0 and review
@@ -131,7 +131,7 @@ def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, str] |
     held = pins(task)
     current_tier = budget.entry_for(rules, task.get("budget_key"), task["agent"]).get("tier")
     candidates = [handoff.slot_identity(task), *handoff.rank_slots(kind, (), {"id": task["id"]}, now=now, nodes=nodes)]
-    resets: list[tuple[float, str]] = []
+    resets: list[tuple[float, dict]] = []
     seen = set()
     for slot in candidates:
         marker = (slot.get("account"), slot.get("key"), slot.get("model"))
@@ -156,11 +156,12 @@ def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, str] |
             return None  # an eligible target has headroom or only waits for a slot
         reset = budget.near_limit_until(rules, slot.get("account"), task["agent"], now)
         if reset:
-            resets.append((reset, model or budget.label(key)))
+            resets.append((reset, {**slot, "key": key, "model": model}))
     return min(resets, default=None)
 
 
-async def _apply_timed_wait(task: dict, reset: float, model: str) -> bool:
+async def _apply_timed_wait(task: dict, reset: float, target: dict) -> bool:
+    model = target.get("model") or budget.label(target.get("key"))
     reason = f"waiting for {model} at {budget.clock(reset)}"
     if not usage.is_live():
         if _once(("timed_wait", task["id"], reset, model)):
@@ -173,12 +174,16 @@ async def _apply_timed_wait(task: dict, reset: float, model: str) -> bool:
             return False
         with db() as c:
             changed = c.execute(
-                "UPDATE tasks SET not_before=?, budget_wait='limit', error=?, updated_at=? WHERE id=? "
+                "UPDATE tasks SET node_id=?, profile=?, account=?, account_label=?, model=?, budget_key=?, "
+                "budget_identity=?, not_before=?, budget_wait='limit', error=?, updated_at=? WHERE id=? "
                 "AND state='queued' AND COALESCE(runs,0)=0 AND COALESCE(not_before,-1)=COALESCE(?,-1)",
-                (reset, reason, time.time(), task["id"], task.get("not_before"))).rowcount == 1
+                (target.get("node", task["node_id"]), target.get("profile", task.get("profile")),
+                 target.get("account"), target.get("label", task.get("account_label")), target.get("model"),
+                 target.get("key"), budget.identity(task["agent"], target.get("model")), reset, reason, time.time(),
+                 task["id"], task.get("not_before"))).rowcount == 1
     if changed:
         emit(task["id"], "task.queued_for_usage", {"title": task.get("title"), "not_before": reset,
-                                                      "model": model, "reason": reason})
+                                                      "model": model, "target": _view({**task, **target}), "reason": reason})
     return changed
 
 

@@ -752,7 +752,9 @@ class MasterTailscaleTag(OnboardHarness):
         cmd = "tailscale up --advertise-tags=tag:master --auth-key=tskey-x"
         result, calls = self.tag(has_set=False, up_ok=False, suggest="\t" + cmd)
         self.assertIn("RC=1", result.stdout)
-        self.assertNotIn("tskey-x", result.stdout)
+        self.assertNotIn("Tailscale suggests this command", result.stdout)
+        # The flag shows only in Tailscale's raw refusal text, never in a suggested command.
+        self.assertEqual(1, result.stdout.count("tskey-x"), result.stdout)
 
     def test_reset_only_with_the_opt_in_flag(self):
         result, calls = self.tag("--reset-tailscale", has_set=False, up_ok=False)

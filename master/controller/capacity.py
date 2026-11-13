@@ -200,6 +200,11 @@ async def migrate_tick(now: float | None = None) -> list[str]:
     moved_ids = []
     nodes = tasks.node_rows()
     for task in _waiting(now):
+        # The task may already be assigned to the account that regained headroom.  There is no placement move in
+        # that case, but the watcher hold must be removed before try_start can admit it.
+        if task.get("not_before") and usage.is_live() and budget.start_wait(task, now) == (None, None):
+            await _release_timed_wait(task)
+            continue
         slot = choose_move(task, now, claimed, nodes)
         if slot is None:
             plan = timed_wait(task, now, nodes)
@@ -218,6 +223,25 @@ async def migrate_tick(now: float | None = None) -> list[str]:
         if await _apply_move(task["id"], slot, reason, task):
             moved_ids.append(task["id"])
     return moved_ids
+
+
+async def _release_timed_wait(ranked: dict) -> bool:
+    """Clear a req-10 hold when its assigned account has fresh headroom, then use normal start admission."""
+    async with tasks._locks[ranked["id"]]:
+        task = tasks.get_task(ranked["id"])
+        if task["state"] != "queued" or (task.get("runs") or 0) != 0:
+            return False
+        with db() as c:
+            released = c.execute(
+                "UPDATE tasks SET not_before=NULL, budget_wait=NULL, error=NULL, updated_at=? WHERE id=? "
+                "AND state='queued' AND COALESCE(runs,0)=0 AND COALESCE(not_before,-1)=COALESCE(?,-1)",
+                (time.time(), task["id"], ranked.get("not_before"))).rowcount == 1
+        if not released:
+            return False
+        emit(task["id"], "task.usage_headroom", {"title": task.get("title"), "account": budget.task_account(task),
+                                                    "reason": "fresh usage has headroom"})
+        await tasks.try_start(tasks.get_task(task["id"]))
+        return True
 
 
 async def _apply_move(task_id: str, slot: dict, reason: str, ranked: dict) -> bool:

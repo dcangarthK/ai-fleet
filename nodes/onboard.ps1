@@ -3725,25 +3725,52 @@ def owner_global_gitconfig():
     return None
 
 
+def sanitized_owner_config(owner):
+    """The owner's global config as text with everything that can undo no-push removed: `insteadOf` and
+    `pushInsteadOf` lines (a longer prefix beats our empty catch-all in git's longest-match rule, and an earlier
+    equal one wins the tie, so they can't just be overridden) and nested include sections. Everything else (name,
+    email, aliases, core settings) is kept. Read as text, no git call at launch. None if unreadable."""
+    try:
+        lines = Path(owner).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    out, skipping = [], False
+    for line in lines:
+        header = re.match(r"\s*\[\s*([A-Za-z0-9.-]+)", line)
+        if header:
+            skipping = header.group(1).lower() in ("include", "includeif")
+        if skipping or re.match(r"\s*(push)?insteadof\s*=", line, re.I):
+            continue
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
 def ensure_no_push_config():
     """The fleet-owned git config every worker uses (GIT_CONFIG_GLOBAL). Order matters, later lines win: a fallback
-    identity, then an [include] of the owner's own global config (name, email, aliases keep working), then the
+    identity, then an [include] of a sanitized copy of the owner's global config (name, email, aliases keep working; see
+    sanitized_owner_config for what is removed), then the
     fleet's credential reset and a catch-all `pushInsteadOf` with an EMPTY prefix (matches every URL, verified
     against git 2.47 for ssh, https, git+ssh, user@host:path, host:path and relative paths) rewriting pushes to a
     scheme git can't speak."""
     lines = ["[user]", "\tname = fleet worker", "\temail = fleet-worker@localhost"]
     owner = owner_global_gitconfig()
+    owner_copy = None
     if owner:
-        lines += ["[include]", "\tpath = " + owner.replace("\\", "/")]
+        owner_copy = sanitized_owner_config(owner)
+        if owner_copy is not None:
+            lines += ["[include]", "\tpath = " + str(no_push_config_path().with_name("worker.owner.gitconfig")).replace("\\", "/")]
     lines += ["[credential]", "\thelper =", '[url "fleet-no-push://"]', "\tpushInsteadOf ="]
     text = "\n".join(lines) + "\n"
     path = no_push_config_path()
     try:
-        if not path.exists() or path.read_text(encoding="utf-8") != text:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
+        for target, body in ((path.with_name("worker.owner.gitconfig"), owner_copy), (path, text)):
+            if body is None:
+                continue
+            if not target.exists() or target.read_text(encoding="utf-8") != body:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_suffix(".tmp")
+                tmp.write_text(body, encoding="utf-8")
+                os.replace(tmp, target)
     except OSError:
         return None
     return path

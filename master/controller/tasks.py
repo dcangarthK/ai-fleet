@@ -768,6 +768,15 @@ def budget_support(node: dict) -> bool:
     return bool((node.get("runner") or {}).get("budget"))
 
 
+def _default_model_of(task: dict) -> str | None:
+    """The kind default recorded at admission (placement.default_model). A row from before that key existed
+    (key absent, not None) falls back to the kind's default."""
+    placement = task.get("placement") or {}
+    if "default_model" in placement:
+        return placement["default_model"]
+    return budget.default_model(task["agent"], task.get("kind"))
+
+
 async def start(task: dict) -> None:
     """Start (or adopt) the runner job. Caller holds the task lock and has moved it to 'starting'."""
     node = node_of(task)
@@ -778,7 +787,7 @@ async def start(task: dict) -> None:
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
             "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None,
             # Part H 3.7: the kind's default for a task that named a kind but no model (admitted on it).
-            "model": task["model"] or (task.get("placement") or {}).get("default_model"),
+            "model": task["model"] or _default_model_of(task),
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":

@@ -239,6 +239,35 @@ class Launch(Base):
         self.assertIn("Bash(python3:*)", allow)  # a policy that lists plain Bash covers the scoped rules
         self.assertEqual(self.settings_allow(kind="re_review", tools=["Read", "Grep"]), ["Read", "Grep"])
 
+    def test_policy_allow_is_a_ceiling_never_a_grant_in_supervised(self):
+        policy = {"tools": {"claude_allow": ["Read", "Bash"]}}
+        self.assertEqual(self.settings_allow(kind="build", mode="supervised", policy=policy), [])  # N1
+        cmd = self.m._command(self.job(kind="build", mode="supervised", policy=policy), "p", [], False)
+        self.assertNotIn("--allowedTools", cmd)
+
+    def test_policy_plain_bash_is_scoped_for_a_worker_in_auto_edit(self):
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}})
+        self.assertNotIn("Bash", allow)  # N1
+        allow = self.m._command(self.job(agent="claude", mode="auto-edit", policy={"tools": {"claude_allow": ["Bash"]}}),
+                                "p", [], False)  # no kind: the old launch, policy list only
+        self.assertEqual(flag(allow, "--allowedTools"), "Bash(python3:*),Bash(git:*),Bash(uv run:*),"
+                         "Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*)")
+
+    def test_mode_filter_applies_to_explicit_tool_lists(self):
+        self.assertEqual(self.settings_allow(kind="re_review", mode="read-only", tools=["Read", "Bash", "Edit"]),
+                         ["Read"])  # N2
+        self.assertEqual(self.settings_allow(kind="re_review", mode="supervised", tools=["Read", "Grep"]), [])
+        cmd = self.m._command(self.job(mode="read-only"), "p", ["Edit", "Grep"], False)
+        self.assertEqual(flag(cmd, "--allowedTools"), "Grep")
+
+    def test_workers_may_not_push_or_change_remotes_except_in_full(self):
+        for mode in ("auto-edit", "supervised", "read-only"):
+            denied = flag(self.m._command(self.job(kind="build", mode=mode), "p", [], False), "--disallowedTools")
+            for rule in ("Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"):
+                self.assertIn(rule, denied.split(","), mode)  # N4
+        self.assertIsNone(flag(self.m._command(self.job(kind="build", mode="full"), "p", [], False),
+                               "--disallowedTools"))
+
     def test_controller_approved_tools_cap_the_settings_allow(self):
         cmd = self.m._command(self.job(kind="build"), "p", ["Read"], False)
         self.assertEqual(json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"], ["Read"])

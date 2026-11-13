@@ -2745,8 +2745,19 @@ class JobManager:
                     requested = self._lean_grant(lean_tools, mode)  # Part H 3.7: a Haiku test task can run Bash
                 if "claude_allow" in policy_tools:
                     permitted = [str(item) for item in policy_tools["claude_allow"]]
-                    requested = ([item for item in requested if self._policy_permits(item, permitted)]
-                                 if requested else list(permitted))
+                    if requested:  # the policy is a ceiling on what is granted, not a grant
+                        requested = [item for item in requested if self._policy_permits(item, permitted)]
+                    elif mode in ("auto-edit", "full"):
+                        requested = list(permitted)
+                        if mode == "auto-edit":  # a plain "Bash" in the policy is only the scoped rules for a worker
+                            rules = list(getattr(lean_module(), "BASH_RULES", ()) or ["Bash"])
+                            requested = [r for item in requested for r in (rules if item == "Bash" else [item])]
+            # The mode has the last word on every branch: supervised pre-approves nothing of its own (only what the
+            # owner approved through allowed_tools), read-only never more than the read tools.
+            if mode == "supervised" and (review_tools is not None or not allowed_tools):
+                requested = []
+            elif mode == "read-only":
+                requested = [item for item in requested if str(item).split("(")[0] in ("Read", "Grep", "Glob")]
             if requested:
                 cmd += ["--allowedTools", ",".join(requested)]
             if review_tools is not None and self._has_flag("claude", "--tools"):
@@ -2760,6 +2771,8 @@ class JobManager:
             denied = list(policy_tools.get("claude_deny") or [])
             if (policy.get("network") or {}).get("agents") == "deny":
                 denied += ["WebFetch", "WebSearch"]
+            if mode != "full":
+                denied += ["Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"]  # a worker never publishes
             denied = list(dict.fromkeys(denied))
             if denied:
                 cmd += ["--disallowedTools", ",".join(denied)]

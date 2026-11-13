@@ -792,6 +792,15 @@ class BudgetApiTests(unittest.TestCase):
             with db() as c:
                 c.execute("UPDATE nodes SET runner=? WHERE id=?", (saved, row["node_id"]))
 
+    def test_start_falls_back_to_the_kind_default_only_when_the_placement_key_is_absent(self):
+        legacy = {"agent": "claude", "kind": "review", "placement": {"pinned": False}}
+        self.assertEqual(tasks._default_model_of(legacy), "claude-sonnet-5-5")  # N3: a row from before the key
+        self.assertIsNone(tasks._default_model_of(legacy | {"placement": {"default_model": None}}))
+        self.assertEqual(tasks._default_model_of(legacy | {"placement": {"default_model": "claude-haiku-5-5"}}),
+                         "claude-haiku-5-5")
+        t = self.ok(agent="claude", kind="draft")
+        self.assertIn("default_model", t["placement"])  # a new kind-without-model task always stores the key
+
     def test_a_continuation_prompt_over_4_kb_is_refused(self):
         first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
         self.settle_all()

@@ -994,19 +994,54 @@ def _clip(text: str, limit: int) -> str:
     return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
 
 
-async def auto_continue(task_id: str) -> str | None:
+CONTINUE_BACKOFF_BASE, CONTINUE_BACKOFF_MAX = 30, 600  # seconds between retries of a failed continuation
+CONTINUE_SWEEP_AGE = 86400  # the sweep only picks up capped tasks settled within a day (never old history)
+_CONTINUE_RETRY: dict[str, dict] = {}  # task id -> tries, next_at, reason; in memory: a restart retries at once
+
+
+def continuation_depth(task: dict) -> int:
+    """How many automatic continuations this lineage already has: the task and its ancestors that were started with
+    continue_job (walks parent_id)."""
+    depth, seen = 0, set()
+    while task and task["id"] not in seen and (task.get("launch_extra") or {}).get("continue_job"):
+        seen.add(task["id"])
+        depth += 1
+        try:
+            task = get_task(task["parent_id"]) if task.get("parent_id") else None
+        except HTTPException:
+            break
+    return depth
+
+
+async def auto_continue(task_id: str, now: float | None = None) -> str | None:
     """Part H 3.3 (docs/SPEC-token-budget.md req 3): a capped build/fix with a branch and worktree re-queues as a
     continuation (replaces=<capped id>, same branch/worktree/agent/node/profile). Admission may defer it: it then
-    waits queued. Once per capped task: a resolved task is never continued again. Returns the new task id."""
+    waits queued. Once per capped task: a resolved task is never continued again. A failure is retried with a
+    backoff (by the sweep); past limits.max_continuations in one lineage it escalates to the owner instead.
+    Returns the new task id."""
+    now = time.time() if now is None else now
     task = get_task(task_id)
     if (task["state"] != "capped" or task.get("kind") not in ("build", "fix") or not task.get("worktree")
             or not task.get("branch") or task.get("resolution")):
+        return None
+    retry = _CONTINUE_RETRY.get(task_id)
+    if retry and now < retry["next_at"]:
+        return None
+    limit = int((budget.current_rules().get("limits") or {}).get("max_continuations", 3))
+    depth = continuation_depth(task)
+    if depth >= limit:
+        reason = f"capped {depth + 1} times in a row (limit {limit} continuations); needs the owner"
+        if task.get("error") != reason:
+            update(task_id, error=reason)
+            emit(task_id, "task.continuation_limit", {"title": task["title"], "depth": depth, "limit": limit})
+            emit(task_id, "task.escalated", {"title": task["title"], "node": task.get("node_id"), "reason": reason})
         return None
     summary = _clip((task.get("result") or "").strip(), 1800)
     prompt = (f"Continue the work of capped task {task_id} on branch {task['branch']} (same worktree). Read "
               f"`git log` for what is committed, finish the remaining work, and commit.\n\n"
               f"Original task (clipped):\n{_clip(task['prompt'], 1500)}\n\n"
               f"Handoff summary of the capped session:\n{summary or '(none was written)'}\n")
+    placed = task.get("placement") or {}  # the task's own layers: a continuation is never looser than its source
     try:
         created = await create_task(TaskIn(
             agent=task["agent"], model=task.get("model"), engine=task.get("engine"), mode=task["mode"],
@@ -1014,11 +1049,39 @@ async def auto_continue(task_id: str) -> str | None:
             profile=task["profile"] if (task.get("profile") or "fleet") != "fleet" else None,
             prompt=_clip(prompt, CONTINUATION_PROMPT_MAX), title=f"continue: {task['title']}"[:80],
             replaces=task_id, continue_job=task_id, kind=task.get("kind"), role=task.get("role"),
-            stage=task.get("stage")), pipeline=True)
+            stage=task.get("stage"), policy=placed.get("policy"), skills=list(placed.get("skills") or []),
+            escalation=bool(placed.get("escalation")), effort=task.get("effort")), pipeline=True)
     except HTTPException as exc:
-        emit(task_id, "task.continuation_failed", {"title": task["title"], "reason": str(exc.detail)[:300]})
+        reason = str(exc.detail)[:300]
+        tries = (retry or {}).get("tries", 0) + 1
+        if not retry or retry.get("reason") != reason:  # one event per distinct reason, not one per retry
+            emit(task_id, "task.continuation_failed", {"title": task["title"], "reason": reason})
+        _CONTINUE_RETRY[task_id] = {"tries": tries, "reason": reason, "next_at":
+                                    now + min(CONTINUE_BACKOFF_BASE * 2 ** (tries - 1), CONTINUE_BACKOFF_MAX)}
         return None
+    _CONTINUE_RETRY.pop(task_id, None)
     return created.get("id")
+
+
+async def continuation_sweep(now: float | None = None) -> list[str]:
+    """Startup and periodic pass: any recent unresolved capped build/fix whose continuation was never made (a
+    restart, a refused create) gets one. Idempotent (auto_continue refuses resolved tasks)."""
+    now = time.time() if now is None else now
+    with db() as c:
+        ids = [r[0] for r in c.execute(
+            "SELECT id FROM tasks WHERE state='capped' AND resolution IS NULL AND worktree=1 AND kind IN ('build','fix') "
+            "AND COALESCE(ended_at, updated_at) > ?", (now - CONTINUE_SWEEP_AGE,))]
+    made = []
+    for task_id in ids:
+        try:
+            async with _locks[task_id]:
+                new_id = await auto_continue(task_id, now)
+        except Exception as exc:  # one bad task must not stop the sweep
+            print(f"continuation sweep skipped {task_id}: {exc!r}")
+            continue
+        if new_id:
+            made.append(new_id)
+    return made
 
 
 def record_usage(task_id: str, outcome_name: str | None = None) -> None:
@@ -1123,6 +1186,7 @@ async def poll_loop() -> None:
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
             import capacity
             await capacity.tick()
+            await continuation_sweep()  # Part H 3.3: a capped build whose continuation was missed or refused
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens

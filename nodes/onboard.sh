@@ -705,6 +705,8 @@ JOB_REQUEST_KEYS = {
     "profile", "base_branch", "source_job",
     # Part H: the task kind picks the lean worker profile and the turn/context caps
     "kind",
+    # Part H 3.3: a capped job's id; the new job carries on in its worktree and branch
+    "continue_job",
 }
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PROFILE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -736,6 +738,7 @@ DEFAULT_TOKEN_CAPS = {
     "re_review": {"turns": 15},
     "test": {"turns": 20},
 }
+LEAD_KINDS = ("lead", "orchestrator")
 STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"
 _REFUSED_RE = re.compile(r"permission|denied|not allowed|requires approval|refus|haven't granted", re.I)
 
@@ -2838,6 +2841,45 @@ class JobManager:
             raise HttpError(400, "base_branch does not exist")
         return base_branch, source
 
+    def _continue_source(self, body, repo, base_branch):
+        """The capped job a `continue_job` request carries on from, or None. Only a capped job of this runner that
+        still owns its worktree, in the same repo, can be continued."""
+        source_id = body.get("continue_job")
+        if source_id is None:
+            return None
+        if base_branch is not None:
+            raise HttpError(400, "continue_job can't be combined with base_branch")
+        if not isinstance(source_id, str) or not JOB_ID.fullmatch(source_id):
+            raise HttpError(400, "invalid continue_job")
+        source = self.jobs.get(source_id)
+        if source is None:
+            raise HttpError(400, "continue_job: job not found")
+        if source.get("state") != "capped":
+            raise HttpError(400, "continue_job: only a capped job can be continued")
+        if not source.get("worktree") or not source.get("cwd") or not Path(source["cwd"]).is_dir():
+            raise HttpError(400, "continue_job: the job has no worktree left")
+        if source.get("worktree_moved_to"):
+            raise HttpError(409, "continue_job: the worktree was already carried on by " + source["worktree_moved_to"])
+        if (not repo or not body.get("worktree") or not source.get("repo")
+                or self._comparable(source["repo"]) != self._comparable(repo)):
+            raise HttpError(400, "continue_job: needs the same repo and a worktree")
+        if source.get("agent") != body.get("agent"):
+            raise HttpError(400, "continue_job: the agent must stay the same")
+        return source
+
+    def commits(self, job):
+        """The branch's commits since the job's base (git log --oneline), for a continuation prompt."""
+        cwd = job.get("cwd") or ""
+        if not cwd or not Path(cwd).is_dir():
+            raise HttpError(400, "job has no working directory")
+        args = ["git", "-C", cwd, "log", "--oneline", "-n", "20"]
+        if job.get("base"):
+            args.append(job["base"] + "..HEAD")
+        done = subprocess.run(args, capture_output=True, text=True, errors="replace", timeout=30)
+        if done.returncode:
+            raise HttpError(500, trim(done.stderr or "git log failed"))
+        return {"log": done.stdout[-8000:]}
+
     def _make_worktree(self, job_id, repo, policy=None, start=None):
         repo = self.check_path(repo, policy)
         self._check_git_common_dir(repo, policy)
@@ -2904,6 +2946,10 @@ class JobManager:
         max_turns = body.get("max_turns")
         if max_turns is not None and (not isinstance(max_turns, int) or isinstance(max_turns, bool) or max_turns < 1):
             raise HttpError(400, "max_turns must be a positive integer")
+        if body.get("kind") in LEAD_KINDS and not max_turns:
+            # Part H 3.4: a lead is a chain of short capped sessions, never one growing chat.
+            raise HttpError(400, "a %s task needs caps: pass max_turns (a lead is a short session with a turn and "
+                                 "time limit, not a long-lived chat)" % body["kind"])
         if agent == "ollama" and not body.get("model"):
             raise HttpError(400, "model is required for ollama")
         if agent == "ollama" and engine == "dmr":
@@ -2935,6 +2981,7 @@ class JobManager:
         if repo:
             self._check_git_common_dir(repo, policy)
         base_branch, source = self._handoff_source(body, repo)
+        carried = self._continue_source(body, repo, base_branch)
         requested_cwd = None
         if body.get("cwd"):
             # A read-only review may run inside a build job's worktree (it lives under this runner's own
@@ -2956,7 +3003,11 @@ class JobManager:
             use_worktree = bool(repo and body.get("worktree"))
             branch = None
             base = None
-            if use_worktree:
+            if carried is not None:
+                # Part H 3.3: the same worktree and branch, a fresh session.
+                repo, cwd, branch, base = carried["repo"], carried["cwd"], carried["branch"], carried.get("base")
+                use_worktree = True
+            elif use_worktree:
                 try:
                     repo, cwd, branch, base = self._make_worktree(job_id, repo, policy, base_branch)
                 except Exception:
@@ -3001,6 +3052,9 @@ class JobManager:
             }
             job["run_started_at"] = job["started_at"]
             self.jobs[job_id] = job
+            if carried is not None:
+                carried["worktree_moved_to"] = job_id  # cleaning the old job up must leave the worktree
+                self._save(carried)
             self._save(job)
             try:
                 self._launch(job, body["prompt"], job.get("allowed_tools"), bool(body.get("resume_session")))
@@ -3046,6 +3100,24 @@ class JobManager:
             self.audit("lean_failed", "%s: %s" % (job.get("id"), error_line(exc)))
             return []
 
+    @staticmethod
+    def _lean_tools(job):
+        """Part H 3.1/3.7: the tool list of the job's kind (profile.TOOLS), narrowed by the policy's claude_allow;
+        None for a job with no kind, lean launch off, or no worker files."""
+        profile = lean_profile_kind(job.get("kind"))
+        if profile is None or not lean_enabled():
+            return None
+        try:
+            module = lean_module()
+        except Exception:
+            return None
+        tools = list(getattr(module, "TOOLS", {}).get(profile) or []) if module else []
+        permitted = ((job.get("policy") or {}).get("tools") or {}).get("claude_allow")
+        if permitted is not None:
+            names = {str(item).split("(")[0] for item in permitted}
+            tools = [item for item in tools if item in names]
+        return tools or None
+
     def _command(self, job, prompt, allowed_tools, resume):
         agent = job["agent"]
         mode = job["mode"]
@@ -3062,10 +3134,13 @@ class JobManager:
                 cmd += ["--dangerously-skip-permissions"]
             policy_tools = policy.get("tools") or {}
             review_tools = self._review_tools(job) if job.get("tools") is not None else None  # [] means no tools
+            lean_tools = self._lean_tools(job) if review_tools is None else None
             if review_tools is not None:
                 requested = review_tools  # a review gets only its tool list (already narrowed by the policy)
             else:
                 requested = [str(item) for item in (allowed_tools or [])]
+                if not requested and lean_tools:
+                    requested = list(lean_tools)  # Part H 3.7: a Haiku test task gets Bash from the lean list
                 if "claude_allow" in policy_tools:
                     permitted = policy_tools["claude_allow"]
                     requested = ([item for item in requested if item in permitted] if requested else list(permitted))
@@ -3073,6 +3148,8 @@ class JobManager:
                 cmd += ["--allowedTools", ",".join(requested)]
             if review_tools is not None and self._has_flag("claude", "--tools"):
                 cmd += ["--tools", ",".join(review_tools)]
+            elif lean_tools and self._has_flag("claude", "--tools"):
+                cmd += ["--tools", ",".join(lean_tools)]  # the real tool set: its schemas are what fills turn 1
             if job.get("effort") and self._has_flag("claude", "--effort"):
                 cmd += ["--effort", job["effort"]]
             if job.get("max_turns") and self._has_flag("claude", "--max-turns"):
@@ -3252,7 +3329,7 @@ class JobManager:
             self.refresh(job)
             if job["state"] == "running":
                 raise HttpError(409, "job is running")
-            if job.get("worktree") and Path(job["cwd"]).exists():
+            if job.get("worktree") and not job.get("worktree_moved_to") and Path(job["cwd"]).exists():
                 # Keep the agent's uncommitted work on its branch before the worktree goes away.
                 # Any git failure aborts the cleanup: never force-remove a worktree we couldn't save.
                 git = ["git", "-C", job["cwd"], "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost"]
@@ -3946,6 +4023,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise HttpError(400, "invalid offset")
                 return self.manager.log(job, offset)
+            if method == "GET" and len(parts) == 3 and parts[2] == "commits":
+                return self.manager.commits(job)
             if method == "GET" and len(parts) == 3 and parts[2] == "diff":
                 return self.manager.diff(job, since=parse_qs(parsed.query).get("since", [None])[0])
             if method == "POST" and len(parts) == 3 and parts[2] == "tree":

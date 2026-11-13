@@ -797,6 +797,8 @@ async def start(task: dict) -> None:
             body["tools"] = extra["tools"]
         if extra.get("max_turns"):
             body["max_turns"] = extra["max_turns"]
+        if extra.get("continue_job"):
+            body["continue_job"] = extra["continue_job"]  # same worktree and branch as the capped task (Part H 3.3)
         if task.get("review_of"):
             # Review the build's worktree itself (read-only), so any file the reviewer opens is current.
             source = get_task(task["review_of"])
@@ -1109,6 +1111,8 @@ class TaskIn(BaseModel):
     independence: str | None = None
     independence_reason: str | None = None
     pin: bool = False  # Part G: never move this queued task to another account or model
+    # Part H 3.3: carry on in the capped task's worktree and branch (a fresh session). Needs replaces to be the same task.
+    continue_job: str | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -1308,6 +1312,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.link_reason is not None and not t.replaces:
         raise HTTPException(400, "link_reason needs replaces")
+    if t.continue_job and (t.continue_job != t.replaces or not t.worktree):
+        raise HTTPException(400, "continue_job must be the task named in replaces, and needs a worktree")
     if t.replaces:
         # Part F 5: a task made in place of another is a retry of it; the old one settles as handed_off.
         if t.link_reason is not None and t.link_reason not in REPLACE_REASONS:
@@ -1359,6 +1365,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
     if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
         raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
+    explicit_model = bool(t.model)
+    if not t.model and (fallback := budget.default_model(t.agent, kind)):
+        t.model = fallback  # Part H 3.7: the kind's default, never the parent's or the owner's own default model
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
@@ -1446,6 +1455,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                                                    engine=engine or "ollama")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if kind == "lead" and not budget_support(node):
+        # Part H 3.4: the 30-turn and 30-minute caps set below are passed only to a runner that enforces them.
+        raise HTTPException(400, f"lead tasks need caps (30 turns, 30 minutes) and node {node['id']}'s runner can't "
+                                 "enforce them; update its runner first")
     # The profile this task runs under: the chosen account's slot on the chosen node.
     slot = next((s for s in on_account if s["node"] == node["id"]), None)
     if slot is None and agent in budget.PAID_AGENTS:
@@ -1459,7 +1472,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
-              "pin": bool(t.pin), "model_pinned": bool(t.model)}
+              "pin": bool(t.pin), "model_pinned": explicit_model, "model_defaulted": not explicit_model and bool(t.model)}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -1474,6 +1487,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     # Part G req 11 / Part H req 4: a controller lead is always a short-lived session.
     if kind == "lead":
         extra["max_turns"] = 30
+    if t.continue_job:
+        extra["continue_job"] = t.continue_job
     ids: list[str] = []
     for index, part in enumerate(parts):
         task_id = "t-" + secrets.token_hex(4)

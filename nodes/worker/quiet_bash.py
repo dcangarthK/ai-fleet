@@ -23,6 +23,7 @@ import time
 MAX_LINES = 100
 MAX_LINE_CHARS = 500
 HEAD_LINES = 300
+MAX_TEST_RUNS = 2  # the third run of the same test command is refused
 # A test runner at the start of a segment (optionally after VAR=x assignments).
 TEST_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*(python3?\s+-m\s+unittest\b|(?:\./)?scripts/gate\.sh\b|(?:npx\s+)?vitest\b)")
 _private_dir = None
@@ -89,6 +90,28 @@ def job_dir():
     if _private_dir is None:
         _private_dir = tempfile.mkdtemp(prefix="fleet-quiet-bash-")
     return _private_dir
+
+
+def repeat_count(cmd):
+    """How many times this exact test command has been asked for in this job, this one included (Part H 3.6).
+    Counted in test-runs.json in the job dir; whitespace differences don't make a new command. A counter that
+    can't be read or written counts as a first run: it must never block work by mistake."""
+    key = " ".join((cmd or "").split())
+    path = os.path.join(job_dir(), "test-runs.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            counts = json.load(f)
+        if not isinstance(counts, dict):
+            counts = {}
+    except (OSError, ValueError):
+        counts = {}
+    counts[key] = counts.get(key, 0) + 1
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(counts, f)
+    except OSError:
+        return 1
+    return counts[key]
 
 
 def new_log_path():
@@ -185,6 +208,11 @@ def hook_output(payload):
     elif gk == "diff":
         new["command"] = rewrite_command(cmd, new_log_path(), "--head")
     elif is_test_command(cmd):
+        if repeat_count(cmd) > MAX_TEST_RUNS:
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "deny",
+                "permissionDecisionReason": "the gate will run this (this exact test command already ran %d times; "
+                                            "the runner runs the gate once after you finish)" % MAX_TEST_RUNS}}
         new["command"] = rewrite_command(cmd, new_log_path())
     else:
         return None

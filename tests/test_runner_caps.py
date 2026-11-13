@@ -3,7 +3,9 @@ Run: python3 -m unittest -v tests/test_runner_caps.py
 """
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -246,6 +248,162 @@ class Launch(Base):
                 os.environ.pop("FLEET_TOKEN_CAPS", None)
             else:
                 os.environ["FLEET_TOKEN_CAPS"] = saved
+
+
+def flag(cmd, name):
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+class LeanTools(Base):
+    """Part H 3.1/3.7: the per-kind tool list is the real tool set (--tools), not only a pre-approval."""
+
+    def setUp(self):
+        super().setUp()
+        self.m.cli_help = lambda agent: "--tools --effort --max-turns"
+
+    def cmd(self, kind, **kw):
+        return self.m._command(self.job(kind=kind, **kw), "p", [], False)
+
+    def test_build_and_fix_get_only_the_six_tools(self):
+        for kind in ("build", "fix"):
+            cmd = self.cmd(kind)
+            self.assertEqual(flag(cmd, "--tools"), "Read,Edit,Write,Bash,Grep,Glob", kind)
+            self.assertEqual(flag(cmd, "--allowedTools"), "Read,Edit,Write,Bash,Grep,Glob", kind)
+
+    def test_test_kind_gets_bash_so_a_haiku_test_can_run(self):
+        cmd = self.cmd("test", model="claude-haiku-5-5")
+        self.assertEqual(flag(cmd, "--tools"), "Bash")
+        self.assertEqual(flag(cmd, "--allowedTools"), "Bash")
+
+    def test_policy_still_narrows_the_lean_list(self):
+        cmd = self.cmd("build", policy={"tools": {"claude_allow": ["Read", "Grep"]}})
+        self.assertEqual(flag(cmd, "--tools"), "Read,Grep")
+        self.assertEqual(flag(cmd, "--allowedTools"), "Read,Grep")
+
+    def test_an_explicit_review_tool_list_is_unchanged(self):
+        cmd = self.cmd("re_review", tools=["Read", "Grep", "Glob"])
+        self.assertEqual(flag(cmd, "--tools"), "Read,Grep,Glob")
+
+    def test_no_kind_or_lean_off_keeps_the_old_tools(self):
+        self.assertNotIn("--tools", self.m._command(self.job(), "p", [], False))
+        os.environ["FLEET_LEAN_PROFILE"] = "off"
+        try:
+            self.assertNotIn("--tools", self.cmd("build"))
+        finally:
+            os.environ.pop("FLEET_LEAN_PROFILE")
+
+    def test_cli_without_tools_flag_is_not_given_one(self):
+        self.m.cli_help = lambda agent: ""
+        self.assertNotIn("--tools", self.cmd("build"))
+
+
+class LeadCaps(Base):
+    def body(self, **kw):
+        return {"id": "lead1", "agent": "claude", "prompt": "x", "mode": "auto-edit", "cwd": str(self.code),
+                "kind": "lead"} | kw
+
+    def test_lead_without_a_turn_cap_is_refused_with_a_reason(self):
+        for kind in ("lead", "orchestrator"):
+            with self.assertRaises(runner.HttpError) as caught:
+                self.m.create(self.body(kind=kind))
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("max_turns", str(caught.exception.detail))
+
+    def test_lead_with_caps_starts(self):
+        job = self.m.create(self.body(max_turns=30))
+        self.assertEqual(job["id"], "lead1")
+
+
+class QuietBashRepeat(unittest.TestCase):
+    """Part H 3.6: the third identical test command in a job is refused: "the gate will run this"."""
+    HOOK = str(Path(runner.WORKER_DIR) / "quiet_bash.py")
+
+    def run_hook(self, command, job_dir):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        done = subprocess.run([sys.executable, self.HOOK], input=payload, capture_output=True, text=True,
+                              env=dict(os.environ, FLEET_JOB_DIR=job_dir))
+        return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def test_third_identical_run_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            cmd = "python3 -m unittest tests/test_a.py"
+            for _ in range(2):
+                out = self.run_hook(cmd, d)
+                self.assertIn("updatedInput", out["hookSpecificOutput"])
+            out = self.run_hook(cmd, d)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertIn("the gate will run this", out["permissionDecisionReason"])
+
+    def test_different_commands_and_other_jobs_count_apart(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as e:
+            for _ in range(2):
+                self.run_hook("python3 -m unittest tests/test_a.py", d)
+            out = self.run_hook("python3 -m unittest tests/test_b.py", d)
+            self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
+            out = self.run_hook("python3 -m unittest tests/test_a.py", e)
+            self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
+
+    def test_whitespace_does_not_hide_a_repeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.run_hook("python3 -m unittest  tests/test_a.py", d)
+            self.run_hook("python3 -m unittest tests/test_a.py ", d)
+            out = self.run_hook("python3   -m unittest tests/test_a.py", d)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_non_test_commands_are_never_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            for _ in range(4):
+                self.assertIsNone(self.run_hook("ls -la", d))
+
+
+def git(*args, cwd):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+class Continuation(Caps):
+    """Part H 3.3: a continuation job reuses the capped job's worktree and branch."""
+
+    def setUp(self):
+        super().setUp()
+        git("init", "-q", "-b", "main", cwd=self.code)
+        (self.code / "a.txt").write_text("a")
+        git("add", "-A", cwd=self.code)
+        git("commit", "-qm", "init", cwd=self.code)
+
+    def capped(self):
+        self.fake(ENDLESS)
+        os.environ["FLEET_TOKEN_CAPS"] = json.dumps({"build": {"turns": 2}})
+        job = self.start(self.body(id="cap1", cwd=None, repo=str(self.code), worktree=True))
+        self.wait(job)
+        self.assertEqual(job["state"], "capped")
+        return job
+
+    def test_continuation_keeps_worktree_and_branch(self):
+        old = self.capped()
+        new = self.start(self.body(id="cap2", cwd=None, repo=str(self.code), worktree=True, continue_job="cap1"))
+        self.assertEqual((new["cwd"], new["branch"], new["base"]), (old["cwd"], old["branch"], old["base"]))
+        self.assertEqual(old["worktree_moved_to"], "cap2")
+        listing = subprocess.run(["git", "worktree", "list"], cwd=self.code, capture_output=True, text=True)
+        self.assertEqual(len(listing.stdout.strip().splitlines()), 2)  # main + the one shared worktree
+
+    def test_cleaning_up_the_old_job_leaves_the_shared_worktree(self):
+        old = self.capped()
+        self.start(self.body(id="cap2", cwd=None, repo=str(self.code), worktree=True, continue_job="cap1"))
+        self.m.cleanup(old)
+        self.assertTrue(Path(old["cwd"]).exists())
+
+    def test_only_a_capped_job_can_be_continued(self):
+        self.fake(ENDLESS)
+        with self.assertRaises(runner.HttpError):
+            self.m.create(self.body(id="cap3", cwd=None, repo=str(self.code), worktree=True, continue_job="nope"))
+
+    def test_commits_lists_the_branch_log(self):
+        old = self.capped()
+        (Path(old["cwd"]) / "b.txt").write_text("b")
+        git("add", "-A", cwd=old["cwd"])
+        git("commit", "-qm", "add b", cwd=old["cwd"])
+        self.assertIn("add b", self.m.commits(old)["log"])
 
 
 if __name__ == "__main__":

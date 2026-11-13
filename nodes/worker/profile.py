@@ -13,6 +13,15 @@ LAUNCH_ARGS = (
     "--disable-slash-commands",
 )
 
+# The tool set per worker profile (spec Part H 3.1). The runner passes it as `--tools` (what the model sees, which is
+# what fills turn 1) and as `--allowedTools` (what needs no approval), so a Haiku test task can run Bash.
+TOOLS = {
+    "build": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+    "fix": ["Read", "Edit", "Write", "Bash", "Grep", "Glob"],
+    "review": ["Read", "Grep", "Glob"],
+    "test": ["Bash"],
+}
+
 # Placeholder in settings-*.json hook commands; the runner substitutes the absolute path of quiet_bash.py.
 QUIET_BASH_PLACEHOLDER = "{{QUIET_BASH}}"
 

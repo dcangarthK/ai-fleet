@@ -47,6 +47,9 @@ DEFAULT_RULES = {
                "exclude_globs": ["master/controller/ui/dist/**", "**/*.min.js", "**/*.bundle.js",
                                  "**/package-lock.json", "evals/results/*.json"]},
     "limits": {"on_limit": "queue",
+               # Fresh live usage at or above this percentage is held for the next window reset.  This leaves
+               # headroom for work already running instead of starting work that will immediately hit a limit.
+               "near_limit_percent": 90,
                "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
                # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
                # or wait for the reset. By kind; "*" covers the rest.
@@ -193,7 +196,10 @@ def validate_rules(body) -> dict:
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
     _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor", "on_task_stall",
-                      "max_stall_handoffs"}, "limits")
+                      "max_stall_handoffs", "near_limit_percent"}, "limits")
+    if "near_limit_percent" in limits and (not _number(limits["near_limit_percent"], 0)
+                                            or limits["near_limit_percent"] > 100):
+        raise ValueError("limits.near_limit_percent must be greater than 0 and at most 100")
     on_stall = limits.get("on_task_stall", {})
     if not isinstance(on_stall, dict) or any((k != "*" and k not in KINDS) or v not in ("reroute", "leave")
                                              for k, v in on_stall.items()):
@@ -882,6 +888,28 @@ def usage_records() -> dict[str, dict]:
     return out
 
 
+def near_limit_until(rules: dict, account: str | None, agent: str, now: float) -> float | None:
+    """The last fresh watched-window reset for an account that has reached the threshold.
+
+    Usage is reported per account by the runner, so it governs every budget model on that account.  Unknown and
+    stale observations deliberately leave placement alone; only fresh live observations reserve headroom.
+    """
+    if not account:
+        return None
+    record = usage_records().get(account)
+    if not record or record.get("agent") != agent:
+        return None
+    threshold = rules["limits"].get("near_limit_percent", DEFAULT_RULES["limits"]["near_limit_percent"])
+    resets = [window.get("resets_at") for window in (record.get("windows") or {}).values()
+              if isinstance(window, dict) and now - window.get("observed_at", 0) <= usage.STALE_S
+              # A full window is an established limit, not a new watcher hold: it must still clear immediately
+              # when the owner resets it or fresh usage reports headroom.
+              and threshold <= window.get("used_percent", 0) < 100 and window.get("resets_at", 0) > now]
+    # A provider can enforce several windows together. This account has headroom only after all watched windows
+    # reset, so the account's target is its latest reset (the caller chooses the earliest eligible account).
+    return max(resets) if resets else None
+
+
 def rate_limit_until(record: dict, now: float) -> float | None:
     """When Codex is free again: the latest reset among windows that are used up and whose reset is still ahead."""
     ends = [w["resets_at"] for w in (record.get("primary"), record.get("secondary"))
@@ -1073,18 +1101,30 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
 
     def place(of_agent, of_key, of_ident, of_entry):
         """(account, wait, reason) on the first account that isn't limited, preferring one with a free slot;
-        None when every account is limited. Also returns the first limit reason seen."""
-        chosen, first = None, (None, None)
+        None when every account is unavailable. A watcher hold returns its earliest eligible account reset,
+        while an ordinary limit retains its historical first-limit reason."""
+        chosen, first_limit, first_watch = None, (None, None, None, False), (None, None, None, False)
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
+            # Requirement 10: fresh usage near the window limit reserves the remaining headroom.  This watcher is
+            # live-mode only while shadow mode continues to describe the existing placement decisions.
+            near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
+            watched = near is not None
+            if near and not until:
+                until, why = near, f"waiting for {label(of_key)} at {clock(near)}"
             if until:
-                first = first if first[0] else (until, why)
+                if watched:
+                    if first_watch[0] is None or until < first_watch[0]:
+                        first_watch = (until, why, account, True)
+                elif first_limit[0] is None:
+                    # Preserve the historical first-limit reason for the ordinary limit/refuse path.
+                    first_limit = (until, why, account, False)
                 continue
             maximum = of_entry.get("max_concurrent")
             if maximum is None or of_key is None or running_count(of_key, account=account) < maximum:
-                return (account, None, None), first
+                return (account, None, None), (first_watch if first_watch[0] is not None else first_limit)
             chosen = chosen or (account, "slot", f"waiting for a {label(of_key)} slot")
-        return chosen, first
+        return chosen, (first_watch if first_watch[0] is not None else first_limit)
     paid = agent in PAID_AGENTS
     if kind == "check" and paid:
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
@@ -1106,12 +1146,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
     decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": None,
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
-        placed, (until, why) = place(agent, key, decision["identity"], entry)
+        placed, (until, why, wait_account, watched) = place(agent, key, decision["identity"], entry)
         if placed:
             decision.update(account=placed[0], wait=placed[1], reason=placed[2])
         else:
             on_limit = rules["limits"]["on_limit"]
-            if on_limit == "refuse":
+            # A watcher hold is a timed queue, never an admission failure; `refuse` remains the historical
+            # behavior for an actual provider/budget limit.
+            if on_limit == "refuse" and not watched:
                 raise Refusal(409, why)
             rerouted = False
             if on_limit == "fallback" and reroute:
@@ -1136,7 +1178,8 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                     rerouted = True
                     break
             if not rerouted:
-                decision.update(wait="limit", reason=why, until=until)
+                decision.update(account=wait_account if watched else decision["account"], wait="limit", reason=why,
+                                until=until, not_before=until if watched else None)
         if decision["key"]:
             maybe_soft_notice(rules, decision["key"], now)
     decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)
@@ -1159,6 +1202,9 @@ def start_wait(task: dict, now: float | None = None) -> tuple[str | None, str | 
     until, why = blocked_by(rules, limit_snapshot(rules, now, account), task["agent"], key, ident)
     if until:
         return "limit", why
+    near = near_limit_until(rules, account, task["agent"], now) if usage.is_live() else None
+    if near:
+        return "limit", f"waiting for {label(key)} at {clock(near)}"
     maximum = entry_for(rules, key, task["agent"]).get("max_concurrent")
     if maximum is not None:
         with db() as c:

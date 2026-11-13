@@ -104,7 +104,11 @@ def choose_move(task: dict, now: float, claimed: dict | None = None, nodes: list
         moved = {**task, "account": slot["account"], "profile": slot["profile"], "account_label": slot["label"],
                  "budget_key": slot["key"], "model": slot["model"],
                  "budget_identity": budget.identity(task["agent"], slot["model"])}
-        if budget.start_wait(moved, now) != (None, None):
+        wait, _reason = budget.start_wait(moved, now)
+        # rank_slots reports near-limit accounts as physically free; admission is the authoritative watcher check.
+        if wait == "limit":
+            continue
+        if wait is not None:
             continue
         return slot
     return None
@@ -114,9 +118,84 @@ def _waiting(now: float) -> list[dict]:
     with db() as c:
         ids = [r[0] for r in c.execute(
             "SELECT id FROM tasks WHERE state='queued' AND budget_wait IN ('limit','slot') AND COALESCE(runs,0)=0 "
-            "AND not_before IS NULL AND agent IN ('claude','codex') AND kind IS NOT NULL AND budget_key IS NOT NULL "
-            "ORDER BY created_at, rowid")]
+            # A req-10 timed queue is still eligible to move before its reset if another account regains headroom.
+            "AND (not_before IS NULL OR not_before>?) AND agent IN ('claude','codex') AND kind IS NOT NULL AND budget_key IS NOT NULL "
+            "ORDER BY created_at, rowid", (now,))]
     return [tasks.get_task(i) for i in ids]
+
+
+def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, dict] | None:
+    """The earliest fresh reset among this queued task's eligible, free placement targets.
+
+    This is deliberately the req-3 ranking surface: its eligibility rules include capability, rule 0 and review
+    independence.  A pinned field narrows it further, and the task never waits for a more expensive tier.
+    """
+    rules = budget.current_rules()
+    kind = task.get("kind") or "draft"
+    held = pins(task)
+    current_tier = budget.entry_for(rules, task.get("budget_key"), task["agent"]).get("tier")
+    # `slot_identity` is the `(agent, model, account)` exclusion tuple consumed by rank_slots, not a resource row.
+    # Timed waiting needs a row-shaped current target alongside the row dictionaries rank_slots returns.
+    _agent, current_model, current_account = handoff.slot_identity(task)
+    current = {"node": task["node_id"], "agent": _agent, "profile": task.get("profile") or "fleet",
+               "label": task.get("account_label"), "account": current_account, "model": current_model,
+               "key": task.get("budget_key"), "tier": current_tier}
+    candidates = [current, *handoff.rank_slots(kind, (), {"id": task["id"]}, now=now, nodes=nodes)]
+    resets: list[tuple[float, dict]] = []
+    seen = set()
+    for slot in candidates:
+        marker = (slot.get("account"), slot.get("key"), slot.get("model"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if slot.get("agent", task["agent"]) != task["agent"] or slot.get("node", task["node_id"]) != task["node_id"]:
+            continue
+        if slot.get("account") in budget.held_accounts():
+            continue
+        if "profile" in held and slot.get("account") != budget.task_account(task):
+            continue
+        if "model" in held and slot.get("key") != task.get("budget_key"):
+            continue
+        if slot.get("tier") and handoff.tier_rank(kind, slot["tier"]) > handoff.tier_rank(kind, current_tier):
+            continue
+        key = slot.get("key") or task.get("budget_key")
+        model = slot.get("model") or task.get("model")
+        candidate = {**task, "account": slot.get("account"), "budget_key": key, "model": model,
+                     "budget_identity": budget.identity(task["agent"], model)}
+        if budget.start_wait(candidate, now)[0] != "limit":
+            return None  # an eligible target has headroom or only waits for a slot
+        reset = budget.near_limit_until(rules, slot.get("account"), task["agent"], now)
+        if reset:
+            resets.append((reset, {**slot, "key": key, "model": model}))
+    return min(resets, default=None)
+
+
+async def _apply_timed_wait(task: dict, reset: float, target: dict) -> bool:
+    model = target.get("model") or budget.label(target.get("key"))
+    reason = f"waiting for {model} at {budget.clock(reset)}"
+    if not usage.is_live():
+        if _once(("timed_wait", task["id"], reset, model)):
+            emit(task["id"], "capacity.shadow_wait", {"title": task.get("title"), "not_before": reset,
+                                                         "model": model, "reason": reason, "mode": "shadow"})
+        return False
+    async with tasks._locks[task["id"]]:
+        current = tasks.get_task(task["id"])
+        if current["state"] != "queued" or (current.get("runs") or 0) != 0:
+            return False
+        with db() as c:
+            changed = c.execute(
+                "UPDATE tasks SET node_id=?, profile=?, account=?, account_label=?, model=?, budget_key=?, "
+                "budget_identity=?, not_before=?, budget_wait='limit', error=?, updated_at=? WHERE id=? "
+                "AND state='queued' AND COALESCE(runs,0)=0 AND COALESCE(not_before,-1)=COALESCE(?,-1)",
+                (target.get("node", task["node_id"]), target.get("profile", task.get("profile")),
+                 target.get("account"), target.get("label", task.get("account_label")), target.get("model"),
+                 target.get("key"), budget.identity(task["agent"], target.get("model")), reset, reason, time.time(),
+                 task["id"], task.get("not_before"))).rowcount == 1
+    if changed:
+        emit(task["id"], "task.queued_for_usage",
+             {"title": task.get("title"), "not_before": reset, "model": model,
+              "target": _view({**task, **target}), "reason": reason})
+    return changed
 
 
 async def migrate_tick(now: float | None = None) -> list[str]:
@@ -126,8 +205,16 @@ async def migrate_tick(now: float | None = None) -> list[str]:
     moved_ids = []
     nodes = tasks.node_rows()
     for task in _waiting(now):
+        # The task may already be assigned to the account that regained headroom.  There is no placement move in
+        # that case, but the watcher hold must be removed before try_start can admit it.
+        if task.get("not_before") and usage.is_live() and budget.start_wait(task, now) == (None, None):
+            await _release_timed_wait(task)
+            continue
         slot = choose_move(task, now, claimed, nodes)
         if slot is None:
+            plan = timed_wait(task, now, nodes)
+            if plan:
+                await _apply_timed_wait(task, *plan)
             continue
         claimed[(slot["account"], slot["key"])] = claimed.get((slot["account"], slot["key"]), 0) + 1
         reason = task.get("error") or "waiting on a limit or a busy slot"
@@ -141,6 +228,25 @@ async def migrate_tick(now: float | None = None) -> list[str]:
         if await _apply_move(task["id"], slot, reason, task):
             moved_ids.append(task["id"])
     return moved_ids
+
+
+async def _release_timed_wait(ranked: dict) -> bool:
+    """Clear a req-10 hold when its assigned account has fresh headroom, then use normal start admission."""
+    async with tasks._locks[ranked["id"]]:
+        task = tasks.get_task(ranked["id"])
+        if task["state"] != "queued" or (task.get("runs") or 0) != 0:
+            return False
+        with db() as c:
+            released = c.execute(
+                "UPDATE tasks SET not_before=NULL, budget_wait=NULL, error=NULL, updated_at=? WHERE id=? "
+                "AND state='queued' AND COALESCE(runs,0)=0 AND COALESCE(not_before,-1)=COALESCE(?,-1)",
+                (time.time(), task["id"], ranked.get("not_before"))).rowcount == 1
+        if not released:
+            return False
+        emit(task["id"], "task.usage_headroom", {"title": task.get("title"), "account": budget.task_account(task),
+                                                    "reason": "fresh usage has headroom"})
+        await tasks.try_start(tasks.get_task(task["id"]))
+        return True
 
 
 async def _apply_move(task_id: str, slot: dict, reason: str, ranked: dict) -> bool:
@@ -157,12 +263,13 @@ async def _apply_move(task_id: str, slot: dict, reason: str, ranked: dict) -> bo
                 return False  # the owner froze an account between ranking and now
             moved = c.execute(
                 "UPDATE tasks SET node_id=?, profile=?, account=?, account_label=?, model=?, budget_key=?, "
-                "budget_identity=?, budget_wait=NULL, error=NULL, updated_at=? WHERE id=? AND state='queued' "
+                "budget_identity=?, budget_wait=NULL, not_before=NULL, error=NULL, updated_at=? WHERE id=? AND state='queued' "
                 "AND node_id=? AND COALESCE(profile,'fleet')=? AND COALESCE(account,'')=COALESCE(?,'') "
-                "AND COALESCE(budget_key,'')=COALESCE(?,'') AND COALESCE(runs,0)=0 AND not_before IS NULL",
+                "AND COALESCE(budget_key,'')=COALESCE(?,'') AND COALESCE(runs,0)=0 "
+                "AND COALESCE(not_before,-1)=COALESCE(?,-1)",
                 (slot["node"], slot["profile"], slot["account"], slot["label"], slot["model"], slot["key"],
                  budget.identity(task["agent"], slot["model"]), time.time(), task_id, ranked["node_id"],
-                 before["profile"], ranked.get("account"), ranked.get("budget_key"))).rowcount == 1
+                 before["profile"], ranked.get("account"), ranked.get("budget_key"), ranked.get("not_before"))).rowcount == 1
         if not moved:
             return False
         emit(task_id, "placement.moved", {"title": task.get("title"), "from": before,

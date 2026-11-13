@@ -254,14 +254,17 @@ def deployment_id(role: str, node: str, model: str) -> str:
 _loopback_warned: set[str] = set()
 
 
-def engine_is_loopback_only(node: sqlite3.Row) -> bool:
-    """True when the node's runner reports its engine bound to loopback only (docs/SPEC-networking.md phase N2)."""
+def engine_not_reachable_remotely(node: sqlite3.Row) -> bool:
+    """True when the node's runner posture (cleaned by tasks.clean_firewall) does not show its engine bound beyond
+    loopback: loopback-only (True) or not observable (None, e.g. an engine another user runs). Either way LiteLLM's
+    http://<ip>:11434 route cannot be trusted. A runner that predates N2 sends no posture at all: keep routing."""
     try:
         runner = json.loads(node["runner"]) if node["runner"] else {}
     except (ValueError, TypeError):
         return False
-    firewall = runner.get("firewall") if isinstance(runner, dict) else None
-    return isinstance(firewall, dict) and firewall.get("engine_loopback_only") is True
+    if not isinstance(runner, dict) or "firewall" not in runner:
+        return False
+    return tasks.clean_firewall(runner["firewall"])["engine_loopback_only"] is not False
 
 
 def desired_deployments() -> dict[str, dict]:
@@ -278,14 +281,15 @@ def desired_deployments() -> dict[str, dict]:
         if (not n or a["state"] != "active" or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST)
                 or not healthy(n) or a["model"] not in json.loads(n["models"])):
             continue
-        if n["id"] != tasks.MASTER_ID and engine_is_loopback_only(n):
+        if n["id"] != tasks.MASTER_ID and engine_not_reachable_remotely(n):
             # LiteLLM would call http://<ip>:11434, which a loopback-only engine refuses (and the narrowed ACL
             # blocks). Skip with a visible warning; the runner relay (11436) is not a LiteLLM route.
             if n["id"] not in _loopback_warned:
                 _loopback_warned.add(n["id"])
-                print(f"warning: node {n['name']}: Ollama is loopback-only, its roles are not routed through LiteLLM")
-                events.emit(None, "deployment.skipped", {"node": n["id"], "reason": "engine_loopback_only"})
+                print(f"warning: node {n['name']}: Ollama is loopback-only or its bind is unknown, its roles are not routed through LiteLLM")
+                events.emit(None, "deployment.skipped", {"node": n["id"], "reason": "engine_not_reachable"})
             continue
+        _loopback_warned.discard(n["id"])  # routed again: warn afresh if it flips back
         host = MASTER_MODEL_HOST if n["id"] == tasks.MASTER_ID else n["ip"]
         assignment_params = json.loads(a["params"] or "{}")
         routed_model = "fleet-" + a["catalog_id"] if a["catalog_id"] and assignment_params else a["model"]

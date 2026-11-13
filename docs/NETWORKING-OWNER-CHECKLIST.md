@@ -6,7 +6,7 @@ Steps only the owner can apply. Nothing here is run by the fleet. See `docs/SPEC
 
 **Warning: migration order.** LiteLLM reaches a worker's Ollama at `http://<node ip>:11434`. Once step 1 binds that
 engine to loopback, those remote Ollama roles stop working through LiteLLM (and step 4 blocks the path in the ACL
-too). The controller now skips such a node's deployments and prints a warning (event `deployment.skipped`), so
+too). The controller now skips such a node's deployments and prints a warning (event `deployment.skipped`; also when the engine bind cannot be observed), so
 LiteLLM fails over to other deployments in the same role. Before step 1, move the roles you still need onto the
 master or another node, or accept the outage for that worker. Evals are not affected: they go through the runner.
 
@@ -14,7 +14,7 @@ Do these in order, one worker at a time.
 
 1. **Update each node.** Re-run `nodes/onboard.sh` (macOS/Linux) on the worker. It now binds Ollama to
    `127.0.0.1`, points the runner's `OLLAMA_URL` at loopback, and removes the old 11435 info service.
-2. **Check the node on Live.** The engine should be healthy and the firewall badge pass (Windows) or warn with "pf rules not inspected" (macOS, expected). Press "Check now"
+2. **Check the node on Live.** The engine should be healthy and the firewall badge pass (Windows) or, on macOS, warn or unknown (reading pf needs root, so a normal-user runner shows "pf unreadable"; that is expected). Press "Check now"
    (read-only) to refresh the posture.
    - warn/fail: read the badge details (pf, application firewall, Defender, listener table) and fix on the node.
    - unknown: the runner could not read the setting (often a permission error). It is not a pass.

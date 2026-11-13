@@ -258,6 +258,54 @@ class ReadOnly(unittest.TestCase):
         self.assertTrue(all(a in runner.POSTURE_COMMANDS for a in seen))
 
 
+class CommandRunnerContract(unittest.TestCase):
+    def test_read_only_runner_passes_timeout_through_and_windows_rules_get_the_long_one(self):
+        timeouts = {}
+
+        def run(argv, timeout=None):
+            timeouts[tuple(argv)] = timeout
+            return None
+        runner.collect_posture(run, platform="win32", wall=lambda: 1.0)
+        self.assertEqual(timeouts[RULES], runner.POSTURE_RULES_TIMEOUT)
+        self.assertEqual(timeouts[runner.NETSTAT4], runner.POSTURE_TIMEOUT)
+        self.assertEqual(timeouts[runner.NETSTAT6], runner.POSTURE_TIMEOUT)
+
+    def test_every_command_is_an_absolute_path(self):
+        import os
+        for argv in runner.POSTURE_COMMANDS:
+            self.assertTrue(os.path.isabs(argv[0]) or argv[0].startswith("C:") or argv[0][1:3] == ":\\", argv)
+
+    def test_windows_listing_needs_both_families(self):
+        for kwargs in ({"netstat": None}, {"netstat6": None}):
+            self.assertEqual(collect(windows(**kwargs), "win32")["status"], "unknown", kwargs)
+
+
+class Serialised(unittest.TestCase):
+    def test_check_now_and_background_collection_never_overlap(self):
+        import threading
+        import time
+        from unittest import mock
+        active, peak, guard = [0], [0], threading.Lock()
+
+        def run(argv, timeout=3):
+            with guard:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.01)
+            with guard:
+                active[0] -= 1
+            return None
+        collector = runner.PostureCollector(run=run, platform="darwin", wall=lambda: 1.0, mono=lambda: 0.0)
+        with mock.patch.object(runner, "POSTURE_MIN_GAP", 0):
+            threads = [threading.Thread(target=collector.once), threading.Thread(target=collector.check_now),
+                       threading.Thread(target=collector.check_now)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(peak[0], 1)
+
+
 class Collector(unittest.TestCase):
     def make(self, run, clock):
         wall = lambda: 5000.0 + clock[0]

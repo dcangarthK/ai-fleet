@@ -1426,7 +1426,7 @@ POSTURE_RULES_TIMEOUT = 10  # `netsh ... show rule name=all` can be slow on host
 # Absolute paths: a launchd or service PATH often lacks /usr/sbin, which would leave the status unknown forever.
 _SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
 LSOF = ("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN")
-SS = ("ss", "-ltn")
+SS = ("/usr/bin/ss", "-ltn")
 NETSTAT4 = (os.path.join(_SYSTEM32, "netstat.exe"), "-ano", "-p", "tcp")
 NETSTAT6 = (os.path.join(_SYSTEM32, "netstat.exe"), "-ano", "-p", "tcpv6")  # `-p tcp` lists IPv4 only
 PFCTL = ("/sbin/pfctl", "-s", "info")  # reading /dev/pf needs root; as a normal user this stays unreadable
@@ -1653,7 +1653,7 @@ def collect_posture(run, platform=None, runner_port=RUNNER_PORT, engine_ports=EN
     elif platform.startswith("win"):
         v4, v6 = run(list(NETSTAT4)), run(list(NETSTAT6))
         # Both families must be readable: an unreadable IPv6 table could hide a [::] listener.
-        listing = (v4 + "\n" + v6) if v4 and v6 is not None else None
+        listing = None if (not v4 or v6 is None) else v4 + "\n" + v6
     else:
         listing = run(list(SS))
     facts = listener_facts(parse_listeners(listing), runner_port, engine_ports)
@@ -4811,7 +4811,10 @@ def main():
     server.runner_token = runner_token(fleet_dir)
     server.manager.metrics = MetricsCollector(server.manager.root, ollama_url).start()
     EngineCollector(server.manager).start()
-    engine_port = urlparse(ollama_url).port
+    try:
+        engine_port = urlparse(ollama_url).port
+    except ValueError:  # a malformed OLLAMA_URL must not stop startup; the default ports stay watched
+        engine_port = None
     ports = tuple(sorted(set(ENGINE_PORTS) | ({engine_port} if engine_port else set())))
     server.manager.posture = PostureCollector(runner_port=address[1], engine_ports=ports).start()
     Heartbeat(server.manager, server.runner_token, lambda: health_report(server.manager)).start()

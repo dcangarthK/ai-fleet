@@ -188,11 +188,34 @@ class LiteLLMGuard(unittest.TestCase):
         self.assertEqual(emit.call_count, 1, "warned once, not on every reconcile")
         self.assertEqual(emit.call_args.args[1], "deployment.skipped")
 
-    def test_engine_not_known_loopback_is_still_routed(self):
+    def test_unobservable_engine_bind_is_skipped_too(self):
+        controller._loopback_warned.discard("lb2")
         self.seed("lb2", dict(GOOD, engine_loopback_only=None))
+        with mock.patch.object(events, "emit") as emit:
+            self.assertFalse([k for k in controller.desired_deployments() if "--lb2--" in k])
+        self.assertEqual(emit.call_args.args[1], "deployment.skipped")
+
+    def test_engine_seen_beyond_loopback_is_still_routed_and_rewarns_after_a_flip(self):
+        controller._loopback_warned.add("lb3")
+        self.seed("lb3", dict(GOOD, engine_loopback_only=False))
         deployed = controller.desired_deployments()
-        self.assertEqual([d["litellm_params"]["api_base"] for k, d in deployed.items() if "--lb2--" in k],
+        self.assertEqual([d["litellm_params"]["api_base"] for k, d in deployed.items() if "--lb3--" in k],
                          ["http://100.9.9.9:11434"])
+        self.assertNotIn("lb3", controller._loopback_warned)
+
+    def test_runner_without_posture_keeps_routing(self):
+        with db() as c:
+            c.execute("DELETE FROM assignments WHERE node='lb4'")
+            c.execute("DELETE FROM nodes WHERE id='lb4'")
+            c.execute("INSERT INTO nodes (id,name,ip,engine,port,models,status,runner,fails) "
+                      "VALUES ('lb4','lb4','100.9.9.8','ollama',11434,?,'approved',?,0)",
+                      (json.dumps(["m:1"]), json.dumps({"metrics": {}})))
+            c.execute("INSERT INTO assignments (role,node,model,engine,state) VALUES ('coder','lb4','m:1','ollama','active')")
+        self.assertTrue([k for k in controller.desired_deployments() if "--lb4--" in k])
+
+    def test_engine_loopback_field_survives_clean_firewall(self):
+        for value in (True, False, None):
+            self.assertIs(tasks.clean_firewall(dict(GOOD, engine_loopback_only=value))["engine_loopback_only"], value)
 
 
 class CheckNowAge(unittest.TestCase):

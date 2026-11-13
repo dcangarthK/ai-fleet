@@ -710,3 +710,31 @@ class ReportAndThinkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunnerRelay(unittest.TestCase):
+    """--runner: engine calls go to the node runner's relay with the token from the environment, never to :11434."""
+    def test_relay_posts_to_the_runner_with_the_env_token(self):
+        seen = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return None
+
+            def read(self, *a):
+                return b'{"ok": true}'
+        def fake_urlopen(req, timeout=None):
+            seen["url"], seen["headers"], seen["body"] = req.full_url, dict(req.header_items()), json.loads(req.data)
+            return Resp()
+        with mock.patch.object(E, "RELAY", "http://100.1.2.3:11436"), \
+                mock.patch.dict("os.environ", {"FLEET_EVAL_RUNNER_TOKEN": "tok-x"}), \
+                mock.patch.object(E.urllib.request, "urlopen", fake_urlopen):
+            out = E.ollama("http://127.0.0.1:11434", "/api/tags", None)
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(seen["url"], "http://100.1.2.3:11436/engines/ollama/request")
+        self.assertEqual(seen["headers"].get("X-runner-token"), "tok-x")
+        self.assertEqual(seen["body"]["path"], "/api/tags")
+        self.assertNotIn("11434", seen["url"])

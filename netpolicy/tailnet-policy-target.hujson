@@ -1,0 +1,21 @@
+// DEFERRED TARGET, NOT APPLIED. SPEC-networking.md section 4 end state: master -> worker is the runner only (11436).
+// Apply only after probes and evals move to the runner (SPEC section 14 item 5 and "Deferred"); until then the
+// controller needs 11434/11435/8000/1234 and applying this would break inventory, probes and evals.
+{
+  "tagOwners": {
+    "tag:master":   ["autogroup:admin"],
+    "tag:llm-node": ["autogroup:admin"],
+  },
+
+  "grants": [
+    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11436"]},
+    {"src": ["tag:llm-node"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    {"src": ["autogroup:member"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    {"src": ["autogroup:admin"], "dst": ["tag:master", "tag:llm-node"], "ip": ["tcp:22"]},
+  ],
+
+  "tests": [
+    {"src": "tag:master", "accept": ["tag:llm-node:11436"], "deny": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:12434", "tag:llm-node:1234", "tag:llm-node:8000", "tag:llm-node:8080", "tag:llm-node:22"]},
+    {"src": "tag:llm-node", "accept": ["tag:master:8443"], "deny": ["tag:master:22", "tag:master:8700", "tag:llm-node:11436", "tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:12434", "tag:llm-node:22"]},
+  ],
+}

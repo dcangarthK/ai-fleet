@@ -1,0 +1,30 @@
+// SPEC-networking.md section 4 / phase N0, as scoped by section 14 item 5: worker -> worker denied and
+// worker -> master 8443 allowed. The master -> worker port list is UNCHANGED from tailscale/policy.hujson because
+// the controller still probes 11434/11435/8000/1234 (master/controller/controller.py) and evals use 11434
+// (master/controller/evaluations.py). Narrowing is deferred: see tailnet-policy-target.hujson (NOT applied).
+// Paste into Tailscale admin console -> Access controls (owner step, docs/NETWORKING-OWNER-CHECKLIST.md).
+{
+  "tagOwners": {
+    "tag:master":   ["autogroup:admin"], // Laptop 1: controller, console on 8443 via Tailscale Serve
+    "tag:llm-node": ["autogroup:admin"], // worker machines
+  },
+
+  "grants": [
+    // Transitional: master reaches engines, inventory and the runner. Narrowed in the target file later.
+    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11434", "tcp:11435", "tcp:11436", "tcp:8000", "tcp:1234", "tcp:8080"]},
+    // Workers push signed heartbeats to the master's HTTPS endpoint. No worker -> worker grant exists.
+    {"src": ["tag:llm-node"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    // Owner tailnet members (phone, laptop) reach the console and enrolment on 8443.
+    {"src": ["autogroup:member"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    // Tailnet admins SSH (plain sshd; Tailscale SSH would need a separate "ssh" block) to fleet machines.
+    {"src": ["autogroup:admin"], "dst": ["tag:master", "tag:llm-node"], "ip": ["tcp:22"]},
+  ],
+
+  "tests": [
+    {"src": "tag:master", "accept": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:11436", "tag:llm-node:8000"], "deny": ["tag:llm-node:22", "tag:llm-node:12434"]},
+    {"src": "tag:llm-node", "accept": ["tag:master:8443"], "deny": ["tag:master:4000", "tag:master:8700", "tag:master:22", "tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:11436", "tag:llm-node:8000", "tag:llm-node:22"]},
+    // Owner-identity rows (member / admin). OWNER_EMAIL is a placeholder: the owner substitutes their own
+    // tailnet login and uncomments these (checklist step). Keep the real identity out of the repo.
+    // {"src": "OWNER_EMAIL", "accept": ["tag:master:8443", "tag:master:22", "tag:llm-node:22"], "deny": ["tag:llm-node:11434", "tag:llm-node:11436", "tag:master:8700"]},
+  ],
+}

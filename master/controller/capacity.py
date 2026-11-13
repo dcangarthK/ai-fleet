@@ -130,7 +130,13 @@ def timed_wait(task: dict, now: float, nodes: list[dict]) -> tuple[float, dict] 
     kind = task.get("kind") or "draft"
     held = pins(task)
     current_tier = budget.entry_for(rules, task.get("budget_key"), task["agent"]).get("tier")
-    candidates = [handoff.slot_identity(task), *handoff.rank_slots(kind, (), {"id": task["id"]}, now=now, nodes=nodes)]
+    # `slot_identity` is the `(agent, model, account)` exclusion tuple consumed by rank_slots, not a resource row.
+    # Timed waiting needs a row-shaped current target alongside the row dictionaries rank_slots returns.
+    _agent, current_model, current_account = handoff.slot_identity(task)
+    current = {"node": task["node_id"], "agent": _agent, "profile": task.get("profile") or "fleet",
+               "label": task.get("account_label"), "account": current_account, "model": current_model,
+               "key": task.get("budget_key"), "tier": current_tier}
+    candidates = [current, *handoff.rank_slots(kind, (), {"id": task["id"]}, now=now, nodes=nodes)]
     resets: list[tuple[float, dict]] = []
     seen = set()
     for slot in candidates:

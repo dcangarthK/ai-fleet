@@ -1313,6 +1313,9 @@ class JobManager:
                         for e in self.profile_entries(agent)] for agent in ("claude", "codex")}
 
     def agent_env(self, agent, base, profile=None):
+        return no_push_env(self._agent_env(agent, base, profile))
+
+    def _agent_env(self, agent, base, profile=None):
         env = dict(base)
         entry = self.profile_entry(agent, profile) if profile and profile != "fleet" else None
         if entry and entry["dir"]:
@@ -3394,7 +3397,7 @@ class Handler(BaseHTTPRequestHandler):
             self._body()
             return self.manager.model_manager.cancel(parts[1])
         if method == "POST" and parts == ["services", "restart"]:
-            return restart_service(self._body().get("service"))
+            return restart_service(self._body().get("service"), self.manager)
         if method == "GET" and parts == ["jobs"]:
             return self.manager.list_public()
         if method == "POST" and parts == ["jobs"]:
@@ -3452,27 +3455,92 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("POST")
 
 
-SERVICE_NAMES = ("runner", "claude-mem", "ollama")
+NO_PUSH_SCHEMES = ("https://", "http://", "ssh://", "git://", "file://", "git@", "/", "./", "../", "~")
+PUSH_ENV_DROP = ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_CONFIG_SYSTEM")
+
+
+def _git_identity():
+    out = {}
+    for key in ("user.name", "user.email"):
+        try:
+            done = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True, timeout=5)
+            value = done.stdout.strip() if done.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            value = ""
+        out[key] = value
+    return out
+
+
+def no_push_config_path():
+    return Path(os.environ.get("FLEET_DIR", str(Path.home() / ".ai-fleet"))).expanduser() / "worker.gitconfig"
+
+
+def ensure_no_push_config():
+    """The fleet-owned git config every worker uses (GIT_CONFIG_GLOBAL): every push URL is rewritten to a scheme git
+    can't speak, and no credential helper is set. The owner's name and email are copied so commits still work."""
+    ident = _git_identity()
+    lines = ['[url "fleet-no-push://"]'] + ["\tpushInsteadOf = " + scheme for scheme in NO_PUSH_SCHEMES]
+    lines += ["[credential]", "\thelper =", "[user]",
+              "\tname = " + (ident["user.name"] or "fleet worker"),
+              "\temail = " + (ident["user.email"] or "fleet-worker@localhost")]
+    text = "\n".join(lines) + "\n"
+    path = no_push_config_path()
+    try:
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+    except OSError:
+        return None
+    return path
+
+
+def no_push_env(env):
+    """Enforce no-push below the agent, for every agent and mode (Claude deny rules are only a second layer):
+    no push credentials in the environment, and git reads the fleet's config instead of the user's."""
+    env = dict(env)
+    for key in PUSH_ENV_DROP:
+        env.pop(key, None)
+    path = ensure_no_push_config()
+    if path is not None:
+        env["GIT_CONFIG_GLOBAL"] = str(path)
+        env["GIT_CONFIG_NOSYSTEM"] = "1"  # system gitconfig credential helpers (osxkeychain, manager) stay out
+    return env
+
+
+SERVICE_NAMES = ("runner", "ollama")  # claude-mem is not here: nothing installs or reports it yet
+LINUX_UNITS = {"runner": "ai-fleet-runner.service", "ollama": "ollama"}  # the system units onboard.sh installs
 
 
 def service_restart_command(service, platform=None, uid=None):
-    """Argv for the node's service manager: launchctl kickstart on macOS, systemctl --user restart on Linux.
-    Labels: local.ai-fleet.<name> (macOS), ai-fleet-<name> (Linux); ollama is `ollama` on Linux. The claude-mem
-    names are UNVERIFIED: no onboarding script installs it yet."""
+    """Argv for the node's service manager. macOS: launchctl kickstart (labels local.ai-fleet.<name>, as onboard.sh
+    writes them). Linux: `sudo -n systemctl restart <unit>`: onboarding installs system units, and a narrow sudoers
+    rule (onboard.sh) allows exactly these argv. Anything else (Windows) is refused."""
     platform = platform or sys.platform
-    uid = os.getuid() if uid is None else uid
+    uid = os.getuid() if (uid is None and hasattr(os, "getuid")) else uid
     if platform == "darwin":
         return ["launchctl", "kickstart", "-k", "gui/%d/local.ai-fleet.%s" % (uid, service)]
-    unit = "ollama" if service == "ollama" else "ai-fleet-" + service
-    return ["systemctl", "--user", "restart", unit]
+    if platform.startswith("linux"):
+        return ["sudo", "-n", "systemctl", "restart", LINUX_UNITS[service]]
+    raise HttpError(501, "service restart is not supported on this platform (%s)" % platform)
 
 
-def restart_service(service):
+def restart_service(service, manager=None):
     """POST /services/restart (same runner token as every other call). Only a fixed list of services."""
     if service not in SERVICE_NAMES:
         raise HttpError(400, "unknown service")
     argv = service_restart_command(service)
+    if manager is not None:
+        manager.audit("service_restart", service)
     if service == "runner":  # restarting ourselves kills this request: let the reply go first
+        if argv[0] == "sudo":  # the detached command's exit is never seen, so check the sudoers rule first
+            try:
+                allowed = subprocess.run(["sudo", "-n", "-l"] + argv[2:], capture_output=True, timeout=10).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                allowed = False
+            if not allowed:
+                raise HttpError(502, "restart not permitted: sudoers rule for the runner unit is missing")
         argv = ["sh", "-c", "sleep 1; exec \"$@\"", "sh"] + argv
         subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)

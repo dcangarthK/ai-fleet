@@ -1093,7 +1093,7 @@ async def poll_loop() -> None:
             import capacity
             await capacity.tick()
             import loopheal
-            await loopheal.tick()
+            loopheal.kick()  # background: a restart can take a minute and must not hold up polling
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens

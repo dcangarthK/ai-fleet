@@ -265,7 +265,7 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 DECISION_EVENTS = ("task.allocated", "placement.moved", "task.requeued", "task.loop_cut", "gate.bounced",
-                   "service.restarted", "service.restart_failed", "service.alert")
+                   "service.restarted", "service.restart_failed", "service.alert", "service.recovered")
 
 
 def decision_counts(since: float) -> dict[str, dict[str, int]]:

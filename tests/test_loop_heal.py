@@ -278,8 +278,8 @@ class SelfHealTests(DbCase):
 
     def test_counters_survive_a_restart_and_the_window_expires(self):
         loopheal.heal_tick(self.svc(), self.restart, lambda *a: False, NOW, grace=False)
-        loopheal.heal_tick(self.svc(), self.restart, lambda *a: False, NOW + 10, grace=False)
-        out = loopheal.heal_tick(self.svc(), self.restart, lambda *a: True, NOW + 20 + loopheal.RESTART_WINDOW,
+        loopheal.heal_tick(self.svc(), self.restart, lambda *a: False, NOW + 100, grace=False)
+        out = loopheal.heal_tick(self.svc(), self.restart, lambda *a: True, NOW + 200 + loopheal.RESTART_WINDOW,
                                  grace=False)
         self.assertEqual(out[0]["action"], "restarted")
 

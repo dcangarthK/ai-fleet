@@ -544,8 +544,8 @@ def alerts(include_resolved: bool = False, ctx: "tasks.DisplayContext | None" = 
                            "WHERE type='node.runner_online' GROUP BY node"):
             if isinstance(r["node"], str):
                 online[r["node"]] = r["last"]
-        restarted = {}  # (node, service) -> id of its newest service.restarted event
-        for r in c.execute("SELECT id, data FROM events WHERE type='service.restarted' ORDER BY id"):
+        restarted = {}  # (node, service) -> id of its newest service.restarted or service.recovered event
+        for r in c.execute("SELECT id, data FROM events WHERE type IN ('service.restarted','service.recovered') ORDER BY id"):
             d = _json(r["data"]) or {}
             restarted[(d.get("node"), d.get("service"))] = r["id"]
         for r in rows:

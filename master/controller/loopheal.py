@@ -171,10 +171,35 @@ def _record(now: float, node: str, service: str, outcome: str) -> None:
         c.execute("INSERT INTO service_heal (ts, node, service, outcome) VALUES (?,?,?,?)", (now, node, service, outcome))
 
 
-def _recent(now: float, node: str, service: str, outcome: str) -> int:
+def _recent(now: float, node: str, service: str, outcome: str | tuple = ()) -> int:
+    """Rows in the 15-minute window for (node, service); `outcome` is one outcome, a tuple of them, or () for all."""
+    kinds = (outcome,) if isinstance(outcome, str) else tuple(outcome)
+    marks = ",".join("?" * len(kinds))
     with db() as c:
-        return c.execute("SELECT COUNT(*) FROM service_heal WHERE node=? AND service=? AND outcome=? AND ts>?",
-                         (node, service, outcome, now - RESTART_WINDOW)).fetchone()[0]
+        return c.execute("SELECT COUNT(*) FROM service_heal WHERE node=? AND service=? AND ts>?"
+                         + (f" AND outcome IN ({marks})" if kinds else ""),
+                         (node, service, now - RESTART_WINDOW, *kinds)).fetchone()[0]
+
+
+def _last_attempt(node: str, service: str) -> float | None:
+    with db() as c:
+        row = c.execute("SELECT MAX(ts) FROM service_heal WHERE node=? AND service=? AND outcome IN ('ok','failed')",
+                        (node, service)).fetchone()
+    return row[0]
+
+
+def _pending(node: str, service: str) -> str | None:
+    """The newest outcome for the service if it was a failed restart or an alert (not yet recovered), else None."""
+    with db() as c:
+        row = c.execute("SELECT outcome FROM service_heal WHERE node=? AND service=? ORDER BY id DESC LIMIT 1",
+                        (node, service)).fetchone()
+    return row[0] if row and row[0] in ("failed", "alert") else None
+
+
+def cooldown_seconds() -> float:
+    """No second restart of the same service sooner than a heartbeat TTL plus a node poll after the last one."""
+    import tasks
+    return tasks.HEARTBEAT_TTL + tasks.NODE_POLL_SECONDS
 
 
 def needs_restart(svc: dict, now: float) -> str | None:
@@ -187,10 +212,18 @@ def needs_restart(svc: dict, now: float) -> str | None:
     return None
 
 
+def _alert(now: float, node: str, name: str, why: str, detail: str) -> None:
+    if not _recent(now, node, name, "alert"):  # once per window
+        _record(now, node, name, "alert")
+        emit(None, "service.alert", {"node": node, "service": name, "reason": why, "detail": detail})
+
+
 def heal_tick(services: list[dict], restart, health, now: float | None = None, grace: bool | None = None) -> list[dict]:
-    """One self-heal pass. `services`: [{node, service, missed_beats, unhealthy_since}]. `restart(node, service)`
-    asks the service manager; `health(node, service)` verifies afterwards. Waits out the controller's startup
-    grace; two failed restarts inside 15 minutes raise `service.alert` (once per window) instead of restarting."""
+    """One self-heal pass. `services`: [{node, service, missed_beats, unhealthy_since, unreachable?}]. `restart(node,
+    service)` asks the service manager; `health(node, service)` verifies afterwards. Waits out the controller's
+    startup grace. Every attempt (ok or failed) counts in the 15-minute window: two attempts raise `service.alert`
+    instead of a third, and a cooldown spaces attempts. A healthy service that had failed or alerted gets
+    `service.recovered`. A runner the controller can't reach alerts straight away (it can't take the request)."""
     now = time.time() if now is None else now
     if grace is None:
         import tasks
@@ -201,16 +234,25 @@ def heal_tick(services: list[dict], restart, health, now: float | None = None, g
         node, name = svc["node"], svc["service"]
         why = needs_restart(svc, now)
         if why is None:
+            if not grace and _pending(node, name):
+                _record(now, node, name, "recovered")
+                emit(None, "service.recovered", {"node": node, "service": name, "reason": "healthy again"})
+                results.append({"node": node, "service": name, "action": "recovered"})
             continue
         if grace:
             results.append({"node": node, "service": name, "action": "grace"})
             continue
-        if _recent(now, node, name, "failed") >= MAX_FAILED_RESTARTS:
-            if not _recent(now, node, name, "alert"):
-                _record(now, node, name, "alert")
-                emit(None, "service.alert", {"node": node, "service": name, "reason": why,
-                                             "detail": f"{MAX_FAILED_RESTARTS} failed restarts in 15 minutes; not restarting again"})
+        if svc.get("unreachable"):
+            _alert(now, node, name, why, "runner unreachable; cannot restart it through itself")
             results.append({"node": node, "service": name, "action": "alert"})
+            continue
+        if _recent(now, node, name, ("ok", "failed")) >= MAX_FAILED_RESTARTS:
+            _alert(now, node, name, why, f"{MAX_FAILED_RESTARTS} restarts in 15 minutes; not restarting again")
+            results.append({"node": node, "service": name, "action": "alert"})
+            continue
+        last = _last_attempt(node, name)
+        if last is not None and now - last < cooldown_seconds():
+            results.append({"node": node, "service": name, "action": "cooldown"})
             continue
         try:
             restart(node, name)
@@ -225,38 +267,37 @@ def heal_tick(services: list[dict], restart, health, now: float | None = None, g
 
 # ---------- 7. wiring: services from heartbeats, restart through the runner, the periodic tick ----------
 
-_DOWN_SINCE: dict[tuple[str, str], float] = {}  # only the start of a health failure; restart counters stay in fleet.db
+# Only the start of a health failure lives in memory: a controller restart resets the 2-minute unhealthy timer, which
+# errs safe (it delays a restart). Restart counters stay in fleet.db.
+_DOWN_SINCE: dict[tuple[str, str], float] = {}
+_RESTARTED_AT: dict[tuple[str, str], float] = {}  # when we last asked a runner to restart a service
+RESTART_PAD = 2.0  # the runner restarts itself ~1 s after replying; a beat inside that gap is the old process
 
 
 def collect_services(nodes: list[dict], now: float) -> list[dict]:
-    """Service rows for heal_tick from node heartbeats. runner: heartbeat freshness (a missed beat = one
-    HEARTBEAT_TTL). ollama: the runner's metrics say it is down. claude-mem and the controller worker: only when
-    the runner's `services` report says `up: false`. Nodes that never sent a heartbeat are left alone."""
+    """Service rows for heal_tick from node heartbeats. runner: freshness of the newest of heartbeat and poll
+    (the rule runner_offline uses); a missed beat is one HEARTBEAT_TTL. ollama: the runner's metrics say it is down.
+    claude-mem and the controller worker are NOT monitored: nothing reports them yet, and the runner has no
+    restart for them. Add them here, with a runner report and a SERVICE_NAMES entry, when they are installed."""
     import tasks
     rows, live_keys = [], set()
     for node in nodes:
         if node.get("status") != "approved" or not node.get("runner"):
             continue
-        beat = node.get("heartbeat_at")
-        report = node["runner"]
-        checks = {}
-        if beat is not None:
-            checks["runner"] = (int(max(0.0, now - beat) // tasks.HEARTBEAT_TTL), False)
-        else:
-            checks["runner"] = (0, False)
-        ollama = (report.get("metrics") or {}).get("ollama") if isinstance(report.get("metrics"), dict) else None
+        seen = max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0])
+        missed = int(max(0.0, now - seen) // tasks.HEARTBEAT_TTL) if seen else 0
+        unreachable = (node.get("runner_fails") or 0) >= 3
+        rows.append({"node": node["id"], "service": "runner", "missed_beats": missed, "unhealthy_since": None,
+                     "unreachable": unreachable})
+        metrics = node["runner"].get("metrics")
+        ollama = metrics.get("ollama") if isinstance(metrics, dict) else None
+        key = (node["id"], "ollama")
+        since = None
         if isinstance(ollama, dict) and ollama.get("up") is False and ollama.get("installed", True) is not False:
-            checks["ollama"] = (0, True)
-        for name, info in (report.get("services") or {}).items():
-            if name in ("claude-mem", "controller-worker") and isinstance(info, dict) and info.get("up") is False:
-                checks[name] = (0, True)
-        for name, (missed, failing) in checks.items():
-            key = (node["id"], name)
-            since = None
-            if failing:
-                since = _DOWN_SINCE.setdefault(key, now)
-                live_keys.add(key)
-            rows.append({"node": node["id"], "service": name, "missed_beats": missed, "unhealthy_since": since})
+            since = _DOWN_SINCE.setdefault(key, now)
+            live_keys.add(key)
+        if since is not None or isinstance(ollama, dict):
+            rows.append({"node": node["id"], "service": "ollama", "missed_beats": 0, "unhealthy_since": since})
     for key in [k for k in _DOWN_SINCE if k not in live_keys]:
         del _DOWN_SINCE[key]
     return rows
@@ -273,30 +314,30 @@ def restart_via_runner(node_id: str, service: str) -> None:
     import tasks
     node = _node(node_id)
     token = tasks.node_runner_token(node)
+    _RESTARTED_AT[(node_id, service)] = time.time()
     r = httpx.post(tasks.runner_url(node) + "/services/restart", json={"service": service}, timeout=40,
                    headers={"X-Runner-Token": token} if token else {}, trust_env=False)
     r.raise_for_status()
 
 
-def check_health(node_id: str, service: str, wait: float = 15.0, step: float = 1.5) -> bool:
-    """Blocking: after a restart, poll the runner's /health until the service looks up, or give up."""
+def check_health(node_id: str, service: str, wait: float = 30.0, step: float = 1.5) -> bool:
+    """Blocking: after a restart, wait until the service looks up. A runner counts as healthy only after a heartbeat
+    or poll newer than the restart (the old process answering /health proves nothing). Ollama: runner metrics."""
     import httpx
     import tasks
-    node = _node(node_id)
-    token = tasks.node_runner_token(node)
-    headers = {"X-Runner-Token": token} if token else {}
     deadline = time.time() + wait
+    since = _RESTARTED_AT.get((node_id, service), time.time()) + RESTART_PAD
     while True:
+        node = _node(node_id)
         try:
-            body = httpx.get(tasks.runner_url(node) + "/health", timeout=3, headers=headers, trust_env=False).json()
-            if body.get("ok"):
-                if service == "ollama":
-                    ok = ((body.get("metrics") or {}).get("ollama") or {}).get("up") is True
-                elif service in ("claude-mem", "controller-worker"):
-                    ok = ((body.get("services") or {}).get(service) or {}).get("up") is True
-                else:
-                    ok = True
-                if ok:
+            if service == "runner":
+                if max([t for t in (node.get("heartbeat_at"), node.get("polled_at")) if t] or [0]) > since:
+                    return True
+            else:
+                token = tasks.node_runner_token(node)
+                body = httpx.get(tasks.runner_url(node) + "/health", timeout=3, trust_env=False,
+                                 headers={"X-Runner-Token": token} if token else {}).json()
+                if body.get("ok") and ((body.get("metrics") or {}).get("ollama") or {}).get("up") is True:
                     return True
         except (httpx.HTTPError, ValueError):
             pass
@@ -305,17 +346,32 @@ def check_health(node_id: str, service: str, wait: float = 15.0, step: float = 1
         time.sleep(step)
 
 
-async def tick(now: float | None = None, restart=None, health=None) -> list[dict]:
-    """The controller's periodic call. heal_tick does blocking HTTP and sqlite, so it runs in a thread. Never raises."""
-    import asyncio
+def _pass(now: float, restart, health) -> list[dict]:
+    """Blocking: read the nodes (sqlite), pick services, heal. Runs in a thread."""
     import tasks
+    services = collect_services(tasks.node_rows(), now)
+    return heal_tick(services, restart or restart_via_runner, health or check_health, now, tasks.in_startup_grace(now))
+
+
+async def tick(now: float | None = None, restart=None, health=None) -> list[dict]:
+    """One self-heal pass, entirely off the event loop. Never raises."""
+    import asyncio
     now = time.time() if now is None else now
     try:
-        services = [s for s in collect_services(tasks.node_rows(), now) if needs_restart(s, now)]
-        if not services:
-            return []
-        return await asyncio.to_thread(heal_tick, services, restart or restart_via_runner,
-                                       health or check_health, now, tasks.in_startup_grace(now))
+        return await asyncio.to_thread(_pass, now, restart, health)
     except Exception as exc:  # self-heal must never stop the poll loop
         print(f"service self-heal failed: {exc!r}")
         return []
+
+
+_RUNNING = None
+
+
+def kick() -> None:
+    """Called by poll_loop each round: start a pass unless one is still running, and don't wait for it (a pass can
+    take a minute on an unreachable node). One pass at a time, so ticks never overlap."""
+    import asyncio
+    global _RUNNING
+    if _RUNNING is not None and not _RUNNING.done():
+        return
+    _RUNNING = asyncio.get_running_loop().create_task(tick())

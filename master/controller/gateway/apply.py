@@ -15,11 +15,19 @@ PREFIX_NOTE = f"rules whose id starts with {NAMESPACE!r} are treated as fleet-ow
 
 @dataclass
 class ApplyResult:
-    # dry_run | applied | rolled_back | reverted | needs_owner_check | unsupported | unreachable | refused | noop | error
+    # dry_run | applied | rolled_back | rollback_failed | reverted | needs_owner_check | unsupported | unreachable | refused | noop | error
     status: str
     diff: str = ""
     skipped: list = field(default_factory=list)
     detail: str = ""
+
+
+def _rollback(adapter) -> bool:
+    try:
+        adapter.rollback()
+        return True
+    except Exception:
+        return False
 
 
 def apply_plan(adapter: GatewayAdapter, policy: Policy, canaries: list, *, owner_approved: bool = False,
@@ -59,7 +67,9 @@ def apply_plan(adapter: GatewayAdapter, policy: Policy, canaries: list, *, owner
         staged = True
         for src, dst, port, expect in canaries:
             if adapter.probe(src, dst, port) != expect:
-                adapter.rollback()
+                if not _rollback(adapter):
+                    return ApplyResult("rollback_failed", text, skipped, f"canary {src}->{dst}:{port} expected {expect}; "
+                                       "rollback failed, owner must check the router")
                 return ApplyResult("rolled_back", text, skipped, f"canary {src}->{dst}:{port} expected {expect}")
         if adapter.read_rules() != want:  # confirm window ended before canaries finished: they tested old rules
             adapter.rollback()
@@ -74,10 +84,8 @@ def apply_plan(adapter: GatewayAdapter, policy: Policy, canaries: list, *, owner
         return ApplyResult("applied", text, skipped)
     except Exception as e:  # report, never raise; restore last-known-good only if we staged something
         if staged:
-            try:
-                adapter.rollback()
-            except Exception:
-                pass
+            if not _rollback(adapter):
+                return ApplyResult("rollback_failed", detail=f"{type(e).__name__}: {e}; rollback failed, owner must check the router")
             return ApplyResult("rolled_back", detail=f"{type(e).__name__}: {e}")
         return ApplyResult("error", detail=f"{type(e).__name__}: {e}; router untouched")
 

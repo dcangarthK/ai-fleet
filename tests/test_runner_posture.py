@@ -190,11 +190,17 @@ class WindowsPosture(unittest.TestCase):
         self.assertEqual(out["status"], "warn")
         self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]))
 
+    def test_runner_rule_from_whole_tailnet_subnet_warns(self):
+        out = collect(windows(rules="netsh_rules_runner_tailnet_subnet.txt"), "win32")
+        self.assertEqual(out["status"], "warn")
+        self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]), out["details"])
+
     def test_remote_entry_forms(self):
-        for entry in ("100.64.1.2", "100.64.1.2/32", "100.64.1.2/255.255.255.255", "100.64.0.0/10",
-                      "100.64.1.1-100.64.1.9", "fd7a:115c:a1e0::1/128"):
+        for entry in ("100.64.1.2", "100.64.1.2/32", "100.64.1.2/255.255.255.255",
+                      "100.64.1.1-100.64.1.1", "fd7a:115c:a1e0::1/128"):
             self.assertTrue(runner._remote_in_tailnet(entry), entry)
-        for entry in ("Any", "LocalSubnet", "Internet", "0.0.0.0/0", "192.168.0.0/16", "100.0.0.0/8",
+        for entry in ("Any", "LocalSubnet", "Internet", "0.0.0.0/0", "192.168.0.0/16", "100.0.0.0/8", "100.64.0.0/10", "100.64.1.0/24",
+                      "100.64.1.1-100.64.1.9", "fd7a:115c:a1e0::/48",
                       "100.64.1.1-101.0.0.1", "garbage"):
             self.assertFalse(runner._remote_in_tailnet(entry), entry)
 

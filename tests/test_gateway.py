@@ -59,6 +59,19 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(r.lkg, OWNER)
         self.assertIsNone(r.pending)
 
+    def test_failed_rollback_is_reported_not_rolled_back(self):
+        r = FakeRouter(OWNER)
+        r.blocked.add(("workers", "master", "8443"))
+        def bad_rollback(*a): raise RuntimeError("router gone")
+        r.rollback = bad_rollback
+        bad = [("workers", "wan", "443", True), ("workers", "master", "8443", True)]
+        self.assertEqual(apply_plan(r, POLICY, bad, dry_run=False, owner_approved=True).status, "rollback_failed")
+        r2 = FakeRouter(OWNER)
+        def boom(*a): raise RuntimeError("link dropped")
+        r2.probe = boom
+        r2.rollback = bad_rollback
+        self.assertEqual(apply_plan(r2, POLICY, CANARY_OK, dry_run=False, owner_approved=True).status, "rollback_failed")
+
     def test_driver_error_mid_apply_rolls_back(self):
         r = FakeRouter(OWNER)
         def boom(*a): raise RuntimeError("link dropped")

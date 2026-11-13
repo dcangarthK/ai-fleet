@@ -851,6 +851,13 @@ def scoped_var_pitfalls(text: str):
 
 
 class OnboardPs1SyntaxTests(unittest.TestCase):
+    def test_windows_onboard_is_loopback_and_retires_11435(self):
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertIn('"OLLAMA_HOST", "127.0.0.1:11434"', text)
+        self.assertIn('set "OLLAMA_URL=http://127.0.0.1:11434"', text)
+        self.assertNotIn("System.Net.HttpListener", text)
+        self.assertNotIn("${ip}:11435", text)
+
     def test_no_scoped_variable_pitfalls_in_double_quoted_strings(self):
         text = (ROOT / "nodes" / "onboard.ps1").read_text()
         self.assertEqual(scoped_var_pitfalls(text), [],

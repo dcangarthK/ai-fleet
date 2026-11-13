@@ -44,7 +44,7 @@ class CappedContinuationTests(HandoffBase):
     def test_deferred_continuation_stays_queued(self):
         src = self.build()
         FakeRunner.jobs[src["id"]].update(state="capped", exit_code=0, result="s", branch="fleet/x", gate={"state": "skipped"})
-        with patch.object(tasks.budget, "start_wait", return_value=("limit", "waiting for test")):
+        with patch.object(tasks, "try_start", return_value=False):  # admission deferred: no start
             self.c.portal.call(tasks.poll_task, src["id"])
         [new] = self.children(src["id"])
         self.assertEqual(self.get(new)["state"], "queued")

@@ -302,7 +302,7 @@ recommended_models() {
 run_ollama_mac() {
   local ip="$1" bin la="$HOME/Library/LaunchAgents/local.ai-fleet.ollama.plist"
   local env_vars=(
-    OLLAMA_HOST "$ip:11434"
+    OLLAMA_HOST "127.0.0.1:11434"
     OLLAMA_KEEP_ALIVE "10m"
     OLLAMA_FLASH_ATTENTION "1"
     OLLAMA_KV_CACHE_TYPE "q8_0"
@@ -334,12 +334,12 @@ configure_ollama() {
     ask "Ollama is not installed. Install it to serve local models?" || return 0
     if [ "$OS" = Darwin ]; then brew install ollama; else curl -fsSL https://ollama.com/install.sh | sh; fi
   fi
-  say "Configuring Ollama to listen on the tailnet only ($ip:11434)"
+  say "Configuring Ollama to listen on loopback only (127.0.0.1:11434); the runner is the only way in"
   if [ "$OS" = Darwin ]; then
     run_ollama_mac "$ip"
   else
     local env_host env_keep_alive env_flash_attention
-    env_host="$(systemd_quote environment "OLLAMA_HOST=$ip:11434")"
+    env_host="$(systemd_quote environment "OLLAMA_HOST=127.0.0.1:11434")"
     env_keep_alive="$(systemd_quote environment "OLLAMA_KEEP_ALIVE=10m")"
     env_flash_attention="$(systemd_quote environment "OLLAMA_FLASH_ATTENTION=1")"
     $SUDO mkdir -p /etc/systemd/system/ollama.service.d
@@ -358,17 +358,17 @@ EOF
     $SUDO systemctl enable --now ollama
     $SUDO systemctl restart ollama
   fi
-  for _ in $(seq 1 30); do curl -fsS "http://$ip:11434/api/tags" >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 30); do curl -fsS "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1 && break; sleep 1; done
 
   local have_models want
-  have_models="$(curl -fsS "http://$ip:11434/api/tags" 2>/dev/null | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["models"]))' 2>/dev/null || echo 0)"
+  have_models="$(curl -fsS "http://127.0.0.1:11434/api/tags" 2>/dev/null | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["models"]))' 2>/dev/null || echo 0)"
   want="$MODELS"
   if [ -z "$want" ] && [ "$have_models" = 0 ]; then
     want="$(recommended_models)"
     ask "No models yet. Pull recommended models for $(ram_gb)GB RAM ($want)?" || want=""
   fi
   local ollama_cli; ollama_cli="$(command -v ollama || echo /Applications/Ollama.app/Contents/Resources/ollama)"
-  for m in $want; do OLLAMA_HOST="$ip:11434" "$ollama_cli" pull "$m"; done
+  for m in $want; do OLLAMA_HOST="127.0.0.1:11434" "$ollama_cli" pull "$m"; done
 }
 
 # ---------- inventory scan ----------
@@ -578,38 +578,29 @@ install_services() {
   local ip="$1" self="$FLEET_DIR/onboard.sh" py
   py="$(command -v python3)"
   save_self_copy
-  say "Publishing inventory on $ip:$INFO_PORT (tailnet only) and rescanning hourly"
+  # The :11435 inventory server is retired (docs/SPEC-networking.md 5.1): the runner reports inventory in /health.
+  say "Rescanning hourly (inventory goes to the controller through the runner; port $INFO_PORT is retired)"
   if [ "$OS" = Darwin ]; then
     local la="$HOME/Library/LaunchAgents"; mkdir -p "$la"
-    write_launchd_plist "$la/local.ai-fleet.info.plist" "local.ai-fleet.info" 1 1 "" "" "/dev/null" 0 \
-      "$py" "-m" "http.server" "$INFO_PORT" "--bind" "$ip" "--directory" "$FLEET_DIR/public"
+    if [ -f "$la/local.ai-fleet.info.plist" ]; then
+      launchctl bootout "gui/$(id -u)" "$la/local.ai-fleet.info.plist" 2>/dev/null || true
+      rm -f "$la/local.ai-fleet.info.plist"
+    fi
     write_launchd_plist "$la/local.ai-fleet.scan.plist" "local.ai-fleet.scan" "" "" 3600 \
       "$FLEET_DIR/scan.log" "$FLEET_DIR/scan.log" 2 \
       PATH "$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
       FLEET_DIR "$FLEET_DIR" \
       "/bin/bash" "$self" "--scan-only"
-    for job in info scan; do
-      reload_launch_agent "$la/local.ai-fleet.$job.plist"
-    done
+    reload_launch_agent "$la/local.ai-fleet.scan.plist"
   else
-    local user info_exec scan_exec scan_fleet_env
+    local user scan_exec scan_fleet_env
     user="$(id -un)"
-    info_exec="$(systemd_quote exec "$py" "-m" "http.server" "$INFO_PORT" "--bind" "$ip" "--directory" "$FLEET_DIR/public")"
     scan_exec="$(systemd_quote exec "/bin/bash" "$self" "--scan-only")"
     scan_fleet_env="$(systemd_quote environment "FLEET_DIR=$FLEET_DIR")"
-    $SUDO tee /etc/systemd/system/ai-fleet-info.service >/dev/null <<EOF
-[Unit]
-Description=AI fleet node inventory (tailnet only)
-After=tailscaled.service
-Wants=tailscaled.service
-[Service]
-User=$user
-ExecStart=$info_exec
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-EOF
+    if [ -f /etc/systemd/system/ai-fleet-info.service ]; then
+      $SUDO systemctl disable --now ai-fleet-info.service || true
+      $SUDO rm -f /etc/systemd/system/ai-fleet-info.service
+    fi
     $SUDO tee /etc/systemd/system/ai-fleet-scan.service >/dev/null <<EOF
 [Unit]
 Description=AI fleet node rescan
@@ -629,8 +620,7 @@ OnUnitActiveSec=1h
 WantedBy=timers.target
 EOF
     $SUDO systemctl daemon-reload
-    $SUDO systemctl enable --now ai-fleet-info.service ai-fleet-scan.timer
-    $SUDO systemctl restart ai-fleet-info.service
+    $SUDO systemctl enable --now ai-fleet-scan.timer
   fi
 }
 
@@ -4959,7 +4949,7 @@ install_runner() {
     write_launchd_plist "$la" "local.ai-fleet.runner" 1 1 "" "" "$FLEET_DIR/runner.log" 6 \
       RUNNER_BIND "$ip:11436" \
       FLEET_DIR "$FLEET_DIR" \
-      OLLAMA_URL "http://$ip:11434" \
+      OLLAMA_URL "http://127.0.0.1:11434" \
       PATH "$path_dirs" \
       CLAUDE_CONFIG_DIR "$claude_dir" \
       CODEX_HOME "$codex_dir" \
@@ -4972,7 +4962,7 @@ install_runner() {
     runner_exec="$(systemd_quote exec "$py" "$FLEET_DIR/runner.py")"
     runner_bind_env="$(systemd_quote environment "RUNNER_BIND=$ip:11436")"
     runner_fleet_env="$(systemd_quote environment "FLEET_DIR=$FLEET_DIR")"
-    runner_ollama_env="$(systemd_quote environment "OLLAMA_URL=http://$ip:11434")"
+    runner_ollama_env="$(systemd_quote environment "OLLAMA_URL=http://127.0.0.1:11434")"
     runner_path_env="$(systemd_quote environment "PATH=$path_dirs")"
     runner_claude_env="$(systemd_quote environment "CLAUDE_CONFIG_DIR=$claude_dir")"
     runner_codex_env="$(systemd_quote environment "CODEX_HOME=$codex_dir")"

@@ -1,0 +1,5 @@
+Status: Enabled for 0 days 02:14:09           Debug: Urgent
+
+State Table                          Total             Rate
+  current entries                       12
+  searches                           58713           7.0/s

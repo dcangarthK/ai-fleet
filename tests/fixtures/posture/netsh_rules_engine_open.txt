@@ -1,0 +1,12 @@
+
+Rule Name:                            AI Fleet
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Profiles:                             Domain,Private,Public
+Protocol:                             TCP
+LocalPort:                            11434,11435,11436,1234,8000,8080
+RemotePort:                           Any
+RemoteIP:                             Any
+Action:                               Allow
+Ok.

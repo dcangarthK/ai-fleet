@@ -161,7 +161,30 @@ NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
-                 "age_s", "codex_rate_limits", "capacity", "services"}
+                 "age_s", "codex_rate_limits", "capacity", "services", "firewall", "inventory"}
+POSTURE_STATUS = ("pass", "warn", "fail", "unknown")
+POSTURE_BACKENDS = ("macos-pf", "macos-application-firewall", "windows-defender", "unknown")
+
+
+def clean_firewall(value) -> dict:
+    """The runner's posture object (docs/SPEC-networking.md 5.2), parsed field by field: an unknown status or backend
+    becomes "unknown", wrong types become null, details are at most 12 short strings."""
+    raw = value if isinstance(value, dict) else {}
+
+    def flag(name):
+        return raw[name] if isinstance(raw.get(name), bool) else None
+    details = [d[:160] for d in raw.get("details") or [] if isinstance(d, str)][:12] if isinstance(raw.get("details"), list) else []
+    return {"checked_at": _number_or_none(raw.get("checked_at"), 1e12),
+            "age_s": _number_or_none(raw.get("age_s"), 365 * 86400),
+            "status": raw["status"] if raw.get("status") in POSTURE_STATUS else "unknown",
+            "backend": raw["backend"] if raw.get("backend") in POSTURE_BACKENDS else "unknown",
+            "runner_tailnet_only": flag("runner_tailnet_only"), "engine_loopback_only": flag("engine_loopback_only"),
+            "ipv6_wildcard": flag("ipv6_wildcard"), "details": details}
+
+
+def clean_inventory(value) -> dict:
+    hardware = value.get("hardware") if isinstance(value, dict) and isinstance(value.get("hardware"), dict) else {}
+    return {"hardware": {k: _number_or_none(hardware.get(k), 1e6) for k in ("ram_gb", "cores")}}
 
 
 MAX_HEALTH_JOBS = 32
@@ -202,6 +225,10 @@ def clean_health(body: dict) -> dict:
     out = {k: v for k, v in body.items() if k in HEALTH_FIELDS}
     if "codex_rate_limits" in out:
         out["codex_rate_limits"] = budget.clean_codex_rate_limits(out["codex_rate_limits"])
+    if "firewall" in out:
+        out["firewall"] = clean_firewall(out["firewall"])
+    if "inventory" in out:
+        out["inventory"] = clean_inventory(out["inventory"])
     if "services" in out:  # Part G 7: {name: {"up": bool}} for claude-mem / controller worker, nothing else kept
         raw = out["services"] if isinstance(out["services"], dict) else {}
         out["services"] = {k: {"up": bool(v.get("up"))} for k, v in raw.items()
@@ -2176,6 +2203,29 @@ def set_ceiling(node: str, m: ModeIn) -> dict:
             raise HTTPException(404, f"unknown or ambiguous node {node}")
     emit(None, "node.ceiling", {"node": node, "mode": m.mode})
     return {"node": node, "ceiling": m.mode}
+
+
+@router.post("/api/nodes/{node}/posture/check")
+async def posture_check(node: str) -> dict:
+    """"Check now" (docs/SPEC-networking.md 5.2): asks the node's runner to re-read its firewall posture. The runner
+    only runs allowlisted read-only commands; nothing here or there applies a change."""
+    with db() as c:
+        found = c.execute("SELECT * FROM nodes WHERE id=? OR name=?", (node, node)).fetchone()
+    if not found:
+        raise HTTPException(404, f"unknown node {node}")
+    row = dict(found)
+    firewall = clean_firewall(await runner_call(row, "POST", "/posture/check", {}, timeout=15))
+    with db() as c:
+        current = c.execute("SELECT runner FROM nodes WHERE id=?", (row["id"],)).fetchone()
+        try:
+            stored = json.loads(current["runner"]) if current and current["runner"] else None
+        except (ValueError, TypeError):
+            stored = None
+        if isinstance(stored, dict):
+            stored["firewall"] = firewall
+            stored["firewall_seen_at"] = time.time()  # this controller's clock; live.firewall_view ages from it
+            c.execute("UPDATE nodes SET runner=? WHERE id=?", (json.dumps(stored), row["id"]))
+    return {"node": row["id"], "firewall": firewall}
 
 
 @router.get("/api/usage")

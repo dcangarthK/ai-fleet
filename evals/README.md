@@ -6,7 +6,7 @@ Finds which local models are good enough for each fleet role, on your own hardwa
 python3 evals/run_evals.py --models qwen2.5-coder:7b,qwen3:8b
 ```
 
-Options: `--roles coder,reviewer,fast,grounded`, `--ollama http://<node>:11434` (evaluate on another node),
+Options: `--roles coder,reviewer,fast,grounded`, `--runner http://<node>:11436` with the runner token in `FLEET_EVAL_RUNNER_TOKEN` (evaluate on another node; the engine is loopback-only, so the runner relays),
 `--repeat N`, `--out evals/results`. Results accumulate in `evals/results/results.json`, so you can add models
 one run at a time; `evals/results/LEADERBOARD.md` is rewritten each run.
 

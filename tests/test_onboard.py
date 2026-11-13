@@ -625,7 +625,8 @@ class PipedEndToEnd(OnboardHarness):
 
         la = Path(self.env()["HOME"]) / "Library" / "LaunchAgents"
         plists = {p.name: plistlib.loads(p.read_bytes()) for p in la.glob("*.plist")}
-        self.assertEqual(sorted(plists), [f"local.ai-fleet.{j}.plist" for j in ("info", "ollama", "runner", "scan")])
+        self.assertEqual(sorted(plists), [f"local.ai-fleet.{j}.plist" for j in ("ollama", "runner", "scan")],
+                         "no :11435 inventory server (docs/SPEC-networking.md 5.1)")
         for name, data in plists.items():
             self.assertEqual(data["Label"], name[:-len(".plist")])
             raw = (la / name).read_text()
@@ -635,14 +636,10 @@ class PipedEndToEnd(OnboardHarness):
         fleet = str(self.fleet)
         ollama = plists["local.ai-fleet.ollama.plist"]
         self.assertEqual(ollama["ProgramArguments"], [str(self.bin / "ollama"), "serve"])
-        self.assertEqual(ollama["EnvironmentVariables"]["OLLAMA_HOST"], f"{self.IP}:11434")
+        self.assertEqual(ollama["EnvironmentVariables"]["OLLAMA_HOST"], "127.0.0.1:11434")
         self.assertEqual(ollama["EnvironmentVariables"]["OLLAMA_MAX_LOADED_MODELS"], "1")
         self.assertEqual(ollama["EnvironmentVariables"]["OLLAMA_NUM_PARALLEL"], "1")
         self.assertEqual(ollama["EnvironmentVariables"]["OLLAMA_CONTEXT_LENGTH"], "16384")
-        info = plists["local.ai-fleet.info.plist"]
-        self.assertEqual(info["ProgramArguments"][1:],
-                         ["-m", "http.server", "11435", "--bind", self.IP, "--directory", fleet + "/public"])
-        self.assertTrue(info["RunAtLoad"] and info["KeepAlive"])
         scan = plists["local.ai-fleet.scan.plist"]
         self.assertEqual(scan["ProgramArguments"], ["/bin/bash", fleet + "/onboard.sh", "--scan-only"])
         self.assertEqual(scan["StartInterval"], 3600)
@@ -653,7 +650,7 @@ class PipedEndToEnd(OnboardHarness):
         home = self.env()["HOME"]
         self.assertEqual(env["RUNNER_BIND"], f"{self.IP}:11436")
         self.assertEqual(env["FLEET_DIR"], fleet)
-        self.assertEqual(env["OLLAMA_URL"], f"http://{self.IP}:11434")
+        self.assertEqual(env["OLLAMA_URL"], "http://127.0.0.1:11434")
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], home + "/.claude-fleet")
         self.assertEqual(env["CODEX_HOME"], home + "/.codex-fleet")
         self.assertTrue(runner["RunAtLoad"] and runner["KeepAlive"])

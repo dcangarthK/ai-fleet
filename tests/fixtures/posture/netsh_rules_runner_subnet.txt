@@ -1,0 +1,9 @@
+
+Rule Name:                            AI Fleet runner (LAN)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Protocol:                             TCP
+LocalPort:                            11436
+RemoteIP:                             192.168.0.0/255.255.0.0
+Action:                               Allow

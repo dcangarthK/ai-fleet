@@ -43,7 +43,7 @@ API: `GET /api/skills` (current versions + bindings) [view] · `GET /api/skills/
 - `eval_runs(id, model, node, roles JSON, state queued|running|done|failed, started_at, ended_at, scores JSON,
   errors JSON, log_tail)`.
 - `POST /api/evals` `{model, node, roles?}` [operate]: runs `evals/run_evals.py --models <model> --roles <roles>
-  --ollama http://<node ip>:11434` as a subprocess on the master (master node → `127.0.0.1`), one at a time
+  --runner http://<node ip>:11436` (token in `FLEET_EVAL_RUNNER_TOKEN`; the engine is loopback-only since networking N2) as a subprocess on the master (master node → `127.0.0.1`), one at a time
   (others queue). The model must be installed on that node (409 otherwise). On exit, scores come from
   `results.json` (the run's own entry, matched by `evaluated_at` after start).
 - `GET /api/evals` [view] → `{runs: [...], leaderboard: [<results.json rows, slimmed: model, roles{score},

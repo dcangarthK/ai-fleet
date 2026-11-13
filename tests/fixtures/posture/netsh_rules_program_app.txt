@@ -1,0 +1,21 @@
+
+Rule Name:                            Steam (TCP-In)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Profiles:                             Private
+Protocol:                             TCP
+LocalPort:                            Any
+RemoteIP:                             Any
+Program:                              C:\Program Files (x86)\Steam\steam.exe
+Action:                               Allow
+
+Rule Name:                            AI Fleet runner (master only)
+----------------------------------------------------------------------
+Enabled:                              Yes
+Direction:                            In
+Protocol:                             TCP
+LocalPort:                            11436
+RemoteIP:                             100.64.1.2/255.255.255.255
+Program:                              Any
+Action:                               Allow

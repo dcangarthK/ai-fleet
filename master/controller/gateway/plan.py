@@ -1,6 +1,7 @@
 """Namespaced WAN/VLAN policy plan and dry-run diff. Pure functions; never touches a router."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .adapter import NAMESPACE, Capabilities, Rule
@@ -27,8 +28,9 @@ def build_plan(policy: Policy, caps: Capabilities) -> tuple[list[Rule], list[str
     if not caps.wan_egress_rules:
         skipped.append("wan egress rules unsupported: egress policy skipped")
     else:
-        for i, (dst, proto, port) in enumerate(policy.wan_allow):
-            rules.append(Rule(f"{NAMESPACE}wan-allow-{i}", "allow", policy.worker_vlan, dst, proto, port))
+        for dst, proto, port in policy.wan_allow:  # id from content, so reordering the list changes nothing
+            slug = re.sub(r"[^a-z0-9]+", "-", f"{dst}-{proto}-{port}".lower()).strip("-")
+            rules.append(Rule(f"{NAMESPACE}wan-allow-{slug}", "allow", policy.worker_vlan, dst, proto, port))
         if policy.block_wan_default:
             if not policy.wan_allow:
                 skipped.append("wan default deny refused: empty allowlist")
@@ -38,8 +40,9 @@ def build_plan(policy: Policy, caps: Capabilities) -> tuple[list[Rule], list[str
 
 
 def merge(current: list[Rule], desired: list[Rule]) -> list[Rule]:
-    """Full list to install: every unmanaged rule untouched and in order, managed rules replaced by desired."""
-    return desired + [r for r in current if not r.managed]
+    """Full list to install: every unmanaged rule untouched, in order and in front (first match wins, so a fleet
+    allow can never beat an owner deny); managed rules replaced by desired and placed after them."""
+    return [r for r in current if not r.managed] + desired
 
 
 def diff_plan(current: list[Rule], desired: list[Rule]) -> dict:

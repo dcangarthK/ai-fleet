@@ -22,6 +22,7 @@ class Rule:
 
     @property
     def managed(self) -> bool:
+        """Fleet-owned means only "id starts with NAMESPACE". An owner rule using that prefix would be replaced."""
         return self.id.startswith(NAMESPACE)
 
 

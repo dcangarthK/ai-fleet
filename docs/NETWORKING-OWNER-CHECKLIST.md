@@ -15,7 +15,8 @@ router: enrolment never depends on it.
       before any WAN allowlist exists. Do not enable a default WAN block until that list is complete.
 - [ ] Back up the router configuration before any change.
 - [ ] Review the dry-run diff once a real driver exists. Every fleet rule id starts with `aifleet-`; any other rule
-      is yours and is never edited.
+      is yours and is never edited. Do not name any of your own rules with that prefix: they would be replaced.
+      Fleet rules are placed after your rules, so your denies always win over fleet allows.
 - [ ] Approve the apply yourself (the `owner_approved` flag); keep a second path into the router open during the
       confirm window.
 - [ ] After apply, check the canary result and that master, workers and the console are still reachable. If not,

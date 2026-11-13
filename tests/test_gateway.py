@@ -41,7 +41,7 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(all(o in r.lkg for o in OWNER))
         self.assertTrue(all(x.managed for x in r.lkg if x not in OWNER))
         # removing the policy later removes only managed rules
-        res = apply_plan(r, Policy(deny_lateral=False), [], dry_run=False, owner_approved=True)
+        res = apply_plan(r, Policy(deny_lateral=False), [("workers", "wan", "443", True)], dry_run=False, owner_approved=True)
         self.assertEqual(res.status, "applied")
         self.assertEqual(r.lkg, OWNER)
 
@@ -52,7 +52,8 @@ class GatewayTests(unittest.TestCase):
 
     def test_bad_canary_rolls_back(self):
         r = FakeRouter(OWNER)
-        bad = [("workers", "wan", "443", False)]  # expects unreachable, but the allow rule makes it reachable
+        r.blocked.add(("workers", "master", "8443"))  # canary expects reachable, router says no
+        bad = [("workers", "wan", "443", True), ("workers", "master", "8443", True)]
         res = apply_plan(r, POLICY, bad, dry_run=False, owner_approved=True)
         self.assertEqual(res.status, "rolled_back")
         self.assertEqual(r.lkg, OWNER)
@@ -113,8 +114,88 @@ class GatewayTests(unittest.TestCase):
             with self.assertRaises(NotImplementedError):
                 d.probe("a", "b", "1")
         # a stub driver through apply_plan fails safe, no exception escapes
-        res = apply_plan(OpenWrtDriver(owner_approved=True), POLICY, [], dry_run=False, owner_approved=True)
-        self.assertEqual(res.status, "rolled_back")
+        res = apply_plan(OpenWrtDriver(owner_approved=True), POLICY, CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "error")  # nothing staged, so no rollback was attempted
+
+    def test_dry_run_error_never_calls_rollback(self):
+        for name in ("discover", "read_rules"):
+            r = FakeRouter(OWNER)
+            def boom(*a): raise OSError("down")
+            setattr(r, name, boom)
+            res = apply_plan(r, POLICY, CANARY_OK)
+            self.assertEqual(res.status, "error")
+            self.assertNotIn("rollback", r.calls)
+            self.assertNotIn("stage", r.calls)
+            self.assertEqual(r.lkg, OWNER)
+
+    def test_error_before_stage_with_approval_never_rolls_back(self):
+        r = FakeRouter(OWNER)
+        def boom(*a): raise OSError("down")
+        r.read_rules = boom
+        res = apply_plan(r, POLICY, CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "error")
+        self.assertNotIn("rollback", r.calls)
+
+    def test_empty_or_negative_only_canaries_refused(self):
+        for canaries in ([], [("workers", "workers", "11436", False)]):
+            r = FakeRouter(OWNER)
+            res = apply_plan(r, POLICY, canaries, dry_run=False, owner_approved=True)
+            self.assertEqual(res.status, "refused")
+            self.assertNotIn("stage", r.calls)
+
+    def test_window_expiring_during_canaries_is_not_applied(self):
+        clock = Clock()
+        r = FakeRouter(OWNER, now=clock)
+        orig = r.probe
+        def slow_probe(*a):
+            out = orig(*a)
+            clock.t += 100  # canary took longer than the confirm window
+            return out
+        r.probe = slow_probe
+        res = apply_plan(r, POLICY, [("workers", "wan", "443", True)], dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "reverted")
+        self.assertEqual(r.lkg, OWNER)
+
+    def test_window_expiring_at_confirm_is_not_applied(self):
+        clock = Clock()
+        r = FakeRouter(OWNER, now=clock)
+        orig = r.confirm
+        def late_confirm():
+            clock.t += 100
+            orig()
+        r.confirm = late_confirm
+        res = apply_plan(r, POLICY, CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "reverted")
+        self.assertEqual(r.lkg, OWNER)
+
+    def test_owner_deny_beats_overlapping_fleet_allow(self):
+        owner = [Rule("owner-deny", "deny", "workers", "wan", "tcp", "443")]
+        r = FakeRouter(owner)
+        res = apply_plan(r, POLICY, [("workers", "master", "8443", True)], dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "applied")
+        self.assertEqual(r.lkg[0], owner[0])  # owner rules stay in front
+        self.assertFalse(r.probe("workers", "wan", "443"))
+
+    def test_unsupported_router_still_previews_diff(self):
+        caps = Capabilities(reachable=True, vlan=True)  # vlan only
+        res = apply_plan(FakeRouter(OWNER, caps=caps), POLICY, CANARY_OK)
+        self.assertEqual(res.status, "unsupported")
+        self.assertIn("+ aifleet-deny-lateral", res.diff)
+
+    def test_allow_rule_ids_ignore_order(self):
+        caps = FakeRouter().discover()
+        a, _ = build_plan(Policy(wan_allow=[("a", "tcp", "1"), ("b", "udp", "2")]), caps)
+        b, _ = build_plan(Policy(wan_allow=[("b", "udp", "2"), ("a", "tcp", "1")]), caps)
+        self.assertEqual({x.id for x in a}, {x.id for x in b})
+
+    def test_enrolment_does_not_call_router(self):
+        r = FakeRouter(OWNER)
+        self.assertTrue(enrolment_allowed(r))
+        self.assertEqual(r.calls, [])
+
+    def test_dry_run_notes_prefix_ownership(self):
+        res = apply_plan(FakeRouter(OWNER), POLICY, CANARY_OK)
+        self.assertIn("aifleet-", res.detail)
 
     def test_wan_default_deny_refused_without_allowlist(self):
         rules, skipped = build_plan(Policy(block_wan_default=True), FakeRouter().discover())

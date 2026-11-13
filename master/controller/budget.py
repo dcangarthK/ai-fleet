@@ -1097,17 +1097,18 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
     def place(of_agent, of_key, of_ident, of_entry):
         """(account, wait, reason) on the first account that isn't limited, preferring one with a free slot;
         None when every account is limited. Also returns the first limit reason seen."""
-        chosen, first = None, (None, None)
+        chosen, first = None, (None, None, False)
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
             # Requirement 10: fresh usage near the window limit reserves the remaining headroom.  This watcher is
             # live-mode only while shadow mode continues to describe the existing placement decisions.
             near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
+            watched = near is not None
             if near and not until:
                 until, why = near, f"waiting for {label(of_key)} at {clock(near)}"
             if until:
                 if first[0] is None or until < first[0]:
-                    first = (until, why)
+                    first = (until, why, watched)
                 continue
             maximum = of_entry.get("max_concurrent")
             if maximum is None or of_key is None or running_count(of_key, account=account) < maximum:
@@ -1135,7 +1136,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
     decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": None,
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
-        placed, (until, why) = place(agent, key, decision["identity"], entry)
+        placed, (until, why, watched) = place(agent, key, decision["identity"], entry)
         if placed:
             decision.update(account=placed[0], wait=placed[1], reason=placed[2])
         else:
@@ -1165,7 +1166,8 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                     rerouted = True
                     break
             if not rerouted:
-                decision.update(wait="limit", reason=why, until=until, not_before=until)
+                decision.update(wait="limit", reason=why, until=until,
+                                not_before=until if watched else None)
         if decision["key"]:
             maybe_soft_notice(rules, decision["key"], now)
     decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)

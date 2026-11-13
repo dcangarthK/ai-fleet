@@ -58,9 +58,88 @@ class NoPushTests(Base):
 
     def test_every_remote_style_and_agent_is_covered(self):
         env = self.m.agent_env("claude", {**os.environ, **GIT_ENV}, None)
-        for url in ("https://example.invalid/r.git", "git@example.invalid:r.git", "ssh://h/r.git", str(self.remote)):
+        urls = ("https://example.invalid/r.git", "git@example.invalid:r.git", "ssh://h/r.git", str(self.remote),
+                "git+ssh://h/r.git", "ssh+git://h/r.git", "git+https://h/r.git", "user@h.invalid:path/r.git",
+                "h.invalid:r.git", "../remote.git", "r.git", "file://" + str(self.remote))
+        for url in urls:
             git(self.work, "remote", "set-url", "origin", url)
-            self.assertNotEqual(self.push(env).returncode, 0, url)
+            done = self.push(env)
+            self.assertNotEqual(done.returncode, 0, url)
+            self.assertIn("fleet-no-push", done.stderr, url)  # N4: refused by the rewrite, not by chance
+        self.assertEqual(git(self.remote, "branch", "--list").stdout.strip(), "")
+
+    def test_repo_local_config_cannot_reenable_push(self):
+        env = self.m.agent_env("claude", {**os.environ, **GIT_ENV}, None)
+        git(self.work, "config", "credential.helper", "store")
+        git(self.work, "remote", "set-url", "origin", "https://h.invalid/r.git")
+        self.assertIn("fleet-no-push", self.push(env).stderr)
+        values = git(self.work, "config", "--get-all", "credential.helper", env=env).stdout.splitlines()
+        self.assertEqual(values[-1], "")  # the last value is the reset, whatever .git/config added before it
+        # Known residual (docs/SPEC-capacity-placement.md 3a): a repo-local longer pushInsteadOf prefix or a pushurl.
+
+    def test_existing_git_config_count_is_kept(self):
+        env = self.m.agent_env("claude", {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "a.b",
+                                          "GIT_CONFIG_VALUE_0": "c"}, None)
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "3")
+        self.assertEqual((env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), ("a.b", "c"))
+
+    def test_owner_global_config_is_included_first_and_fleet_rules_win(self):
+        home = self.base / "home"
+        home.mkdir()
+        owner = home / ".gitconfig"
+        owner.write_text("[user]\n\tname = Owner Name\n[alias]\n\tzz = status\n[credential]\n\thelper = store\n"
+                         "[url \"git@host:\"]\n\tpushInsteadOf = https://host/\n")
+        saved = {k: os.environ.get(k) for k in ("HOME", "GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME")}
+        os.environ["HOME"] = str(home)
+        os.environ.pop("GIT_CONFIG_GLOBAL", None)
+        try:
+            env = self.m.agent_env("codex", dict(os.environ), None)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        text = Path(env["GIT_CONFIG_GLOBAL"]).read_text()
+        self.assertLess(text.index("[include]"), text.index("[credential]"))  # owner first, fleet rules after
+        self.assertLess(text.index("[include]"), text.index("pushInsteadOf"))
+        copy = self.fleet / "worker.owner.gitconfig"
+        self.assertIn(str(copy), text)  # the include points at a sanitized copy, not the owner's file itself
+        kept = copy.read_text()
+        self.assertNotIn("pushInsteadOf", kept)  # the owner's own rewrite can't beat the catch-all
+        self.assertIn("Owner Name", kept)
+        self.assertEqual(git(self.work, "config", "user.name", env=env).stdout.strip(), "Owner Name")
+        self.assertEqual(git(self.work, "config", "alias.zz", env=env).stdout.strip(), "status")
+        self.assertEqual(git(self.work, "config", "--get-all", "credential.helper", env=env).stdout.splitlines()[-1], "")
+        git(self.work, "remote", "set-url", "origin", "https://host/r.git")  # the owner's own rewrite can't win
+        done = self.push(env)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("fleet-no-push", done.stderr)
+
+    def test_old_or_missing_git_refuses_to_launch_the_worker(self):
+        saved = list(runner._GIT_CHECK)
+        try:
+            for stdout, code in (("git version 2.31.1\n", 0), ("git version 1.8.3\n", 0), ("garbage", 0), ("", 1)):
+                runner._GIT_CHECK[:] = []
+                real = runner.subprocess.run
+                runner.subprocess.run = lambda *a, _o=stdout, _c=code, **k: subprocess.CompletedProcess(a, _c, _o, "")
+                try:
+                    with self.assertRaises(RuntimeError, msg=stdout):
+                        self.m.agent_env("claude", dict(os.environ), None)
+                finally:
+                    runner.subprocess.run = real
+            runner._GIT_CHECK[:] = []
+            runner.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git"))
+            try:
+                with self.assertRaises(RuntimeError):
+                    self.m.agent_env("claude", dict(os.environ), None)
+            finally:
+                runner.subprocess.run = real
+            runner._GIT_CHECK[:] = []
+            ok, _detail = runner.git_version_check()
+            self.assertTrue(ok)  # this machine's git is new enough
+        finally:
+            runner._GIT_CHECK[:] = saved
 
     def test_credentials_are_dropped_and_config_is_fleet_owned(self):
         env = self.m.agent_env("claude", {"SSH_AUTH_SOCK": "x", "GIT_ASKPASS": "y", "SSH_ASKPASS": "z",
@@ -71,6 +150,7 @@ class NoPushTests(Base):
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], str(self.fleet / "worker.gitconfig"))
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertIn("helper =", Path(env["GIT_CONFIG_GLOBAL"]).read_text())
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "2")
 
     def test_local_commits_still_work_for_a_worker(self):
         env = self.m.agent_env("codex", dict(os.environ), None)

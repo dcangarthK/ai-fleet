@@ -115,6 +115,31 @@ class HealSafetyTests(Base):
         self.assertEqual(out[0]["action"], "alert")  # successful attempts count too
         self.assertEqual((len(calls), len(events_of("service.alert"))), (2, before + 1))
 
+    def test_n6_cooldown_is_ttl_plus_poll_and_blocks_a_second_attempt(self):
+        self.assertEqual(loopheal.cooldown_seconds(), tasks.HEARTBEAT_TTL + tasks.NODE_POLL_SECONDS)
+        calls = []
+        loopheal.heal_tick(self.svc(), lambda n, s: calls.append(1), lambda *a: True, NOW, grace=False)
+        out = loopheal.heal_tick(self.svc(), lambda n, s: calls.append(1), lambda *a: True,
+                                 NOW + loopheal.cooldown_seconds() - 0.5, grace=False)
+        self.assertEqual((out[0]["action"], len(calls)), ("cooldown", 1))
+        out = loopheal.heal_tick(self.svc(), lambda n, s: calls.append(1), lambda *a: True,
+                                 NOW + loopheal.cooldown_seconds() + 0.5, grace=False)
+        self.assertEqual((out[0]["action"], len(calls)), ("restarted", 2))  # the second attempt after the cooldown
+
+    def test_n9_a_new_failure_after_recovery_alerts_again_within_the_window(self):
+        before = len(events_of("service.alert"))
+        down, up = self.svc(), self.svc(missed_beats=0)
+        step = loopheal.cooldown_seconds() + 1
+        for i in range(3):  # two attempts, then the alert
+            loopheal.heal_tick(down, lambda *a: None, lambda *a: False, NOW + i * step, grace=False)
+        self.assertEqual(len(events_of("service.alert")), before + 1)
+        loopheal.heal_tick(down, lambda *a: None, lambda *a: False, NOW + 3 * step, grace=False)
+        self.assertEqual(len(events_of("service.alert")), before + 1)  # still one: deduped
+        out = loopheal.heal_tick(up, lambda *a: None, lambda *a: True, NOW + 4 * step, grace=False)
+        self.assertEqual(out[0]["action"], "recovered")
+        loopheal.heal_tick(down, lambda *a: None, lambda *a: False, NOW + 5 * step, grace=False)
+        self.assertEqual(len(events_of("service.alert")), before + 2)  # recovered, then failed again: a new alert
+
     def test_h1_runner_is_healthy_only_after_a_newer_heartbeat(self):
         loopheal._RESTARTED_AT[("n1", "runner")] = 1000.0
         old = {"heartbeat_at": 1001.0, "polled_at": None}  # inside the 2 s pad: the old process

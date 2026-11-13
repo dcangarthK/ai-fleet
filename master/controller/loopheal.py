@@ -212,8 +212,18 @@ def needs_restart(svc: dict, now: float) -> str | None:
     return None
 
 
+def _alerted(now: float, node: str, service: str) -> bool:
+    """An alert in the window that no later `recovered` row has closed: the dedupe for service.alert."""
+    with db() as c:
+        alert = c.execute("SELECT MAX(id) FROM service_heal WHERE node=? AND service=? AND outcome='alert' AND ts>?",
+                          (node, service, now - RESTART_WINDOW)).fetchone()[0]
+        recovered = c.execute("SELECT MAX(id) FROM service_heal WHERE node=? AND service=? AND outcome='recovered'",
+                              (node, service)).fetchone()[0]
+    return alert is not None and (recovered is None or alert > recovered)
+
+
 def _alert(now: float, node: str, name: str, why: str, detail: str) -> None:
-    if not _recent(now, node, name, "alert"):  # once per window
+    if not _alerted(now, node, name):  # once per window, and again if the service recovered and failed anew
         _record(now, node, name, "alert")
         emit(None, "service.alert", {"node": node, "service": name, "reason": why, "detail": detail})
 

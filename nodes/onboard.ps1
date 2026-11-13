@@ -1085,6 +1085,7 @@ class JobManager:
         self.worktrees_dir = self.root / "worktrees"
         self.ollama_url = ollama_url.rstrip("/")
         self.lock = threading.RLock()
+        git_version_check()  # decided once here, so a launch never depends on running git
         self.jobs = {}
         self.gate_threads = set()
         self.clock = time.time  # runner clock for idle_s; tests replace these three
@@ -3686,34 +3687,55 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("POST")
 
 
-NO_PUSH_SCHEMES = ("https://", "http://", "ssh://", "git://", "file://", "git@", "/", "./", "../", "~")
+MIN_GIT = (2, 32)  # GIT_CONFIG_GLOBAL is honoured from 2.32 (GIT_CONFIG_COUNT from 2.31)
 PUSH_ENV_DROP = ("SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_CONFIG_SYSTEM")
+_GIT_CHECK = []  # [(ok, detail)] once decided; JobManager.__init__ decides it at startup, not at launch
 
 
-def _git_identity():
-    out = {}
-    for key in ("user.name", "user.email"):
-        try:
-            done = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True, timeout=5)
-            value = done.stdout.strip() if done.returncode == 0 else ""
-        except Exception:  # any failure (no git, a patched subprocess in tests) just means the default identity
-            value = ""
-        out[key] = value
-    return out
+def git_version_check():
+    """(ok, detail): git is present and at least 2.32, else the no-push config would be ignored (fail closed)."""
+    if _GIT_CHECK:
+        return _GIT_CHECK[0]
+    try:
+        done = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=5)
+        match = re.search(r"(\d+)\.(\d+)", done.stdout or "")
+        if done.returncode != 0 or not match:
+            result = (False, "cannot read the git version")
+        else:
+            found = (int(match.group(1)), int(match.group(2)))
+            result = (found >= MIN_GIT, "git %d.%d" % found if found >= MIN_GIT else
+                      "git %d.%d is older than %d.%d" % (found + MIN_GIT))
+    except Exception as exc:  # no git at all
+        result = (False, "git not usable: %s" % error_line(exc))
+    _GIT_CHECK.append(result)
+    return result
 
 
 def no_push_config_path():
     return Path(os.environ.get("FLEET_DIR", str(Path.home() / ".ai-fleet"))).expanduser() / "worker.gitconfig"
 
 
+def owner_global_gitconfig():
+    """The owner's own global git config, if any: GIT_CONFIG_GLOBAL as the runner got it, else the usual places."""
+    own = os.environ.get("GIT_CONFIG_GLOBAL")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    for candidate in ([own] if own else []) + [str(Path.home() / ".gitconfig"), str(Path(xdg) / "git" / "config")]:
+        if candidate and os.path.isfile(candidate) and Path(candidate) != no_push_config_path():
+            return candidate
+    return None
+
+
 def ensure_no_push_config():
-    """The fleet-owned git config every worker uses (GIT_CONFIG_GLOBAL): every push URL is rewritten to a scheme git
-    can't speak, and no credential helper is set. The owner's name and email are copied so commits still work."""
-    ident = _git_identity()
-    lines = ['[url "fleet-no-push://"]'] + ["\tpushInsteadOf = " + scheme for scheme in NO_PUSH_SCHEMES]
-    lines += ["[credential]", "\thelper =", "[user]",
-              "\tname = " + (ident["user.name"] or "fleet worker"),
-              "\temail = " + (ident["user.email"] or "fleet-worker@localhost")]
+    """The fleet-owned git config every worker uses (GIT_CONFIG_GLOBAL). Order matters, later lines win: a fallback
+    identity, then an [include] of the owner's own global config (name, email, aliases keep working), then the
+    fleet's credential reset and a catch-all `pushInsteadOf` with an EMPTY prefix (matches every URL, verified
+    against git 2.47 for ssh, https, git+ssh, user@host:path, host:path and relative paths) rewriting pushes to a
+    scheme git can't speak."""
+    lines = ["[user]", "\tname = fleet worker", "\temail = fleet-worker@localhost"]
+    owner = owner_global_gitconfig()
+    if owner:
+        lines += ["[include]", "\tpath = " + owner.replace("\\", "/")]
+    lines += ["[credential]", "\thelper =", '[url "fleet-no-push://"]', "\tpushInsteadOf ="]
     text = "\n".join(lines) + "\n"
     path = no_push_config_path()
     try:
@@ -3729,7 +3751,12 @@ def ensure_no_push_config():
 
 def no_push_env(env):
     """Enforce no-push below the agent, for every agent and mode (Claude deny rules are only a second layer):
-    no push credentials in the environment, and git reads the fleet's config instead of the user's."""
+    no push credentials in the environment, git reads the fleet's config instead of the user's, and the same two
+    rules are also set as command-line config (GIT_CONFIG_COUNT), which outranks a repo-local .git/config.
+    Best effort at the git level: see docs/SPEC-capacity-placement.md 3a (No-push)."""
+    ok, detail = git_version_check()
+    if not ok:  # fail closed: an old git would ignore GIT_CONFIG_GLOBAL and a worker could push
+        raise RuntimeError("%s; refusing to launch a worker (needs git %d.%d or newer)" % (detail, *MIN_GIT))
     env = dict(env)
     for key in PUSH_ENV_DROP:
         env.pop(key, None)
@@ -3738,6 +3765,14 @@ def no_push_env(env):
         raise RuntimeError("cannot write the worker git config %s; refusing to launch a worker" % no_push_config_path())
     env["GIT_CONFIG_GLOBAL"] = str(path)
     env["GIT_CONFIG_NOSYSTEM"] = "1"  # system gitconfig credential helpers (osxkeychain, manager) stay out
+    try:
+        count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        count = 0
+    for offset, (key, value) in enumerate((("credential.helper", ""), ("url.fleet-no-push://.pushInsteadOf", ""))):
+        env["GIT_CONFIG_KEY_%d" % (count + offset)] = key
+        env["GIT_CONFIG_VALUE_%d" % (count + offset)] = value
+    env["GIT_CONFIG_COUNT"] = str(count + 2)
     return env
 
 

@@ -101,6 +101,16 @@ tier order and the independence rules that already exist. Fable never builds, fi
   controller's startup grace (tasks.py:251-254), so a controller restart cannot start a restart loop.
 - **No duplicate fix loop.** The gate bounce (requirement 6) reuses the existing fix rounds in pipeline.py and does
   not add a second counter.
+- **No-push (requirement 8 events, runner).** Workers never push, in any mode. This is git-level best effort, not a
+  sandbox:
+  - every worker gets `GIT_CONFIG_GLOBAL` = the fleet's `worker.gitconfig` (the owner's global config is
+    `[include]`d first, then a credential reset and a catch-all empty-prefix `pushInsteadOf` that rewrites every push
+    URL to an unusable scheme), plus the same two rules as `GIT_CONFIG_COUNT` command-line config, which outranks a
+    repo-local `.git/config`; `SSH_AUTH_SOCK`, `GIT_ASKPASS`, `SSH_ASKPASS` and `GIT_SSH_COMMAND` are dropped;
+  - git older than 2.32, or a `worker.gitconfig` that can't be written, refuses the launch (fail closed);
+  - out of scope: a worker with a shell and credentials on disk (a token file, a repo-local config with a longer
+    `pushInsteadOf` prefix, a repo-local `remote.<name>.pushurl`, which git does not rewrite, a different git binary) can still publish. The controller merges locally, so no worker
+    needs a remote. The Claude deny rules stay as a second layer.
 - **Hold storage.** `hold` is a column on the budget rules, which only the owner can write, with keys like the
   existing ones (budget.py:150, :182).
 

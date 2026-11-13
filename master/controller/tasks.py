@@ -161,7 +161,7 @@ NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
-                 "age_s", "codex_rate_limits", "capacity"}
+                 "age_s", "codex_rate_limits", "capacity", "services"}
 
 
 MAX_HEALTH_JOBS = 32
@@ -202,6 +202,10 @@ def clean_health(body: dict) -> dict:
     out = {k: v for k, v in body.items() if k in HEALTH_FIELDS}
     if "codex_rate_limits" in out:
         out["codex_rate_limits"] = budget.clean_codex_rate_limits(out["codex_rate_limits"])
+    if "services" in out:  # Part G 7: {name: {"up": bool}} for claude-mem / controller worker, nothing else kept
+        raw = out["services"] if isinstance(out["services"], dict) else {}
+        out["services"] = {k: {"up": bool(v.get("up"))} for k, v in raw.items()
+                           if isinstance(k, str) and len(k) <= 40 and isinstance(v, dict) and "up" in v}
     if "capacity" in out:  # Part G 1: observed_at is on this controller's clock (the runner's age_s, not its time)
         out["capacity"] = capacity_usage.clean_capacity(out["capacity"], time.time())
     jobs = clean_jobs(body.get("jobs")) if "jobs" in body else None
@@ -1088,6 +1092,8 @@ async def poll_loop() -> None:
             await asyncio.gather(*(poll_task(i) for i in ids), return_exceptions=True)
             import capacity
             await capacity.tick()
+            import loopheal
+            await loopheal.tick()
             for task_id in [i for i in list(_locks) if i in finished and not _locks[i].locked()]:
                 _locks.pop(task_id, None)
         except Exception as e:  # keep polling whatever happens
@@ -1596,7 +1602,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             if allocated:
                 emit(task_id, "task.allocated", {"title": part_title, "agent": agent, "model": model,
                                                  "label": slot["label"] if slot else None, "node": node["id"],
-                                                 "kind": kind})
+                                                 "kind": kind,
+                                                 "reason": decision.get("reason") or "placed by rank_slots"})
             if decision["routed_from"]:
                 budget.log_decision("rerouted", f"{decision['routed_from']} is limited; sent to {decision['identity']}",
                                     task_id=task_id, title=part_title, routed_from=decision["routed_from"],

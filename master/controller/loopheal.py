@@ -221,3 +221,101 @@ def heal_tick(services: list[dict], restart, health, now: float | None = None, g
         emit(None, "service.restarted" if ok else "service.restart_failed", {"node": node, "service": name, "reason": why})
         results.append({"node": node, "service": name, "action": "restarted" if ok else "restart_failed"})
     return results
+
+
+# ---------- 7. wiring: services from heartbeats, restart through the runner, the periodic tick ----------
+
+_DOWN_SINCE: dict[tuple[str, str], float] = {}  # only the start of a health failure; restart counters stay in fleet.db
+
+
+def collect_services(nodes: list[dict], now: float) -> list[dict]:
+    """Service rows for heal_tick from node heartbeats. runner: heartbeat freshness (a missed beat = one
+    HEARTBEAT_TTL). ollama: the runner's metrics say it is down. claude-mem and the controller worker: only when
+    the runner's `services` report says `up: false`. Nodes that never sent a heartbeat are left alone."""
+    import tasks
+    rows, live_keys = [], set()
+    for node in nodes:
+        if node.get("status") != "approved" or not node.get("runner"):
+            continue
+        beat = node.get("heartbeat_at")
+        report = node["runner"]
+        checks = {}
+        if beat is not None:
+            checks["runner"] = (int(max(0.0, now - beat) // tasks.HEARTBEAT_TTL), False)
+        else:
+            checks["runner"] = (0, False)
+        ollama = (report.get("metrics") or {}).get("ollama") if isinstance(report.get("metrics"), dict) else None
+        if isinstance(ollama, dict) and ollama.get("up") is False and ollama.get("installed", True) is not False:
+            checks["ollama"] = (0, True)
+        for name, info in (report.get("services") or {}).items():
+            if name in ("claude-mem", "controller-worker") and isinstance(info, dict) and info.get("up") is False:
+                checks[name] = (0, True)
+        for name, (missed, failing) in checks.items():
+            key = (node["id"], name)
+            since = None
+            if failing:
+                since = _DOWN_SINCE.setdefault(key, now)
+                live_keys.add(key)
+            rows.append({"node": node["id"], "service": name, "missed_beats": missed, "unhealthy_since": since})
+    for key in [k for k in _DOWN_SINCE if k not in live_keys]:
+        del _DOWN_SINCE[key]
+    return rows
+
+
+def _node(node_id: str) -> dict:
+    import tasks
+    return next(n for n in tasks.node_rows() if n["id"] == node_id)
+
+
+def restart_via_runner(node_id: str, service: str) -> None:
+    """Blocking (run in a thread): POST /services/restart on the node's runner."""
+    import httpx
+    import tasks
+    node = _node(node_id)
+    token = tasks.node_runner_token(node)
+    r = httpx.post(tasks.runner_url(node) + "/services/restart", json={"service": service}, timeout=40,
+                   headers={"X-Runner-Token": token} if token else {}, trust_env=False)
+    r.raise_for_status()
+
+
+def check_health(node_id: str, service: str, wait: float = 15.0, step: float = 1.5) -> bool:
+    """Blocking: after a restart, poll the runner's /health until the service looks up, or give up."""
+    import httpx
+    import tasks
+    node = _node(node_id)
+    token = tasks.node_runner_token(node)
+    headers = {"X-Runner-Token": token} if token else {}
+    deadline = time.time() + wait
+    while True:
+        try:
+            body = httpx.get(tasks.runner_url(node) + "/health", timeout=3, headers=headers, trust_env=False).json()
+            if body.get("ok"):
+                if service == "ollama":
+                    ok = ((body.get("metrics") or {}).get("ollama") or {}).get("up") is True
+                elif service in ("claude-mem", "controller-worker"):
+                    ok = ((body.get("services") or {}).get(service) or {}).get("up") is True
+                else:
+                    ok = True
+                if ok:
+                    return True
+        except (httpx.HTTPError, ValueError):
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(step)
+
+
+async def tick(now: float | None = None, restart=None, health=None) -> list[dict]:
+    """The controller's periodic call. heal_tick does blocking HTTP and sqlite, so it runs in a thread. Never raises."""
+    import asyncio
+    import tasks
+    now = time.time() if now is None else now
+    try:
+        services = [s for s in collect_services(tasks.node_rows(), now) if needs_restart(s, now)]
+        if not services:
+            return []
+        return await asyncio.to_thread(heal_tick, services, restart or restart_via_runner,
+                                       health or check_health, now, tasks.in_startup_grace(now))
+    except Exception as exc:  # self-heal must never stop the poll loop
+        print(f"service self-heal failed: {exc!r}")
+        return []

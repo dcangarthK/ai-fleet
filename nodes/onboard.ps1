@@ -3625,6 +3625,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and len(parts) == 3 and parts[0] == "operations" and parts[2] == "cancel":
             self._body()
             return self.manager.model_manager.cancel(parts[1])
+        if method == "POST" and parts == ["services", "restart"]:
+            return restart_service(self._body().get("service"))
         if method == "GET" and parts == ["jobs"]:
             return self.manager.list_public()
         if method == "POST" and parts == ["jobs"]:
@@ -3680,6 +3682,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._handle("POST")
+
+
+SERVICE_NAMES = ("runner", "claude-mem", "ollama")
+
+
+def service_restart_command(service, platform=None, uid=None):
+    """Argv for the node's service manager: launchctl kickstart on macOS, systemctl --user restart on Linux.
+    Labels: local.ai-fleet.<name> (macOS), ai-fleet-<name> (Linux); ollama is `ollama` on Linux. The claude-mem
+    names are UNVERIFIED: no onboarding script installs it yet."""
+    platform = platform or sys.platform
+    uid = os.getuid() if uid is None else uid
+    if platform == "darwin":
+        return ["launchctl", "kickstart", "-k", "gui/%d/local.ai-fleet.%s" % (uid, service)]
+    unit = "ollama" if service == "ollama" else "ai-fleet-" + service
+    return ["systemctl", "--user", "restart", unit]
+
+
+def restart_service(service):
+    """POST /services/restart (same runner token as every other call). Only a fixed list of services."""
+    if service not in SERVICE_NAMES:
+        raise HttpError(400, "unknown service")
+    argv = service_restart_command(service)
+    if service == "runner":  # restarting ourselves kills this request: let the reply go first
+        argv = ["sh", "-c", "sleep 1; exec \"$@\"", "sh"] + argv
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        return {"ok": True, "service": service, "scheduled": True}
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HttpError(502, "restart failed: %s" % error_line(exc))
+    if done.returncode != 0:
+        raise HttpError(502, "restart failed: exit %d" % done.returncode)
+    return {"ok": True, "service": service}
 
 
 def health_report(manager):

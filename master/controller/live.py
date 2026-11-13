@@ -492,7 +492,8 @@ def machine_row(node: dict, now: float) -> dict:
 
 ALERT_TYPES = ("task.awaiting_approval", "task.blocked", "task.failed", "budget.limit", "budget.rules_invalid",
                "budget.limit_unrecognised", "node.swap_high", "node.disk_low", "node.runner_offline",
-               "task.escalated", "task.overrun", "task.stall_alert")  # Part E: a stall left for the owner; a run past 80% of its time
+               "task.escalated", "task.overrun", "task.stall_alert",
+               "service.alert", "service.restart_failed")  # Part E: a stall left for the owner; a run past 80% of its time
 
 
 TASK_ALERT_STATE = {"task.failed": "failed", "task.blocked": "blocked", "task.awaiting_approval": "awaiting_approval",
@@ -543,6 +544,10 @@ def alerts(include_resolved: bool = False, ctx: "tasks.DisplayContext | None" = 
                            "WHERE type='node.runner_online' GROUP BY node"):
             if isinstance(r["node"], str):
                 online[r["node"]] = r["last"]
+        restarted = {}  # (node, service) -> id of its newest service.restarted event
+        for r in c.execute("SELECT id, data FROM events WHERE type='service.restarted' ORDER BY id"):
+            d = _json(r["data"]) or {}
+            restarted[(d.get("node"), d.get("service"))] = r["id"]
         for r in rows:
             data = _json(r["data"]) or {}
             by = None
@@ -563,6 +568,14 @@ def alerts(include_resolved: bool = False, ctx: "tasks.DisplayContext | None" = 
                 ident = f"{agent}:{model}" if model else agent
                 if not budget.limited_for(snaps[account], agent, ident, rules)[0]:
                     by = "limit_reset"
+            elif r["type"].startswith("service."):  # Part G 7: open until the service is restarted healthy later
+                node = data.get("node") if isinstance(data.get("node"), str) else None
+                key = (r["type"], node, data.get("service"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if restarted.get((node, data.get("service")), 0) > r["id"]:
+                    by = "service_restarted"
             elif r["type"].startswith("node."):
                 node = data.get("node") if isinstance(data.get("node"), str) else None
                 if (r["type"], node) in seen:

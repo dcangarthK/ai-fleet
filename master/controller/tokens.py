@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -263,12 +264,32 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"by_kind": by_kind, "by_model": by_model}
 
 
+DECISION_EVENTS = ("task.allocated", "placement.moved", "task.requeued", "task.loop_cut", "gate.bounced",
+                   "service.restarted", "service.restart_failed", "service.alert")
+
+
+def decision_counts(since: float) -> dict[str, dict[str, int]]:
+    """Part G 8: every visible decision counts in the spend report: {event type: {count, with_reason}}."""
+    from store import db
+    marks = ",".join("?" * len(DECISION_EVENTS))
+    out = {t: {"count": 0, "with_reason": 0} for t in DECISION_EVENTS}
+    try:
+        with db() as c:
+            for r in c.execute(f"SELECT type, COUNT(*) n, SUM(CASE WHEN json_extract(data,'$.reason') IS NOT NULL "
+                               f"THEN 1 ELSE 0 END) w FROM events WHERE ts>=? AND type IN ({marks}) GROUP BY type",
+                               (since, *DECISION_EVENTS)):
+                out[r["type"]] = {"count": r["n"], "with_reason": r["w"] or 0}
+    except sqlite3.Error:  # no events table (a bare token-log deployment): nothing to count
+        pass
+    return out
+
+
 @router.get("/api/tokens/summary")
 def tokens_summary(since: float | None = Query(default=None)) -> dict[str, Any]:
     # Bounded: the last 24 h unless the caller names a window.
     if since is None:
         since = time.time() - SUMMARY_WINDOW_S
-    return summarise(tokens_since(since, MAX_ROWS)["tasks"])
+    return {**summarise(tokens_since(since, MAX_ROWS)["tasks"]), "decisions": decision_counts(since)}
 
 
 @router.get("/api/tokens/{task_id}")

@@ -75,18 +75,19 @@ function Configure-Ollama($ip) {
     if (-not (Ask "Ollama is not installed. Install it to serve local models?")) { return }
     winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements
   }
-  Say "Configuring Ollama to listen on loopback only (127.0.0.1:11434)"
-  foreach ($kv in @(@("OLLAMA_HOST", "127.0.0.1:11434"), @("OLLAMA_KEEP_ALIVE", "10m"), @("OLLAMA_FLASH_ATTENTION", "1"))) {
+  # Compatibility hold: controller inventory/probes/evals still directly use this endpoint (NETWORKING-OWNER-CHECKLIST N3).
+  Say "Configuring Ollama to listen on the tailnet only (${ip}:11434)"
+  foreach ($kv in @(@("OLLAMA_HOST", "${ip}:11434"), @("OLLAMA_KEEP_ALIVE", "10m"), @("OLLAMA_FLASH_ATTENTION", "1"))) {
     [Environment]::SetEnvironmentVariable($kv[0], $kv[1], "User")
   }
-  $env:OLLAMA_HOST = "127.0.0.1:11434"
+  $env:OLLAMA_HOST = "${ip}:11434"
   Get-Process "ollama*" -ErrorAction SilentlyContinue | Stop-Process -Force
   # Launch through Explorer so Ollama runs as the normal user, not with this elevated token.
   $ollamaApp = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama app.exe"
   Start-Process explorer.exe -ArgumentList (Quote-WindowsPath $ollamaApp)
-  for ($i = 0; $i -lt 30; $i++) { if (GetJson "http://127.0.0.1:11434/api/tags") { break }; Start-Sleep 1 }
+  for ($i = 0; $i -lt 30; $i++) { if (GetJson "http://${ip}:11434/api/tags") { break }; Start-Sleep 1 }
 
-  $count = @((GetJson "http://127.0.0.1:11434/api/tags").models).Count
+  $count = @((GetJson "http://${ip}:11434/api/tags").models).Count
   $want = $Models
   if ($want.Count -eq 0 -and $count -eq 0) {
     $want = Recommended
@@ -109,13 +110,14 @@ function Scan($ip) {
   $servers = @()
   foreach ($port in $serverDefs.Keys) {
     $engine, $path = $serverDefs[$port]
-    foreach ($h in @("127.0.0.1")) {
+    foreach ($h in @($ip, "127.0.0.1") | Where-Object { $_ }) {
       $body = GetJson "http://${h}:${port}${path}"
       if ($null -eq $body) { continue }
       $models = if ($engine -eq "ollama") { @($body.models | ForEach-Object { [ordered]@{ name = $_.name; size_gb = [math]::Round($_.size / 1e9, 1); params = $_.details.parameter_size; quant = $_.details.quantization_level } }) }
                 else { @($body.data | ForEach-Object { [ordered]@{ name = $_.id } }) }
-      $servers += [ordered]@{ engine = $engine; port = $port; models = $models; reachable_from_master = $false
-        hint = "local engine; the token-checked runner is the only fleet endpoint" }
+      $routed = @(11434, 8000, 1234, 8080) -contains $port
+      $servers += [ordered]@{ engine = $engine; port = $port; models = $models; reachable_from_master = [bool]($ip -and $h -eq $ip -and $routed)
+        hint = $(if ($h -eq $ip -and $routed) { "compatibility endpoint; migrate controller reads before loopback-only enforcement" } elseif ($h -eq $ip) { "port $port isn't routed by the fleet" } else { "bound to localhost only" }) }
       break
     }
   }
@@ -181,11 +183,35 @@ function Scan($ip) {
 }
 
 function Install-Services($ip) {
-  Say "Rescanning local inventory hourly; no inventory HTTP service is exposed"
+  Say "Publishing compatibility inventory on ${ip}:11435 and rescanning hourly"
   $self = Join-Path $FleetDir "onboard.ps1"
   if ($PSCommandPath -ne $self) { Copy-Item -LiteralPath $PSCommandPath -Destination $self -Force }
 
+  $server = Join-Path $FleetDir "serve-info.ps1"
+  $serverSource = @"
+`$l = New-Object System.Net.HttpListener
+`$l.Prefixes.Add("http://${ip}:11435/")
+`$fleetJson = Join-Path `$PSScriptRoot "public\fleet.json"
+`$l.Start()
+while (`$l.IsListening) {
+  `$c = `$l.GetContext()
+  if (`$c.Request.Url.AbsolutePath -eq "/fleet.json") {
+    `$b = [IO.File]::ReadAllBytes(`$fleetJson); `$c.Response.ContentType = "application/json"
+  } else { `$b = [byte[]]@(); `$c.Response.StatusCode = 404 }
+  `$c.Response.OutputStream.Write(`$b, 0, `$b.Length); `$c.Response.Close()
+}
+"@
+  Write-Utf8File $server $serverSource
+
   $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $infoArgs = "-NoProfile -ExecutionPolicy Bypass -File " + (Quote-WindowsPath $server)
+  $info = New-ScheduledTaskAction -Execute $ps -Argument $infoArgs
+  $boot = New-ScheduledTaskTrigger -AtStartup
+  $settings = New-ScheduledTaskSettingsSet -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0 `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+  Register-ScheduledTask -TaskName "AI Fleet Info" -Action $info -Trigger $boot -Settings $settings -User "SYSTEM" -RunLevel Highest -Force | Out-Null
+  Start-ScheduledTask -TaskName "AI Fleet Info"
+
   $scanArgs = "-NoProfile -ExecutionPolicy Bypass -File " + (Quote-WindowsPath $self) +
     " -ScanOnly -FleetDir " + (Quote-WindowsPath $FleetDir)
   $scan = New-ScheduledTaskAction -Execute $ps -Argument $scanArgs
@@ -4051,7 +4077,9 @@ function Configure-RunnerPolicy($cfg) {
   if ($EnableDmr) {
     Set-DefaultProperty $config "engines" ([PSCustomObject]@{})
     if ($null -eq $config.engines -or -not ($config.engines -is [PSCustomObject])) { $config.engines = [PSCustomObject]@{} }
-    $config.engines | Add-Member -NotePropertyName "dmr" -NotePropertyValue ([PSCustomObject]@{ enabled = $true; base_url = "http://127.0.0.1:12434" }) -Force
+    Set-DefaultProperty $config.engines "dmr" ([PSCustomObject]@{ enabled = $true; base_url = "http://127.0.0.1:12434/engines/v1" })
+    Set-DefaultProperty $config.engines.dmr "base_url" "http://127.0.0.1:12434/engines/v1"
+    $config.engines.dmr.enabled = $true
     Write-Host "DMR enabled in runner.json. Verify Docker Desktop's actual host bind is loopback-only before use."
   }
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
@@ -4079,7 +4107,7 @@ function Install-Runner($ip) {
 chcp 65001 >nul
 set "RUNNER_BIND=${ip}:11436"
 set "FLEET_DIR=$cmdFleetDir"
-set "OLLAMA_URL=http://127.0.0.1:11434"
+set "OLLAMA_URL=http://${ip}:11434"
 set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-fleet"
 set "CODEX_HOME=%USERPROFILE%\.codex-fleet"
 if not exist "%CLAUDE_CONFIG_DIR%" mkdir "%CLAUDE_CONFIG_DIR%"

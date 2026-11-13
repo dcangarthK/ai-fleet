@@ -8,7 +8,10 @@ validation and presentation logic remains testable with fixtures.
 from __future__ import annotations
 
 import ipaddress
+import argparse
 import json
+import re
+import sys
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -27,6 +30,8 @@ def master_tailnet_addresses(values: Iterable[str]) -> list[str]:
     """
     addresses: list[str] = []
     for raw in values:
+        if not re.fullmatch(r"(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}", str(raw).strip()):
+            raise ValueError(f"master tailnet address must be a dotted quad: {raw!r}")
         try:
             address = ipaddress.ip_address(str(raw).strip())
         except ValueError as exc:
@@ -63,30 +68,9 @@ def powershell_rule_summary(rule: Mapping[str, Any]) -> str:
 
 
 def parse_docker_model_ls(output: str | None) -> list[dict[str, str | None]]:
-    """Parse Docker's fixture-compatible table or JSON-lines output conservatively."""
-    if not output:
-        return []
-    models: list[dict[str, str | None]] = []
-    for line in output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        reference = digest = None
-        if line.startswith("{"):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            reference = record.get("Model") or record.get("MODEL") or record.get("Name")
-            digest = record.get("ID") or record.get("Digest")
-        elif not line.upper().startswith("MODEL"):
-            parts = line.split()
-            if parts:
-                reference = parts[0]
-                digest = parts[1] if len(parts) > 1 else None
-        if isinstance(reference, str) and reference:
-            models.append({"engine": "dmr", "reference": reference, "digest": digest if isinstance(digest, str) else None})
-    return models
+    """Use the runner's sole DMR parser so Windows discovery matches /health."""
+    from nodes.runner import parse_docker_model_ls as runner_parser
+    return runner_parser(output)
 
 
 def runner_availability(task: Mapping[str, Any] | None, service: Mapping[str, Any] | None) -> dict[str, str]:
@@ -97,12 +81,30 @@ def runner_availability(task: Mapping[str, Any] | None, service: Mapping[str, An
     task = task or {}
     state = str(task.get("State", "Unknown"))
     triggers = " ".join(str(item) for item in task.get("Triggers", []))
-    restart = bool(task.get("RestartOnFailure", False))
     if "Logon" in triggers:
         detail = "per-user scheduled task; available after owner logon"
         if state.lower() == "running":
             detail += "; currently running"
         return {"availability": "available-after-owner-logon", "source": "scheduled-task", "detail": detail}
-    if "Boot" in triggers and restart:
-        return {"availability": "available-before-owner-logon", "source": "scheduled-task", "detail": "boot-triggered scheduled task with restart enabled"}
     return {"availability": "unknown", "source": "read-only-check", "detail": "no proven boot service or restartable boot task"}
+
+
+def main() -> int:
+    """Small JSON bridge used by the owner PowerShell scripts; no machine mutation."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=("rule", "dmr", "availability"))
+    parser.add_argument("values", nargs="*")
+    args = parser.parse_args()
+    if args.operation == "rule":
+        result: object = defender_rule(args.values)
+    elif args.operation == "dmr":
+        result = parse_docker_model_ls(sys.stdin.read())
+    else:
+        observation = json.load(sys.stdin)
+        result = runner_availability(observation.get("task"), observation.get("service"))
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

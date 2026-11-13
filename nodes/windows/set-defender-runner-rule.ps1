@@ -1,33 +1,39 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)] [string[]]$MasterTailnetIp,
+  [Parameter(Mandatory = $true)] [string]$TailscaleInterfaceAlias,
   [switch]$Approve,
   [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
-$ruleName = "AI Fleet Runner 11436"
-$tailnet = [ipaddress]::Parse("100.64.0.0")
-$tailnetMask = [ipaddress]::Parse("255.192.0.0")
-$addresses = @()
-foreach ($raw in $MasterTailnetIp) {
-  $address = $null
-  if (-not [ipaddress]::TryParse($raw, [ref]$address) -or $address.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
-    throw "MasterTailnetIp must contain concrete IPv4 addresses only: $raw"
-  }
-  $bytes = $address.GetAddressBytes(); $networkBytes = $tailnet.GetAddressBytes(); $maskBytes = $tailnetMask.GetAddressBytes()
-  for ($i = 0; $i -lt 4; $i++) { if (($bytes[$i] -band $maskBytes[$i]) -ne ($networkBytes[$i] -band $maskBytes[$i])) { throw "MasterTailnetIp is outside the Tailnet IPv4 range: $raw" } }
-  if ($addresses -notcontains $address.IPAddressToString) { $addresses += $address.IPAddressToString }
+$runnerRuleName = "AI Fleet Runner 11436"
+$compatibilityRuleName = "AI Fleet Controller Compatibility"
+$legacyRuleName = "AI Fleet"
+$python = Get-Command python -ErrorAction Stop
+$helper = Join-Path $PSScriptRoot "networking.py"
+$rule = (& $python.Source $helper rule @MasterTailnetIp | ConvertFrom-Json)
+$addresses = @($rule.remote_addresses)
+$networkCategory = (Get-NetConnectionProfile -InterfaceAlias $TailscaleInterfaceAlias -ErrorAction Stop).NetworkCategory
+$profile = switch ($networkCategory) {
+  "DomainAuthenticated" { "Domain" }
+  "Private" { "Private" }
+  "Public" { "Public" }
+  default { throw "Tailscale interface has no usable firewall profile: $TailscaleInterfaceAlias" }
 }
-if ($addresses.Count -eq 0) { throw "At least one master Tailnet IPv4 address is required." }
+$legacy = @(Get-NetFirewallRule -DisplayName $legacyRuleName -ErrorAction SilentlyContinue)
 
-Write-Host "Proposed Defender rule: inbound Allow TCP local port 11436 from $($addresses -join ', ') only."
-Write-Host "No model port and no Tailnet CIDR will be included."
-if (-not $Approve) { throw "Refusing to change Defender Firewall without -Approve. Re-run with -Approve -DryRun to inspect only, then remove -DryRun after owner review." }
-if ($DryRun) { Write-Host "Dry run: no Defender Firewall command was run."; exit 0 }
+Write-Host "Proposed runner rule: inbound Allow TCP local port 11436 from $($addresses -join ', ') on $TailscaleInterfaceAlias ($profile) only."
+Write-Host "Proposed compatibility rule: inbound Allow TCP local ports 11434,11435 from the same master address(es) only, until controller migration retires them."
+if ($legacy.Count) { Write-Host "Legacy broad '$legacyRuleName' rule detected and will be removed after approval." }
+else { Write-Host "No legacy broad '$legacyRuleName' rule detected." }
+if (-not $Approve -or $DryRun) { Write-Host "Read-only proposal: no Defender Firewall command was run."; exit 0 }
 
-# The named rule is replaced atomically in scope: it is the only rule this script may change.
-Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11436 -RemoteAddress $addresses | Out-Null
-Get-NetFirewallRule -DisplayName $ruleName | Get-NetFirewallPortFilter | Format-Table -AutoSize
-Get-NetFirewallRule -DisplayName $ruleName | Get-NetFirewallAddressFilter | Format-Table -AutoSize
+# This is a remove-then-create migration, not an atomic replacement. A failed creation fails closed.
+Get-NetFirewallRule -DisplayName $runnerRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Get-NetFirewallRule -DisplayName $compatibilityRuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+$legacy | Remove-NetFirewallRule
+New-NetFirewallRule -DisplayName $runnerRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11436 -RemoteAddress $addresses -InterfaceAlias $TailscaleInterfaceAlias -Profile $profile | Out-Null
+New-NetFirewallRule -DisplayName $compatibilityRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 11434,11435 -RemoteAddress $addresses -InterfaceAlias $TailscaleInterfaceAlias -Profile $profile | Out-Null
+Get-NetFirewallRule -DisplayName $runnerRuleName,$compatibilityRuleName | Get-NetFirewallPortFilter | Format-Table -AutoSize
+Get-NetFirewallRule -DisplayName $runnerRuleName,$compatibilityRuleName | Get-NetFirewallAddressFilter | Format-Table -AutoSize

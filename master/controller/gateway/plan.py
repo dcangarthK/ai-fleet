@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 from .adapter import NAMESPACE, Capabilities, Rule
 
 
+WAN_DEFAULT_DENY = f"{NAMESPACE}wan-deny-default"
+
+
 @dataclass
 class Policy:
     worker_vlan: str = "workers"
@@ -35,14 +38,24 @@ def build_plan(policy: Policy, caps: Capabilities) -> tuple[list[Rule], list[str
             if not policy.wan_allow:
                 skipped.append("wan default deny refused: empty allowlist")
             else:
-                rules.append(Rule(f"{NAMESPACE}wan-deny-default", "deny", policy.worker_vlan, policy.wan))
+                rules.append(Rule(WAN_DEFAULT_DENY, "deny", policy.worker_vlan, policy.wan))
+    ids = [r.id for r in rules]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:  # distinct allowlist entries can slug to the same id (a.b vs a-b); never install ambiguous rules
+        raise ValueError(f"duplicate rule ids from policy: {dup}")
     return rules, skipped
 
 
 def merge(current: list[Rule], desired: list[Rule]) -> list[Rule]:
-    """Full list to install: every unmanaged rule untouched, in order and in front (first match wins, so a fleet
-    allow can never beat an owner deny); managed rules replaced by desired and placed after them."""
-    return [r for r in current if not r.managed] + desired
+    """Full list to install, first match wins. Order: fleet denies, then every owner rule (untouched, in order),
+    then fleet allows (so a fleet allow never beats an owner deny), then the default WAN deny.
+    The default WAN deny must follow the fleet allows it has exceptions for, so an owner catch-all allow placed
+    earlier does override it; the lateral deny stays in front and is not overridable that way."""
+    owner = [r for r in current if not r.managed]
+    head = [r for r in desired if r.action == "deny" and r.id != WAN_DEFAULT_DENY]
+    tail = [r for r in desired if r.action != "deny"]
+    last = [r for r in desired if r.id == WAN_DEFAULT_DENY]
+    return head + owner + tail + last
 
 
 def diff_plan(current: list[Rule], desired: list[Rule]) -> dict:

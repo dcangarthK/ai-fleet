@@ -15,7 +15,7 @@ PREFIX_NOTE = f"rules whose id starts with {NAMESPACE!r} are treated as fleet-ow
 
 @dataclass
 class ApplyResult:
-    # dry_run | applied | rolled_back | reverted | unsupported | unreachable | refused | noop | error
+    # dry_run | applied | rolled_back | reverted | needs_owner_check | unsupported | unreachable | refused | noop | error
     status: str
     diff: str = ""
     skipped: list = field(default_factory=list)
@@ -25,7 +25,17 @@ class ApplyResult:
 def apply_plan(adapter: GatewayAdapter, policy: Policy, canaries: list, *, owner_approved: bool = False,
                dry_run: bool = True, confirm_window_s: float = 60.0) -> ApplyResult:
     """canaries: [(src, dst, port, expect_reachable)]. A real apply needs at least one expect-reachable canary.
-    Rollback is only ever called after this function itself staged a change."""
+    Rollback is only ever called after this function itself staged a change.
+
+    The check that at least one canary expects "reachable" is a floor only; the caller must choose canaries that
+    cover worker->master:8443 and the console path (the owner checklist says so).
+
+    Known limits (latent until a real driver exists):
+    - Read-back uses exact equality, so a driver must round-trip rules exactly (or normalise in read_rules);
+      a router that rewrites case, order or defaults would make every apply report reverted.
+    - `staged` is set only after stage() returns. If stage() fails partway, the router may hold a partial change
+      and no rollback is attempted: calling rollback blind could discard the owner's own pending changes.
+      The result is `error`; the owner must inspect the router."""
     staged = False
     try:
         caps: Capabilities = adapter.discover()
@@ -55,8 +65,12 @@ def apply_plan(adapter: GatewayAdapter, policy: Policy, canaries: list, *, owner
             adapter.rollback()
             return ApplyResult("reverted", text, skipped, "confirm window expired before canaries finished")
         adapter.confirm()
-        if adapter.read_rules() != want:
-            return ApplyResult("reverted", text, skipped, "router did not keep the confirmed rules")
+        after = adapter.read_rules()
+        if after != want:  # rollback cannot help once confirmed; report only what we can actually tell
+            if after == current:
+                return ApplyResult("reverted", text, skipped, "router went back to the previous rules")
+            return ApplyResult("needs_owner_check", text, skipped,
+                               "router rules after confirm match neither the plan nor the previous rules")
         return ApplyResult("applied", text, skipped)
     except Exception as e:  # report, never raise; restore last-known-good only if we staged something
         if staged:

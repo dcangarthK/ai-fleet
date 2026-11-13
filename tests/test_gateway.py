@@ -173,8 +173,51 @@ class GatewayTests(unittest.TestCase):
         r = FakeRouter(owner)
         res = apply_plan(r, POLICY, [("workers", "master", "8443", True)], dry_run=False, owner_approved=True)
         self.assertEqual(res.status, "applied")
-        self.assertEqual(r.lkg[0], owner[0])  # owner rules stay in front
+        ids = [x.id for x in r.lkg]
+        self.assertLess(ids.index("owner-deny"), ids.index(f"{NAMESPACE}wan-allow-wan-tcp-443"))
         self.assertFalse(r.probe("workers", "wan", "443"))
+
+    def test_fleet_deny_stays_ahead_of_owner_catch_all_allow(self):
+        owner = [Rule("owner-any", "allow", "any", "any")]
+        r = FakeRouter(owner)
+        res = apply_plan(r, Policy(), CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "applied")
+        self.assertEqual(r.lkg[0].id, f"{NAMESPACE}deny-lateral")
+        self.assertEqual(r.lkg[1], owner[0])
+        self.assertFalse(r.probe("workers", "workers", "11436"))
+        self.assertTrue(r.probe("workers", "wan", "443"))
+
+    def test_default_wan_deny_goes_last_after_fleet_allows(self):
+        r = FakeRouter(OWNER)
+        apply_plan(r, POLICY, CANARY_OK, dry_run=False, owner_approved=True)
+        ids = [x.id for x in r.lkg]
+        self.assertEqual(ids[-1], f"{NAMESPACE}wan-deny-default")
+        self.assertLess(ids.index(f"{NAMESPACE}wan-allow-wan-tcp-443"), len(ids) - 1)
+
+    def test_post_confirm_mismatch_reports_truthfully(self):
+        r = FakeRouter(OWNER)
+        orig = r.read_rules
+        state = {"confirmed": False}
+        oc = r.confirm
+        def confirm():
+            oc()
+            state["confirmed"] = True
+        def read():
+            rules = orig()
+            return rules + [Rule("surprise", "deny", "x", "y")] if state["confirmed"] else rules
+        r.confirm, r.read_rules = confirm, read
+        res = apply_plan(r, POLICY, CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "needs_owner_check")
+        self.assertEqual(r.calls.count("rollback"), 0)
+
+    def test_duplicate_slug_ids_refused(self):
+        pol = Policy(wan_allow=[("a.b", "tcp", "1"), ("a-b", "tcp", "1")])
+        with self.assertRaises(ValueError):
+            build_plan(pol, FakeRouter().discover())
+        r = FakeRouter(OWNER)
+        res = apply_plan(r, pol, CANARY_OK, dry_run=False, owner_approved=True)
+        self.assertEqual(res.status, "error")
+        self.assertNotIn("stage", r.calls)
 
     def test_unsupported_router_still_previews_diff(self):
         caps = Capabilities(reachable=True, vlan=True)  # vlan only

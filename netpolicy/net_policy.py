@@ -8,11 +8,21 @@ Source kinds understood by `allowed`:
   admin                     a tailnet admin's device (also a member)
   member                    an ordinary owner tailnet device
   untagged-node             a new node owned by a member that has not been tagged yet (enrol-before-tag)
+
+Strict: anything this evaluator does not understand raises PolicyError instead of being ignored, so an
+over-broad policy (wildcards, ranges, legacy acls, unknown keys) can never pass a deny test by being skipped.
+Untagged-node reach is an ACL lookup only; it is not a simulation of the enrolment flow.
 """
 import json
 import pathlib
+import re
 
 POLICY_PATH = pathlib.Path(__file__).with_name("tailnet-policy.hujson")
+TARGET_PATH = pathlib.Path(__file__).with_name("tailnet-policy-target.hujson")
+
+
+class PolicyError(ValueError):
+    """The policy uses something this evaluator does not model."""
 
 
 def _strip_comments(text):
@@ -77,7 +87,38 @@ def strip_hujson(text):
 
 
 def load_policy(path=POLICY_PATH):
-    return json.loads(strip_hujson(pathlib.Path(path).read_text()))
+    return validate(json.loads(strip_hujson(pathlib.Path(path).read_text())))
+
+
+
+
+_TOP_KEYS = {"tagOwners", "grants", "tests"}
+_GRANT_KEYS = {"src", "dst", "ip"}
+_SRC_SELECTORS = {"tag:master", "tag:llm-node", "autogroup:member", "autogroup:admin"}
+_DST_SELECTORS = {"tag:master", "tag:llm-node"}
+_PORT_RE = re.compile(r"^tcp:([0-9]{1,5})$")
+
+
+def validate(policy):
+    """Raise PolicyError on any key, selector or port form this evaluator does not model."""
+    if not isinstance(policy, dict):
+        raise PolicyError("policy must be an object")
+    extra = set(policy) - _TOP_KEYS
+    if extra:
+        raise PolicyError(f"unsupported top-level key(s): {sorted(extra)}")
+    for g in policy.get("grants", []):
+        if not isinstance(g, dict) or set(g) != _GRANT_KEYS:
+            raise PolicyError(f"grant must have exactly keys {sorted(_GRANT_KEYS)}: {g!r}")
+        for s in g["src"]:
+            if s not in _SRC_SELECTORS:
+                raise PolicyError(f"unsupported src selector: {s!r}")
+        for d in g["dst"]:
+            if d not in _DST_SELECTORS:
+                raise PolicyError(f"unsupported dst selector: {d!r}")
+        for spec in g["ip"]:
+            if not isinstance(spec, str) or not _PORT_RE.match(spec):
+                raise PolicyError(f"unsupported ip/port form: {spec!r}")
+    return policy
 
 
 # which grant source selectors each source kind satisfies
@@ -90,29 +131,26 @@ _SRC_MATCH = {
 }
 
 
-def _port_ok(specs, proto, port):
-    # "*" and ranges are not understood: fail closed
-    return f"{proto}:{port}" in specs
-
-
 def allowed(policy, src, dst, port, proto="tcp"):
-    """True only if a grant allows src -> dst:port. dst is a tag name; unknown src kinds are denied."""
+    """True only if a grant allows src -> dst:port. Raises PolicyError for an unknown src kind or policy form."""
+    validate(policy)
     selectors = _SRC_MATCH.get(src)
-    if not selectors:
-        return False
+    if selectors is None:
+        raise PolicyError(f"unknown source kind: {src!r}")
     for g in policy.get("grants", []):
-        if (selectors & set(g.get("src", []))
-                and dst in g.get("dst", [])
-                and _port_ok(g.get("ip", []), proto, port)):
+        if (selectors & set(g["src"]) and dst in g["dst"] and f"{proto}:{port}" in g["ip"]):
             return True
     return False
 
 
 def run_policy_tests(policy):
-    """Evaluate the file's own "tests" block; returns a list of failure strings (empty = all pass)."""
+    """Evaluate the file's own "tests" block; returns failure strings (empty = all pass).
+    Raises PolicyError for a non-tag source (e.g. a user login): those rows are Tailscale-console-only."""
     fails = []
     for t in policy.get("tests", []):
         src = t["src"]
+        if src not in ("tag:master", "tag:llm-node"):
+            raise PolicyError(f"evaluator cannot run tests for source {src!r}; use the Tailscale console")
         for key, want in (("accept", True), ("deny", False)):
             for target in t.get(key, []):
                 dst, port = target.rsplit(":", 1)

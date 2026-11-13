@@ -3,9 +3,12 @@
 
 Lists listeners only (one fixed `lsof` call, or a saved lsof listing via --file / stdin). Changes nothing.
 Exposure: loopback, tailnet (100.64.0.0/10 or fd7a:115c:a1e0::/48), wildcard, or other (LAN etc).
-Exit 0 on a clean read; 1 if a wildcard/other listener exists; 2 if lsof cannot run.
+Exit 0 on a verified clean read; 1 if a wildcard/other listener exists; 2 = UNVERIFIED (lsof missing, failed,
+wrote to stderr, or found nothing while not root: without root lsof only sees your own user's sockets, so run
+with sudo). Windows has no lsof, so it always exits 2 there.
 """
 import ipaddress
+import os
 import subprocess
 import sys
 
@@ -56,22 +59,38 @@ def report(listeners):
     return "\n".join(lines)
 
 
-def main(argv):
+def _run_lsof(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    return r.returncode, r.stdout, r.stderr
+
+
+def main(argv, run=_run_lsof, euid=None):
+    """`run` and `euid` are injectable so tests use fakes."""
+    live = False
     if len(argv) > 2 and argv[1] == "--file":
         with open(argv[2]) as f:
             text = f.read()
     elif len(argv) > 1 and argv[1] == "-":
         text = sys.stdin.read()
     else:
+        live = True
         try:
-            r = subprocess.run(LSOF_CMD, capture_output=True, text=True, timeout=15)
+            rc, text, err = run(LSOF_CMD)
         except (OSError, subprocess.TimeoutExpired) as e:
-            print(f"lsof failed: {e}", file=sys.stderr)
+            print(f"UNVERIFIED: lsof failed: {e}", file=sys.stderr)
             return 2
-        text = r.stdout  # lsof exits 1 when nothing matches; not an error
+        # lsof exits 1 when nothing matches; any other code or any stderr output means we cannot trust the read
+        if rc > 1 or err.strip():
+            print(f"UNVERIFIED: lsof rc={rc} stderr={err.strip()[:200]!r}", file=sys.stderr)
+            return 2
     listeners = parse_lsof(text)
     print(report(listeners))
-    return 1 if any(x["exposure"] in ("wildcard", "other") for x in listeners) else 0
+    if any(x["exposure"] in ("wildcard", "other") for x in listeners):
+        return 1
+    if live and not listeners and (os.geteuid() if euid is None else euid) != 0:
+        print("UNVERIFIED: not root, so lsof only sees your own user's sockets. Re-run with sudo.")
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

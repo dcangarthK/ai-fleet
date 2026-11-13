@@ -1,7 +1,7 @@
 // Account pools and limit handoff on the client (docs/SPEC-limit-handoff.md 5). Pure helpers only, so they're testable.
 import { clockTime, modelLabel, type Tone } from "./budget";
 
-export type SlotState = "free" | "busy" | "limited" | "at_budget" | "offline" | "not_signed_in";
+export type SlotState = "free" | "busy" | "limited" | "at_budget" | "offline" | "not_signed_in" | "held";
 
 /** One row of GET /api/resources: a (node, agent, profile, model rule) slot. Labels only, never directories. */
 export interface ResourceSlot {
@@ -38,6 +38,8 @@ export function slotPill(s: ResourceSlot): { tone: Tone; label: string } {
       return { tone: "bad", label: "At budget" };
     case "not_signed_in":
       return { tone: "bad", label: "Not signed in" };
+    case "held":
+      return { tone: "quiet", label: "On hold" };
     default:
       return { tone: "quiet", label: "Offline" };
   }

@@ -54,6 +54,37 @@ class CappedContinuationTests(HandoffBase):
         self.assertIsNone(self.cap(src) and self.c.portal.call(tasks.auto_continue, src["id"]))
         self.assertEqual(self.children(src["id"]), [])
 
+    def test_build_without_worktree_is_not_continued(self):
+        src = self.build(worktree=False)
+        FakeRunner.jobs[src["id"]].update(state="capped", exit_code=0, result="s", branch="fleet/x", gate={"state": "skipped"})
+        self.c.portal.call(tasks.poll_task, src["id"])
+        self.assertEqual(self.children(src["id"]), [])
+
+    def test_repeated_polls_of_a_capped_build_make_one_child(self):
+        src = self.build()
+        self.cap(src)
+        self.c.portal.call(tasks.poll_task, src["id"])
+        self.c.portal.call(tasks.continuation_sweep)
+        self.assertEqual(len(self.children(src["id"])), 1)
+
+    def test_continuation_chain_stops_at_the_limit(self):
+        src = self.build()
+        FakeRunner.jobs[src["id"]].update(state="capped", exit_code=0, result="s", branch="fleet/x", gate={"state": "skipped"})
+        with patch.object(tasks, "continuation_depth", return_value=3):
+            self.c.portal.call(tasks.poll_task, src["id"])
+        self.assertEqual(self.children(src["id"]), [])
+        with db() as c:
+            n = c.execute("SELECT COUNT(*) FROM events WHERE type='task.continuation_limit' AND task_id=?", (src["id"],)).fetchone()[0]
+        self.assertEqual(n, 1)
+
+    def test_continuation_keeps_the_task_policy_and_effort(self):
+        src = self.build(policy={"limits": {"task_minutes": 7}}, effort="high")
+        self.cap(src)
+        [new] = self.children(src["id"])
+        t = self.get(new)
+        self.assertEqual(t["effort"], "high")
+        self.assertLessEqual(t["policy"]["limits"]["task_minutes"], 7)
+
 
 class SupervisedTests(HandoffBase):
     POLICY = {"auto_approve": {"agents": ["claude"], "denied_tools": True, "tools": ["Edit"]}}
@@ -106,6 +137,43 @@ class LeaderTests(HandoffBase):
             c.execute("UPDATE tasks SET state='queued',budget_wait='limit' WHERE id=?", (first["session_task_id"],))
         self.assertIn("waiting", self.c.portal.call(leader.tick))
         self.assertFalse(leader.record()["halted"])
+
+    def test_queued_lead_moves_to_a_ready_slot_on_another_account(self):
+        self.plan()
+        leader.handoff.resources = lambda **_: [slot("claude/owner-max")]
+        first = self.c.portal.call(leader.tick)
+        with db() as c:
+            c.execute("UPDATE tasks SET state='queued',budget_wait='limit' WHERE id=?", (first["session_task_id"],))
+            c.execute("UPDATE leader SET account='claude/owner-max' WHERE id=1")
+        leader.handoff.resources = lambda **_: [slot("claude/owner-max"), slot("claude/spare")]
+        waits = lambda probe, now=None: ("limit", "near") if probe["account"] == "claude/owner-max" else (None, None)
+        with patch.object(leader.budget, "start_wait", side_effect=waits):
+            second = self.c.portal.call(leader.tick)
+        self.assertEqual(tasks.get_task(first["session_task_id"])["state"], "cancelled")
+        self.assertNotEqual(second["session_task_id"], first["session_task_id"])
+
+    def test_review_selector_prefers_a_slot_with_headroom(self):
+        picks = []
+        async def fake_create(body, scope=None):
+            picks.append(body.profile)
+            return {"id": "x"}
+        near, ok = slot("claude/aaa"), slot("claude/zzz")
+        near["profile"], ok["profile"] = "aaa", "zzz"
+        near["allowed_kinds"] = ok["allowed_kinds"] = ["review"]
+        waits = lambda probe, now=None: ("limit", "near") if probe["account"] == "claude/aaa" else (None, None)
+        src = self.ok(agent="codex", kind="build")
+        near["node"] = ok["node"] = tasks.get_task(src["id"])["node_id"]
+        self.plan_pending(src["id"])
+        leader.handoff.resources = lambda **_: [near, ok]
+        with patch.object(leader.budget, "start_wait", side_effect=waits), patch.object(leader.tasks, "create_task", fake_create), \
+                patch.object(leader.tasks, "get_task", return_value={"id": src["id"], "state": "done", "node_id": near["node"]}):
+            self.c.portal.call(leader._queue_pending_reviews, time.time())
+        self.assertEqual(picks, ["zzz"])
+
+    def plan_pending(self, work_item):
+        body = {"items": [{"work_item": work_item, "next_steps": ["go"], "status": "pending_review"}]}
+        r = self.c.put("/api/plan", json=body, headers={"X-Fleet": "1", "X-Fleet-Scope": "operate"})
+        self.assertEqual(r.status_code, 200, r.text)
 
 
 class HeldAccountTests(HandoffBase):

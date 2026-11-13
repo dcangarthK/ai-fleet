@@ -18,6 +18,9 @@ describe("resource board", () => {
     expect(slotPill(slot({ state: "at_budget" }))).toEqual({ tone: "bad", label: "At budget" });
     expect(slotPill(slot({ state: "offline" }))).toEqual({ tone: "quiet", label: "Offline" });
   });
+  it("shows a held slot as on hold, not offline", () => {
+    expect(slotPill(slot({ state: "held" }))).toEqual({ tone: "quiet", label: "On hold" });
+  });
   it("shows a profile whose directory is missing as not signed in", () => {
     expect(slotPill(slot({ state: "not_signed_in" }))).toEqual({ tone: "bad", label: "Not signed in" });
   });

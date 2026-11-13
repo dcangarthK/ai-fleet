@@ -1,3 +1,51 @@
+# Current state: 2026-11-13 05:00 SAST (overnight run finished; read this first)
+
+All of the overnight plan (`docs/OVERNIGHT-PLAN.md`) is merged on local `main` (HEAD `c787f67`, 43 commits since
+`594f2be`). **Nothing is pushed: the owner pushes.** Gate on main: 440, 512, 29 and 68 tests pass; `test_live` 3/3;
+`nodes/build.py --check` is clean. Runner and controller have been restarted on the new code.
+
+**What merged tonight:**
+- **G11** leader and controller handover. Codex built it in 3 rounds.
+- **G 2b** loop detection, gate bounce, self-heal core. Sonnet.
+- **H 8–10** bounded review input, idle burners off, telemetry. Sonnet.
+- **H 11** orchestrator token habits (trimmed `wait_tasks`/`task_status`). Sonnet.
+- **G10** usage watcher and timed queue. Codex built it in 5 rounds.
+- **H batch 3** cap continuation, repeat-test limit, routing defaults, no-lead rule, worker permissions. Sonnet built it in 4 rounds.
+- **G 7/8** self-heal wired into the poll loop, Live service alerts with recovery, and no-push for workers in every
+  mode (git-level, `GIT_CONFIG_GLOBAL` plus `GIT_CONFIG_COUNT`, fails closed on git older than 2.32). Sonnet.
+- **Final-review fixes** auto-continue of capped builds plus a restart sweep, chain limit 3
+  (`limits.max_continuations`), no pre-grants for supervised tasks, and the leader and review placement skip near-limit and held
+  slots. Sonnet.
+
+**Reviews:**
+- Every branch had an Opus round review, then a Haiku delta re-review or my own self-reported check of the last small round.
+- Codex terra **high** did the whole-batch final review (t-adaecf2a, 6 HIGH, all fixed), then a delta re-check over
+  `1f1ea56..c787f67` (t-0886852e): **approve**, no new HIGH or MED.
+- No Fable was used. No `budget_override` was used. No task was approved or unblocked by the orchestrator.
+
+**Spend (paid models):**
+- **Codex** `gpt-5.6-terra`: G11 build and 3 fix rounds, G10 build and 5 rounds, final review (high), delta re-check (high).
+- **Opus 5.5:** round reviews of G 2b, G11, H 8–10, H 11, H3, G10, G 7/8 and the final-review fixes (8).
+- **Sonnet 5.5:** all other builds and fix rounds.
+- **Haiku 5.5:** delta re-reviews (about 6).
+- **Limit hits:** both Claude 5-hour windows around 01:10, and the fleet account again at about 03:40 (reset 04:20). The
+  fleet handed the capped fix to the spare account automatically.
+- **Local models:** the qwen first-pass reviews returned nothing usable twice. Local review now needs per-file diffs
+  under 8 KB.
+
+**Open risks and follow-ups (not built):**
+- No-push is best effort at the git level. A worker shell with on-disk credentials (ssh keys, the gh token) can still push.
+  See `docs/SPEC-capacity-placement.md` 3a.
+- The Linux sudoers restart rule in `onboard.sh` has only been syntax- and text-tested. Do one real Linux onboard to check it.
+- A limit handoff copies only the original prompt, not later `message_task` fix instructions. Carry the message
+  history into the continuation.
+- `re_review` tasks have no shell. Give reviewers the diff inline, or give re-reviews read-only git.
+- `test_two_triggers_race_for_one_claim` (test_limit_handoff) flakes now and then in the combined gate run.
+- The held pill UI test (`handoff.test.ts`) wasn't run, because the worktree had no `node_modules`.
+- G req 8 L1/L3/L4 (an alert cadence with no end, and others) are deferred.
+
+---
+
 # Current state: 2026-11-12 00:50 SAST (read this first)
 
 **Repo:** `main` is the working branch, pushed by the owner to `github.com/dcangarthK/ai-fleet` over the SSH alias
@@ -224,6 +272,32 @@ Patterns that work:
   self-contained prompt and an exact output format; review their drafts before passing them to a builder
   (qwen once copied the formatting rules into the content; glm skipped requested examples).
 - Wait loops: always `sleep` inside the loop (one earlier loop forgot and hammered the API).
+
+## 6a. Networking build (13 Nov 04:30-08:00, unattended)
+
+All deferred networking phases are merged on main (not pushed). Owner steps: **docs/NETWORKING-OWNER-CHECKLIST.md**
+(start with "Start here"). Run log and task ids: docs/NETWORKING-PLAN.md.
+
+| Phase | Builder | Reviews | Merge |
+|---|---|---|---|
+| N4 gateway adapter (fakes only) | Sonnet t-59e3232c | Opus + 2 Haiku delta | merged, gate green |
+| N0 tailnet policy + 11435 audit | Sonnet t-bcdcbe01 | Opus + 3 Haiku delta | 1f4d6f7, gate green |
+| N2 posture + LiteLLM guard | Sonnet t-e03ce060/t-8e5e0718 | Opus (2 parts) + 2 Haiku delta | e15683a + 06ed1cf, gate green |
+| N3 Windows parity | Codex terra medium t-07e37b01 | Opus + 2 Haiku delta | 1030866 |
+
+Final review: Codex gpt-5.6-terra high, t-d6f4be32: REQUEST_CHANGES (1 HIGH Windows still exposing Ollama/11435,
+2 MED). Fixed by Sonnet t-f7e33082, Codex security delta review t-6e01801a APPROVE, merged ad8318d.
+
+Spend (approx., from task ids in NETWORKING-PLAN.md): Sonnet 6 build/fix tasks; Opus 6 round reviews; Haiku 8 delta re-reviews; Codex 3 (N3 build, final,
+security delta), all terra. No limit hits. No Fable.
+
+Open risks: N4 has no real router driver (fakes only); narrowed ACL is proposed, not applied; pre-N2 runners stay
+routed until re-onboarded (see checklist step 3).
+No Fable used. No live network, firewall, Tailscale, Docker or router change was made.
+
+Gotcha found: the builder-checklist rule "take main's copy of nodes/onboard.sh/ps1" is wrong when the branch edits
+those scripts outside the embedded runner (N2 retired the :11435 info server there). Take the branch's copy when
+main hasn't touched them since the branch point, then run nodes/build.py.
 
 ## 6. Where the work stands
 

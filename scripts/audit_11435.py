@@ -3,9 +3,9 @@
 
 Lists listeners only (one fixed `lsof` call, or a saved lsof listing via --file / stdin). Changes nothing.
 Exposure: loopback, tailnet (100.64.0.0/10 or fd7a:115c:a1e0::/48), wildcard, or other (LAN etc).
-Exit 0 on a verified clean read; 1 if a wildcard/other listener exists; 2 = UNVERIFIED (lsof missing, failed,
-wrote to stderr, or found nothing while not root: without root lsof only sees your own user's sockets, so run
-with sudo). Windows has no lsof, so it always exits 2 there.
+Exit 1 if a wildcard/other listener is seen (even when not root). Otherwise exit 0 only for a root live run
+(or a saved listing via --file/stdin); 2 = UNVERIFIED: lsof missing, failed or wrote to stderr, or a live run
+as non-root (lsof then only sees your own user's sockets, so loopback-only or empty results are partial; use sudo). Windows has no lsof, so it always exits 2 there.
 """
 import ipaddress
 import os
@@ -87,7 +87,8 @@ def main(argv, run=_run_lsof, euid=None):
     print(report(listeners))
     if any(x["exposure"] in ("wildcard", "other") for x in listeners):
         return 1
-    if live and not listeners and (os.geteuid() if euid is None else euid) != 0:
+    if live and (os.geteuid() if euid is None else euid) != 0:
+        # a wildcard/other listener already returned 1 above; anything else is a partial view
         print("UNVERIFIED: not root, so lsof only sees your own user's sockets. Re-run with sudo.")
         return 2
     return 0

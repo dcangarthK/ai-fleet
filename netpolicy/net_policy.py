@@ -116,7 +116,8 @@ def validate(policy):
             if d not in _DST_SELECTORS:
                 raise PolicyError(f"unsupported dst selector: {d!r}")
         for spec in g["ip"]:
-            if not isinstance(spec, str) or not _PORT_RE.match(spec):
+            m = _PORT_RE.match(spec) if isinstance(spec, str) else None
+            if not m or not 1 <= int(m.group(1)) <= 65535:
                 raise PolicyError(f"unsupported ip/port form: {spec!r}")
     return policy
 
@@ -153,7 +154,9 @@ def run_policy_tests(policy):
             raise PolicyError(f"evaluator cannot run tests for source {src!r}; use the Tailscale console")
         for key, want in (("accept", True), ("deny", False)):
             for target in t.get(key, []):
-                dst, port = target.rsplit(":", 1)
+                dst, _, port = target.rpartition(":")
+                if not port.isdigit():
+                    raise PolicyError(f"bad test target (non-numeric port): {target!r}")
                 if allowed(policy, src, dst, int(port)) != want:
                     fails.append(f"{src} -> {target} expected {key}")
     return fails

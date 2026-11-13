@@ -147,6 +147,20 @@ class Strictness(unittest.TestCase):
         self.assertRejected(lambda p: p["grants"].append(
             {"src": ["tag:llm-node"], "dst": ["tag:llm-node"], "ip": ["tcp:11434"], "app": {}}))
 
+    def test_port_range_and_non_numeric_ports(self):
+        for form in ("tcp:0", "tcp:65536", "tcp:99999", "tcp:abc", "tcp:", "tcp:-1"):
+            self.assertRejected(lambda p, f=form: p["grants"].append(
+                {"src": ["tag:llm-node"], "dst": ["tag:llm-node"], "ip": [f]}))
+        p = self.base()
+        p["grants"].append({"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:1", "tcp:65535"]})
+        netpol.validate(p)
+
+    def test_non_numeric_test_target_port_raises_policy_error(self):
+        p = self.base()
+        p["tests"].append({"src": "tag:master", "accept": ["tag:llm-node:abc"]})
+        with self.assertRaises(netpol.PolicyError):
+            netpol.run_policy_tests(p)
+
     def test_unknown_source_kind_raises(self):
         with self.assertRaises(netpol.PolicyError):
             netpol.allowed(self.base(), "stranger", "tag:master", 8443)
@@ -215,6 +229,17 @@ class Audit11435(unittest.TestCase):
         rc, out = self.run_main(["x"], run=lsof_result(rc=1), euid=501)
         self.assertEqual(rc, 2)
         self.assertIn("UNVERIFIED", out)
+
+    def test_live_non_root_loopback_only_is_unverified(self):
+        text = (FIX / "lsof_11435_mixed.txt").read_text().splitlines()
+        loop = "\n".join([text[0], text[1]])
+        rc, out = self.run_main(["x"], run=lsof_result(loop, rc=0), euid=501)
+        self.assertEqual(rc, 2)
+        self.assertIn("UNVERIFIED", out)
+
+    def test_live_root_loopback_only_is_clean(self):
+        text = (FIX / "lsof_11435_mixed.txt").read_text().splitlines()
+        self.assertEqual(self.run_main(["x"], run=lsof_result("\n".join(text[:2])), euid=0)[0], 0)
 
     def test_live_non_root_with_wildcard_still_flags(self):
         text = (FIX / "lsof_11435_mixed.txt").read_text()

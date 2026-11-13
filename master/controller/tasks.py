@@ -776,7 +776,9 @@ async def start(task: dict) -> None:
     if "task_minutes" in (policy.get("limits") or {}):
         runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
-            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
+            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None,
+            # Part H 3.7: the kind's default for a task that named a kind but no model (admitted on it).
+            "model": task["model"] or (task.get("placement") or {}).get("default_model"),
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":
@@ -1371,7 +1373,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             raise HTTPException(400, "profile is for Claude and Codex tasks")
         if not PROFILE_RE.fullmatch(t.profile):
             raise HTTPException(400, "profile must be a runner profile id")
-        if t.profile != "fleet" and not t.model and not (t.kind and budget.default_model(t.agent, t.kind)):
+        if t.profile != "fleet" and not t.model:
             # A named profile has its own config dir: the runner's reported default (the fleet profile's) may not be
             # what it runs, so budget identity, kinds, limits and independence need the model named (Codex review).
             raise HTTPException(400, f"name a model for a task pinned to profile {t.profile}")
@@ -1390,11 +1392,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
     if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
         raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
-    if not t.model and t.kind and (fallback := budget.default_model(t.agent, kind)):
-        # Part H 3.7: a task that names a kind but no model runs on the kind's default, never the parent's or the
-        # node's. Set before admission, so budget, independence and the task row all see the model that really runs.
-        # (A task with no kind keeps its old routing: its inferred "draft" kind is not a request for Haiku.)
-        t.model = fallback
+    # Part H 3.7: a task that names a kind but no model runs on the kind's default, never the parent's or the node's.
+    # Admission and independence see that model; the task row keeps model=None (the task is model-less by design:
+    # fleet-profile only, no profile pin, runner default in the row) and the default is sent to the runner at start.
+    kind_default = budget.default_model(t.agent, kind) if (t.kind and not t.model) else None
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
@@ -1448,7 +1449,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             raise HTTPException(400, f"no usable fleet profile for {t.agent}: name a model to run on another profile")
 
     try:
-        decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
+        decision = budget.admit(agent=t.agent, model=t.model or kind_default, kind=kind, effort=t.effort, override=bool(override),
                                 failures=failures, node_id=t.node, origin_kind=t.origin_kind,
                                 accounts_for=lambda of_agent: accounts_of(slots_for(of_agent), of_agent),
                                 forbidden=forbidden, reroute=not t.profile)  # a pinned profile never moves
@@ -1457,6 +1458,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
         raise HTTPException(refusal.status, refusal.detail)
     agent, model = decision["agent"], decision["model"]
+    row_model = None if (kind_default and not t.model and agent == t.agent and model == kind_default) else model
     engine = local_engine(agent, model, t.role, t.node, t.engine)
     task_policy = t.policy
     review_exec = decision.get("review_exec") or {}
@@ -1499,7 +1501,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
-              "pin": bool(t.pin), "model_pinned": bool(t.model)}
+              "pin": bool(t.pin), "model_pinned": bool(t.model),
+              "default_model": kind_default if kind_default and agent == t.agent and model == kind_default else None}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -1527,7 +1530,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             parent_id, link = (t.parent_id, t.link or "review") if t.parent_id else (ids[0], "review")
         part_title = title if len(parts) == 1 else f"{title[:68]} (part {index + 1}/{len(parts)})"
         row = {
-            "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": model,
+            "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": row_model,
             "engine": engine,
             "prompt": part, "mode": t.mode, "repo": t.repo, "worktree": int(t.worktree), "gate": t.gate,
             "node_id": node["id"], "state": state, "created_at": now, "updated_at": now,

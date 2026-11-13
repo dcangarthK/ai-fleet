@@ -155,11 +155,18 @@ class Strictness(unittest.TestCase):
         p["grants"].append({"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:1", "tcp:65535"]})
         netpol.validate(p)
 
-    def test_non_numeric_test_target_port_raises_policy_error(self):
-        p = self.base()
-        p["tests"].append({"src": "tag:master", "accept": ["tag:llm-node:abc"]})
-        with self.assertRaises(netpol.PolicyError):
-            netpol.run_policy_tests(p)
+    def test_bad_test_target_port_raises_policy_error(self):
+        # superscript two is str.isdigit() but not int()-parsable; 99999 is out of range
+        for bad in ("abc", "²", "99999", "0", "", "80\n", "٢"):
+            p = self.base()
+            p["tests"].append({"src": "tag:master", "accept": ["tag:llm-node:" + bad]})
+            with self.assertRaises(netpol.PolicyError, msg=repr(bad)):
+                netpol.run_policy_tests(p)
+
+    def test_grant_port_trailing_newline_and_unicode_rejected(self):
+        for form in ("tcp:80\n", "tcp:²", "tcp:٢"):
+            self.assertRejected(lambda p, f=form: p["grants"].append(
+                {"src": ["tag:llm-node"], "dst": ["tag:llm-node"], "ip": [f]}))
 
     def test_unknown_source_kind_raises(self):
         with self.assertRaises(netpol.PolicyError):

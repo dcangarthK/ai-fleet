@@ -3,9 +3,11 @@
 
 Lists listeners only (one fixed `lsof` call, or a saved lsof listing via --file / stdin). Changes nothing.
 Exposure: loopback, tailnet (100.64.0.0/10 or fd7a:115c:a1e0::/48), wildcard, or other (LAN etc).
-Exit 1 if a wildcard/other listener is seen (even when not root). Otherwise exit 0 only for a root live run
-(or a saved listing via --file/stdin); 2 = UNVERIFIED: lsof missing, failed or wrote to stderr, or a live run
-as non-root (lsof then only sees your own user's sockets, so loopback-only or empty results are partial; use sudo). Windows has no lsof, so it always exits 2 there.
+Exit 1 if a wildcard/other listener is seen (even when not root).
+Otherwise exit 0 only for a root live run (or a saved listing via --file/stdin).
+Exit 2 = UNVERIFIED: lsof missing, failed or wrote to stderr, or a live run as non-root.
+Non-root lsof sees only your own user's sockets, so its results are partial: use sudo.
+Windows has no lsof, so it always exits 2 there.
 """
 import ipaddress
 import os
@@ -79,7 +81,8 @@ def main(argv, run=_run_lsof, euid=None):
         except (OSError, subprocess.TimeoutExpired) as e:
             print(f"UNVERIFIED: lsof failed: {e}", file=sys.stderr)
             return 2
-        # lsof exits 1 when nothing matches; any other code or any stderr output means we cannot trust the read
+        # lsof exits 1 when nothing matches; any other code or any stderr output
+        # means we cannot trust the read
         if rc > 1 or err.strip():
             print(f"UNVERIFIED: lsof rc={rc} stderr={err.strip()[:200]!r}", file=sys.stderr)
             return 2

@@ -96,7 +96,16 @@ _TOP_KEYS = {"tagOwners", "grants", "tests"}
 _GRANT_KEYS = {"src", "dst", "ip"}
 _SRC_SELECTORS = {"tag:master", "tag:llm-node", "autogroup:member", "autogroup:admin"}
 _DST_SELECTORS = {"tag:master", "tag:llm-node"}
-_PORT_RE = re.compile(r"^tcp:([0-9]{1,5})$")
+_PORT_RE = re.compile(r"tcp:([0-9]{1,5})")  # used with fullmatch; ASCII digits only
+_DIGITS_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _port_number(text):
+    """ASCII-digit port in 1..65535 or None (so '2' superscript, '99999' and '' are all rejected)."""
+    if not isinstance(text, str) or not _DIGITS_RE.fullmatch(text):
+        return None
+    n = int(text)
+    return n if 1 <= n <= 65535 else None
 
 
 def validate(policy):
@@ -116,8 +125,8 @@ def validate(policy):
             if d not in _DST_SELECTORS:
                 raise PolicyError(f"unsupported dst selector: {d!r}")
         for spec in g["ip"]:
-            m = _PORT_RE.match(spec) if isinstance(spec, str) else None
-            if not m or not 1 <= int(m.group(1)) <= 65535:
+            m = _PORT_RE.fullmatch(spec) if isinstance(spec, str) else None
+            if not m or _port_number(m.group(1)) is None:
                 raise PolicyError(f"unsupported ip/port form: {spec!r}")
     return policy
 
@@ -133,7 +142,8 @@ _SRC_MATCH = {
 
 
 def allowed(policy, src, dst, port, proto="tcp"):
-    """True only if a grant allows src -> dst:port. Raises PolicyError for an unknown src kind or policy form."""
+    """True only if a grant allows src -> dst:port.
+    Raises PolicyError for an unknown src kind or policy form."""
     validate(policy)
     selectors = _SRC_MATCH.get(src)
     if selectors is None:
@@ -146,7 +156,7 @@ def allowed(policy, src, dst, port, proto="tcp"):
 
 def run_policy_tests(policy):
     """Evaluate the file's own "tests" block; returns failure strings (empty = all pass).
-    Raises PolicyError for a non-tag source (e.g. a user login): those rows are Tailscale-console-only."""
+    Raises PolicyError for a non-tag source (e.g. a user login): those rows are console-only."""
     fails = []
     for t in policy.get("tests", []):
         src = t["src"]
@@ -155,8 +165,9 @@ def run_policy_tests(policy):
         for key, want in (("accept", True), ("deny", False)):
             for target in t.get(key, []):
                 dst, _, port = target.rpartition(":")
-                if not port.isdigit():
-                    raise PolicyError(f"bad test target (non-numeric port): {target!r}")
-                if allowed(policy, src, dst, int(port)) != want:
+                number = _port_number(port)
+                if number is None:
+                    raise PolicyError(f"bad test target (port not 1-65535): {target!r}")
+                if allowed(policy, src, dst, number) != want:
                     fails.append(f"{src} -> {target} expected {key}")
     return fails

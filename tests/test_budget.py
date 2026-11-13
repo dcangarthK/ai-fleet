@@ -748,6 +748,17 @@ class BudgetApiTests(unittest.TestCase):
         r = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"], worktree=False)
         self.assertEqual(r.status_code, 400, r.text)
 
+    def test_a_continuation_prompt_over_4_kb_is_refused(self):
+        first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
+        self.settle_all()
+        big = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"], worktree=True,
+                        prompt="x" * 4097)
+        self.assertEqual(big.status_code, 400, big.text)
+        self.assertIn("4 KB", big.text)
+        small = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"],
+                          worktree=True, prompt="x" * 4096)
+        self.assertNotIn("4 KB", small.text)  # the size check passes; other admission rules are not under test
+
     def test_tasks_record_the_profile_and_account_label_when_known(self):
         plain = self.ok(agent="codex", kind="build", gate="pytest")
         self.assertEqual((plain["profile"], plain["account_label"]), ("fleet", None))

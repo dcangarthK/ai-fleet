@@ -51,6 +51,7 @@ NEEDS_APPROVAL = {"supervised", "full"}
 AGENTS = {"claude", "codex", "ollama"}
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 ACTIVE = {"queued", "awaiting_approval", "starting", "working"}
+CONTINUATION_PROMPT_MAX = 4096  # Part H 3.3: bytes
 SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled", "capped"}  # capped: Part H, not a failure
 RESUMABLE = {"review", "failed", "blocked", "interrupted", "capped"}
 
@@ -775,7 +776,10 @@ async def start(task: dict) -> None:
     if "task_minutes" in (policy.get("limits") or {}):
         runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
-            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
+            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None,
+            # Part H 3.7: a task that names no model runs on its kind's default, never the parent's. Filled here, at
+            # dispatch, so admission and routing see model-less tasks exactly as before.
+            "model": task["model"] or budget.default_model(task["agent"], task.get("kind")),
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":
@@ -1314,6 +1318,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, "link_reason needs replaces")
     if t.continue_job and (t.continue_job != t.replaces or not t.worktree):
         raise HTTPException(400, "continue_job must be the task named in replaces, and needs a worktree")
+    if t.continue_job and len(t.prompt.encode("utf-8")) > CONTINUATION_PROMPT_MAX:
+        raise HTTPException(400, f"a continuation prompt must be under {CONTINUATION_PROMPT_MAX // 1024} KB: the "
+                                 "capped task's handoff has the history (Part H 3.3)")
     if t.replaces:
         # Part F 5: a task made in place of another is a retry of it; the old one settles as handed_off.
         if t.link_reason is not None and t.link_reason not in REPLACE_REASONS:
@@ -1365,9 +1372,6 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
     if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
         raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
-    explicit_model = bool(t.model)
-    if not t.model and (fallback := budget.default_model(t.agent, kind)):
-        t.model = fallback  # Part H 3.7: the kind's default, never the parent's or the owner's own default model
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
@@ -1472,7 +1476,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
-              "pin": bool(t.pin), "model_pinned": explicit_model, "model_defaulted": not explicit_model and bool(t.model)}
+              "pin": bool(t.pin), "model_pinned": bool(t.model)}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})

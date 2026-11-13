@@ -34,6 +34,7 @@ def read_results() -> list[dict]:
 
 def run_view(row) -> dict:
     value = dict(row)
+    value["engine"] = value.get("engine") or "ollama"
     for field, fallback in (("roles", []), ("scores", None), ("errors", None)):
         try:
             value[field] = json.loads(value[field]) if value[field] is not None else fallback
@@ -181,11 +182,11 @@ def leaderboard() -> list[dict]:
     return [{field: row.get(field) for field in fields} for row in read_results()]
 
 
-def enqueue(model: str, node: str, roles: list[str]) -> dict:
+def enqueue(model: str, node: str, roles: list[str], engine: str = "ollama") -> dict:
     identifier = "e-" + secrets.token_hex(4)
     with db() as c:
-        c.execute("INSERT INTO eval_runs VALUES (?,?,?,?, 'queued', NULL,NULL,NULL,NULL,NULL)",
-                  (identifier, model, node, json.dumps(roles)))
+        c.execute("INSERT INTO eval_runs (id,model,node,roles,state,engine) VALUES (?,?,?,?, 'queued', ?)",
+                  (identifier, model, node, json.dumps(roles), engine))
         row = c.execute("SELECT * FROM eval_runs WHERE id=?", (identifier,)).fetchone()
     events.emit(None, "eval.queued", {"id": identifier, "model": model, "node": node})
     return run_view(row)
@@ -240,6 +241,8 @@ async def _run(run: dict) -> None:
     out = results_path().parent
     args = [*command, "--models", run["model"], "--roles", ",".join(run["roles"]),
             "--runner", tasks.runner_url(node), "--out", str(out)]
+    if (run.get("engine") or "ollama") != "ollama":
+        args += ["--engine", run["engine"]]
     try:
         process = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,

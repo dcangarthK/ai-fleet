@@ -3936,6 +3936,40 @@ def ollama_relay(ollama_url, body, urlopen=None):
         raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
 
 
+DMR_CHAT_KEYS = {"model", "messages", "temperature", "seed", "max_tokens", "response_format", "stream"}
+
+
+def dmr_relay(dmr_url, body, urlopen=None):
+    """Controller evals reach the node's loopback Docker Model Runner through the runner. Only /chat/completions (POST)
+    and /models (GET), no streaming, a validated model and a loopback engine URL."""
+    path = body.get("path")
+    payload = body.get("body")
+    if path not in ("/chat/completions", "/models"):
+        raise HttpError(400, "engine path not allowed")
+    try:
+        base = loopback_base_url(dmr_url)
+    except ValueError as exc:
+        raise HttpError(502, str(exc))
+    if path == "/models":
+        payload, method = None, "GET"
+    else:
+        method = "POST"
+        if not isinstance(payload, dict) or not isinstance(payload.get("model"), str) or not EVAL_MODEL.fullmatch(payload["model"]):
+            raise HttpError(400, "a valid model is required")
+        if set(payload) - DMR_CHAT_KEYS or payload.get("stream") is not False or not isinstance(payload.get("messages"), list):
+            raise HttpError(400, "chat request not allowed")
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
+    try:
+        with (urlopen or loopback_urlopen)(request, timeout=900) as response:
+            raw = response.read()
+        return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raise HttpError(502, "engine returned HTTP %s" % exc.code)
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "FleetRunner/2"
 
@@ -3990,6 +4024,11 @@ class Handler(BaseHTTPRequestHandler):
             return collector.check_now() if collector else posture_unknown("posture collector not running")
         if method == "POST" and parts == ["engines", "ollama", "request"]:
             return ollama_relay(self.manager.ollama_url, self._body())
+        if method == "POST" and parts == ["engines", "dmr", "request"]:
+            adapter = self.manager.engine_adapters.get("dmr")
+            if adapter is None:
+                raise HttpError(503, "dmr engine not configured")
+            return dmr_relay(adapter.base_url, self._body())
         if method == "GET" and parts == ["models"]:
             return self.manager.model_manager.listing()
         if method == "GET" and parts == ["operations"]:

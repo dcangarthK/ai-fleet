@@ -708,8 +708,96 @@ class ReportAndThinkTests(unittest.TestCase):
         self.assertEqual(out["text"], "ok")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class FakeResp:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return None
+
+    def read(self, *a):
+        return self.raw
+
+
+class DmrEngine(unittest.TestCase):
+    """--engine dmr: OpenAI-format chat to /chat/completions, fake transport only."""
+    REPLY = {"choices": [{"message": {"content": "<think>x</think> hello"}}], "usage": {"completion_tokens": 10}}
+
+    def run_chat(self, reply=None, **kw):
+        calls = []
+
+        def fake(base, path, body=None, timeout=600, engine="ollama"):
+            calls.append((base, path, body, engine))
+            return reply if reply is not None else self.REPLY
+        with mock.patch.object(E, "ENGINE", "dmr"), mock.patch.object(E, "ollama", side_effect=fake):
+            out = E.chat("http://dmr", "ai/gemma3:4B-Q4_0", "sys", "hi", **kw)
+        return out, calls
+
+    def test_body_shape_and_path(self):
+        _, calls = self.run_chat(temperature=0.5, seed=7)
+        base, path, body, engine = calls[0]
+        self.assertEqual((path, engine), ("/chat/completions", "dmr"))
+        self.assertEqual(body, {"model": "ai/gemma3:4B-Q4_0", "stream": False, "temperature": 0.5, "seed": 7,
+                                "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]})
+
+    def test_json_mode_sets_response_format(self):
+        _, calls = self.run_chat(json_mode=True)
+        self.assertEqual(calls[0][2]["response_format"], {"type": "json_object"})
+        _, calls = self.run_chat()
+        self.assertNotIn("response_format", calls[0][2])
+
+    def test_parsing_strips_think_and_has_no_logprobs(self):
+        out, _ = self.run_chat(logprobs=True)
+        self.assertEqual(out["text"], "hello")
+        self.assertEqual(out["logprobs"], [])
+        self.assertGreaterEqual(out["tokens_per_s"], 0)
+
+    def test_missing_usage_gives_zero_tps(self):
+        out, _ = self.run_chat(reply={"choices": [{"message": {"content": "ok"}}]})
+        self.assertEqual((out["text"], out["tokens_per_s"]), ("ok", 0))
+
+    def test_size_and_unload_skip_ollama_calls(self):
+        with mock.patch.object(E, "ENGINE", "dmr"), mock.patch.object(E, "ollama", side_effect=AssertionError):
+            self.assertIsNone(E.loaded_size_gb("http://dmr", "m"))
+            E.unload("http://dmr", "m")
+
+    def test_relay_path_and_models_listing(self):
+        seen = []
+
+        def fake_urlopen(req, timeout=None):
+            seen.append((req.full_url, req.get_method(), req.data))
+            return FakeResp(b'{"data": [{"id": "ai/gemma3:4B-Q4_0"}, {"id": "ai/x"}]}')
+        with mock.patch.object(E, "RELAY", "http://100.1.2.3:11436"), \
+                mock.patch.object(E.urllib.request, "urlopen", fake_urlopen):
+            ids = E.dmr_models("http://unused")
+        self.assertEqual(ids, ["ai/gemma3:4B-Q4_0", "ai/x"])
+        self.assertEqual(seen[0][0], "http://100.1.2.3:11436/engines/dmr/request")
+        self.assertEqual(json.loads(seen[0][2])["path"], "/models")
+
+    def test_direct_models_uses_base_url_get(self):
+        seen = []
+
+        def fake_urlopen(req, timeout=None):
+            seen.append((req.full_url, req.get_method()))
+            return FakeResp(b'{"data": []}')
+        with mock.patch.object(E, "RELAY", None), mock.patch.object(E.urllib.request, "urlopen", fake_urlopen):
+            E.dmr_models("http://127.0.0.1:12434/engines/v1")
+        self.assertEqual(seen[0], ("http://127.0.0.1:12434/engines/v1/models", "GET"))
+
+    def test_default_engine_is_unchanged(self):
+        self.assertEqual(E.ENGINE, "ollama")
+        captured = {}
+
+        def fake(base, path, body=None, **kw):
+            captured.update(path=path, body=body)
+            return {"message": {"content": "ok"}}
+        with mock.patch.object(E, "ollama", side_effect=fake):
+            E.chat("http://x", "m", "s", "p")
+        self.assertEqual(captured["path"], "/api/chat")
+        self.assertIn("options", captured["body"])
 
 
 class RunnerRelay(unittest.TestCase):
@@ -738,3 +826,7 @@ class RunnerRelay(unittest.TestCase):
         self.assertEqual(seen["headers"].get("X-runner-token"), "tok-x")
         self.assertEqual(seen["body"]["path"], "/api/tags")
         self.assertNotIn("11434", seen["url"])
+
+
+if __name__ == "__main__":
+    unittest.main()

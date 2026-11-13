@@ -251,6 +251,19 @@ def deployment_id(role: str, node: str, model: str) -> str:
     return FLEET_PREFIX + re.sub(r"[^a-zA-Z0-9.-]", "_", f"{role}--{node}--{model}")
 
 
+_loopback_warned: set[str] = set()
+
+
+def engine_is_loopback_only(node: sqlite3.Row) -> bool:
+    """True when the node's runner reports its engine bound to loopback only (docs/SPEC-networking.md phase N2)."""
+    try:
+        runner = json.loads(node["runner"]) if node["runner"] else {}
+    except (ValueError, TypeError):
+        return False
+    firewall = runner.get("firewall") if isinstance(runner, dict) else None
+    return isinstance(firewall, dict) and firewall.get("engine_loopback_only") is True
+
+
 def desired_deployments() -> dict[str, dict]:
     with db() as c:
         nodes = {r["id"]: r for r in c.execute("SELECT * FROM nodes")}
@@ -265,14 +278,20 @@ def desired_deployments() -> dict[str, dict]:
         if (not n or a["state"] != "active" or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST)
                 or not healthy(n) or a["model"] not in json.loads(n["models"])):
             continue
+        if n["id"] != tasks.MASTER_ID and engine_is_loopback_only(n):
+            # LiteLLM would call http://<ip>:11434, which a loopback-only engine refuses (and the narrowed ACL
+            # blocks). Skip with a visible warning; the runner relay (11436) is not a LiteLLM route.
+            if n["id"] not in _loopback_warned:
+                _loopback_warned.add(n["id"])
+                print(f"warning: node {n['name']}: Ollama is loopback-only, its roles are not routed through LiteLLM")
+                events.emit(None, "deployment.skipped", {"node": n["id"], "reason": "engine_loopback_only"})
+            continue
         host = MASTER_MODEL_HOST if n["id"] == tasks.MASTER_ID else n["ip"]
         assignment_params = json.loads(a["params"] or "{}")
         routed_model = "fleet-" + a["catalog_id"] if a["catalog_id"] and assignment_params else a["model"]
-        if n["engine"] == "ollama":
-            params = {"model": f"ollama_chat/{routed_model}", "api_base": f"http://{host}:{n['port']}"}
-        else:
-            params = {"model": f"openai/{a['model']}", "api_base": f"http://{host}:{n['port']}/v1",
-                      "api_key": "none"}
+        if n["engine"] != "ollama":
+            continue  # vLLM, LM Studio and llama.cpp ports (8000/1234/8080) are no longer probed or routed (spec 12)
+        params = {"model": f"ollama_chat/{routed_model}", "api_base": f"http://{host}:{n['port']}"}
         params["timeout"] = 600
         params.update(assignment_params)
         desired[deployment_id(a["role"], a["node"], a["model"])] = {

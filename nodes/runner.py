@@ -781,15 +781,24 @@ POSTURE_SECONDS = 60
 POSTURE_TIMEOUT = 3
 POSTURE_MIN_GAP = 5  # "check now" never re-runs the commands more often than this
 SOCKETFILTER = "/usr/libexec/ApplicationFirewall/socketfilterfw"
+POSTURE_RULES_TIMEOUT = 10  # `netsh ... show rule name=all` can be slow on hosts with many rules
+# Absolute paths: a launchd or service PATH often lacks /usr/sbin, which would leave the status unknown forever.
+_SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+LSOF = ("/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN")
+SS = ("ss", "-ltn")
+NETSTAT4 = (os.path.join(_SYSTEM32, "netstat.exe"), "-ano", "-p", "tcp")
+NETSTAT6 = (os.path.join(_SYSTEM32, "netstat.exe"), "-ano", "-p", "tcpv6")  # `-p tcp` lists IPv4 only
+PFCTL = ("/sbin/pfctl", "-s", "info")  # reading /dev/pf needs root; as a normal user this stays unreadable
+NETSH = os.path.join(_SYSTEM32, "netsh.exe")
+NETSH_PROFILES = (NETSH, "advfirewall", "show", "allprofiles", "state")
+NETSH_RULES = (NETSH, "advfirewall", "firewall", "show", "rule", "name=all", "dir=in", "verbose")
+# Windows parsing matches English netsh/netstat output ("LISTENING", "State ON", "Rule Name:"). On a localized
+# Windows the text differs, parsing finds nothing and the status stays unknown (never a false pass).
 # The only commands the posture collector may run. Every one only reads state; anything else is refused.
 POSTURE_COMMANDS = frozenset({
-    ("lsof", "-nP", "-iTCP", "-sTCP:LISTEN"),
-    ("ss", "-ltn"),
-    ("netstat", "-ano", "-p", "tcp"),
-    ("pfctl", "-s", "info"),
+    LSOF, SS, NETSTAT4, NETSTAT6, PFCTL,
     (SOCKETFILTER, "--getglobalstate"),
-    ("netsh", "advfirewall", "show", "allprofiles", "state"),
-    ("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in"),
+    NETSH_PROFILES, NETSH_RULES,
 })
 
 
@@ -865,11 +874,12 @@ def listener_facts(listeners, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS
     for item in sorted(bad_engines, key=lambda i: i["port"]):
         details.append("engine port %d bound to %s (not loopback)" % (item["port"], item["addr"]))
     if not engines:
-        details.append("no engine port listening")
+        # lsof as a normal user does not list other users' sockets, so "no engine seen" proves nothing.
+        details.append("no engine port seen listening (not proof of loopback-only)")
     wildcard6 = any(item["family"] == 6 and address_kind(item["addr"]) == "wildcard" for item in watched)
     if wildcard6:
         details.append("IPv6 wildcard listener on a fleet port")
-    return {"runner_tailnet_only": runner_ok, "engine_loopback_only": not bad_engines,
+    return {"runner_tailnet_only": runner_ok, "engine_loopback_only": (not bad_engines) if engines else None,
             "ipv6_wildcard": wildcard6, "details": details}
 
 
@@ -911,7 +921,8 @@ def parse_defender_rules(text):
                 and block.get("protocol", "").lower() in ("tcp", "any")):
             rules.append({"name": block.get("rule name", ""),
                           "ports": [p.strip() for p in block.get("localport", "").split(",") if p.strip()],
-                          "remote": [r.strip() for r in block.get("remoteip", "any").split(",") if r.strip()]})
+                          "remote": [r.strip() for r in block.get("remoteip", "any").split(",") if r.strip()],
+                          "program": block.get("program", "any").strip()})
     for line in (text or "").splitlines():
         key, sep, value = line.partition(":")
         key = key.strip().lower()
@@ -919,7 +930,8 @@ def parse_defender_rules(text):
             if block:
                 close()
             block = {"rule name": value.strip()}
-        elif sep and block and key in ("enabled", "action", "protocol", "localport", "remoteip"):
+        elif sep and block and key in ("enabled", "action", "protocol", "localport", "remoteip", "program"):
+            # "Program: C:\\x.exe" keeps its drive colon: partition split at the first colon only.
             block[key] = value.strip()
     if block:
         close()
@@ -941,6 +953,24 @@ def _ports_admitted(rule_ports, wanted):
     return hit
 
 
+_TAILNETS = ("100.64.0.0/10", "fd7a:115c:a1e0::/48")
+_ENGINE_PROGRAMS = ("ollama", "docker", "model-runner", "llama", "vllm", "lmstudio", "lm studio")
+
+
+def _remote_in_tailnet(entry):
+    """True only when a netsh RemoteIP entry (address, /prefix, /dotted mask or a-b range) lies inside the tailnet."""
+    import ipaddress
+    nets = [ipaddress.ip_network(n) for n in _TAILNETS]
+    try:
+        if "-" in entry:
+            ends = [ipaddress.ip_address(x.strip()) for x in entry.split("-", 1)]
+            return all(any(e.version == n.version and e in n for n in nets) for e in ends)
+        net = ipaddress.ip_network(entry.strip(), strict=False)
+    except ValueError:
+        return False  # Any, LocalSubnet, Internet, ... are broader than the master's tailnet addresses
+    return any(net.version == n.version and net.subnet_of(n) for n in nets)
+
+
 def defender_posture(profiles_text, rules_text, runner_port=RUNNER_PORT, engine_ports=ENGINE_PORTS):
     """(state, findings): state enabled/disabled/unknown; findings [("fail"|"warn", text)]."""
     profiles = parse_defender_profiles(profiles_text)
@@ -955,14 +985,20 @@ def defender_posture(profiles_text, rules_text, runner_port=RUNNER_PORT, engine_
     rules = parse_defender_rules(rules_text)
     for rule in rules:
         exposed = _ports_admitted(rule["ports"], engine_ports)
+        program = rule.get("program", "any").lower()
+        if exposed and program not in ("any", "") and any(r.lower() == "any" for r in rule["ports"]) \
+                and not any(word in program for word in _ENGINE_PROGRAMS):
+            continue  # an "allow this app" rule for some other program does not open the engine's port
         if exposed:
             findings.append(("fail", "inbound allow admits engine port(s) %s (rule: %s)" % (
                 ", ".join(str(p) for p in sorted(exposed)), rule["name"][:60])))
-    runner_rules = [r for r in rules if runner_port in _ports_admitted(r["ports"], (runner_port,))]
+    runner_rules = [r for r in rules if runner_port in _ports_admitted(r["ports"], (runner_port,))
+                    and not (r.get("program", "any").lower() not in ("any", "")
+                             and any(x.lower() == "any" for x in r["ports"]))]  # app-only rules don't count
     if not runner_rules:
         findings.append(("warn", "no inbound allow rule for runner port %d" % runner_port))
-    elif any(any(x.lower() == "any" for x in r["remote"]) for r in runner_rules):
-        findings.append(("warn", "runner port %d allowed from any source" % runner_port))
+    elif any(not all(_remote_in_tailnet(x) for x in r["remote"]) for r in runner_rules):
+        findings.append(("warn", "runner port %d allowed from outside the master's tailnet addresses" % runner_port))
     return state, findings
 
 
@@ -972,32 +1008,38 @@ def collect_posture(run, platform=None, runner_port=RUNNER_PORT, engine_ports=EN
     platform = platform or sys.platform
     run = read_only_runner(run)
     if platform == "darwin":
-        listing = run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"])
+        listing = run(list(LSOF))
     elif platform.startswith("win"):
-        listing = run(["netstat", "-ano", "-p", "tcp"])
+        v4, v6 = run(list(NETSTAT4)), run(list(NETSTAT6))
+        # Both families must be readable: an unreadable IPv6 table could hide a [::] listener.
+        listing = (v4 + "\n" + v6) if v4 and v6 is not None else None
     else:
-        listing = run(["ss", "-ltn"])
+        listing = run(list(SS))
     facts = listener_facts(parse_listeners(listing), runner_port, engine_ports)
     details, findings, backend = list(facts["details"]), [], "unknown"
     if platform == "darwin":
-        pf = parse_pf_info(run(["pfctl", "-s", "info"]))
+        pf = parse_pf_info(run(list(PFCTL)))
         app = parse_socketfilter_state(run([SOCKETFILTER, "--getglobalstate"]))
         details.append("pf: %s" % (pf or "unreadable"))
         details.append("application firewall: %s" % (app or "unreadable"))
         if pf == "enabled":
             state, backend = "enabled", "macos-pf"
+            findings.append(("warn", "pf rules not inspected (needs root); enabled alone does not prove ports are closed"))
         elif app == "enabled":
             state, backend = "enabled", "macos-application-firewall"
             findings.append(("warn", "application firewall cannot restrict by source address; tailnet ACL is primary"))
         elif pf == "disabled" and app == "disabled":
             state, backend = "disabled", "macos-pf"
             findings.append(("warn", "no host firewall enabled"))
+        elif pf is None and app == "disabled":
+            state, backend = "disabled", "macos-application-firewall"
+            findings.append(("warn", "application firewall off and pf unreadable"))
         else:
             state = "unknown"
     elif platform.startswith("win"):
         state, findings = defender_posture(
-            run(["netsh", "advfirewall", "show", "allprofiles", "state"]),
-            run(["netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in"]),
+            run(list(NETSH_PROFILES)),
+            run(list(NETSH_RULES), timeout=POSTURE_RULES_TIMEOUT),
             runner_port, engine_ports)
         backend = "windows-defender" if state != "unknown" else "unknown"
         if state == "unknown":
@@ -1009,7 +1051,8 @@ def collect_posture(run, platform=None, runner_port=RUNNER_PORT, engine_ports=EN
     if (facts["runner_tailnet_only"] is False or facts["engine_loopback_only"] is False
             or facts["ipv6_wildcard"] or any(level == "fail" for level, _ in findings)):
         status = "fail"
-    elif state == "unknown" or facts["runner_tailnet_only"] is None:
+    elif (state == "unknown" or facts["runner_tailnet_only"] is None or facts["engine_loopback_only"] is None
+          or facts["ipv6_wildcard"] is None):
         status = "unknown"
     elif state == "disabled" or findings:
         status = "warn"
@@ -1029,9 +1072,14 @@ class PostureCollector:
         self.platform, self.runner_port, self.engine_ports = platform, runner_port, engine_ports
         self.interval, self.wall, self.mono = interval, wall, mono
         self.lock = threading.Lock()
+        self.run_lock = threading.Lock()  # one collection at a time (background thread vs "check now")
         self.values, self.at = None, None
 
     def once(self):
+        with self.run_lock:
+            return self._collect()
+
+    def _collect(self):
         try:
             values = collect_posture(self.run, self.platform, self.runner_port, self.engine_ports, self.wall)
         except Exception as exc:  # a permission error or odd output must never stop collection
@@ -1042,9 +1090,10 @@ class PostureCollector:
         return self.snapshot()
 
     def check_now(self):
-        with self.lock:
-            recent = self.at is not None and self.mono() - self.at < POSTURE_MIN_GAP
-        return self.snapshot() if recent else self.once()
+        with self.run_lock:
+            with self.lock:
+                recent = self.at is not None and self.mono() - self.at < POSTURE_MIN_GAP
+            return self.snapshot() if recent else self._collect()
 
     def run_forever(self):
         while True:
@@ -4121,7 +4170,9 @@ def main():
     server.runner_token = runner_token(fleet_dir)
     server.manager.metrics = MetricsCollector(server.manager.root, ollama_url).start()
     EngineCollector(server.manager).start()
-    server.manager.posture = PostureCollector(runner_port=address[1]).start()
+    engine_port = urlparse(ollama_url).port
+    ports = tuple(sorted(set(ENGINE_PORTS) | ({engine_port} if engine_port else set())))
+    server.manager.posture = PostureCollector(runner_port=address[1], engine_ports=ports).start()
     Heartbeat(server.manager, server.runner_token, lambda: health_report(server.manager)).start()
 
     def stop(_signum, _frame):

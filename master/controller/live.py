@@ -465,6 +465,9 @@ def firewall_view(runner: dict, seen: float, now: float) -> dict:
     """The runner's posture with its age on this controller's clock; stale or absent observations read "unknown"."""
     fw = tasks.clean_firewall(runner.get("firewall"))
     own = fw["age_s"]
+    checked = runner.get("firewall_seen_at")  # set by "check now"; newer than the last poll or heartbeat
+    if isinstance(checked, (int, float)) and checked > (seen or 0):
+        seen = checked
     age = (now - seen + own) if seen and own is not None else None
     if age is None or age > FIREWALL_STALE:
         fw = dict(fw, status="unknown")

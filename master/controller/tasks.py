@@ -2223,6 +2223,7 @@ async def posture_check(node: str) -> dict:
             stored = None
         if isinstance(stored, dict):
             stored["firewall"] = firewall
+            stored["firewall_seen_at"] = time.time()  # this controller's clock; live.firewall_view ages from it
             c.execute("UPDATE nodes SET runner=? WHERE id=?", (json.dumps(stored), row["id"]))
     return {"node": row["id"], "firewall": firewall}
 

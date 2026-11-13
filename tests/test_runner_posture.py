@@ -13,12 +13,13 @@ spec = importlib.util.spec_from_file_location("fleet_runner_posture", ROOT / "no
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
-LSOF = ("lsof", "-nP", "-iTCP", "-sTCP:LISTEN")
-PF = ("pfctl", "-s", "info")
+LSOF = runner.LSOF
+PF = runner.PFCTL
 APP = (runner.SOCKETFILTER, "--getglobalstate")
-NETSTAT = ("netstat", "-ano", "-p", "tcp")
-PROFILES = ("netsh", "advfirewall", "show", "allprofiles", "state")
-RULES = ("netsh", "advfirewall", "firewall", "show", "rule", "name=all", "dir=in")
+NETSTAT = runner.NETSTAT4
+NETSTAT6 = runner.NETSTAT6
+PROFILES = runner.NETSH_PROFILES
+RULES = runner.NETSH_RULES
 
 
 def fixture(name):
@@ -41,8 +42,10 @@ def mac(lsof="lsof_good.txt", pf="pfctl_enabled.txt", app="socketfilterfw_on.txt
                     APP: fixture(app) if app else None})
 
 
-def windows(rules="netsh_rules_good.txt", profiles="netsh_profiles_on.txt", netstat="netstat_win_good.txt"):
+def windows(rules="netsh_rules_good.txt", profiles="netsh_profiles_on.txt", netstat="netstat_win_good.txt",
+            netstat6="netstat_win_good6.txt"):
     return FakeRun({NETSTAT: fixture(netstat) if netstat else None,
+                    NETSTAT6: fixture(netstat6) if netstat6 else None,
                     PROFILES: fixture(profiles) if profiles else None,
                     RULES: fixture(rules) if rules else None})
 
@@ -65,7 +68,7 @@ class ListenerParsing(unittest.TestCase):
         self.assertIn({"addr": "*", "port": 11436, "family": 6}, rows)
 
     def test_windows_netstat(self):
-        rows = runner.parse_listeners(fixture("netstat_win_good.txt"))
+        rows = runner.parse_listeners(fixture("netstat_win_good.txt") + fixture("netstat_win_good6.txt"))
         self.assertIn({"addr": "100.88.77.66", "port": 11436, "family": 4}, rows)
         self.assertIn({"addr": "::", "port": 445, "family": 6}, rows)
 
@@ -86,9 +89,10 @@ class ListenerParsing(unittest.TestCase):
 
 
 class MacPosture(unittest.TestCase):
-    def test_pass_with_pf_enabled_and_good_binds(self):
+    def test_pf_enabled_without_inspected_rules_is_a_warning_never_a_pass(self):
         out = collect(mac(), "darwin")
-        self.assertEqual((out["status"], out["backend"]), ("pass", "macos-pf"))
+        self.assertEqual((out["status"], out["backend"]), ("warn", "macos-pf"))
+        self.assertTrue(any("pf rules not inspected" in d for d in out["details"]))
         self.assertEqual((out["runner_tailnet_only"], out["engine_loopback_only"], out["ipv6_wildcard"]),
                          (True, True, False))
         self.assertEqual((out["checked_at"], out["age_s"]), (1000.0, 0.0))
@@ -103,9 +107,10 @@ class MacPosture(unittest.TestCase):
         self.assertEqual(out["status"], "warn")
         self.assertIn("no host firewall enabled", out["details"])
 
-    def test_pf_permission_denied_stays_unknown_when_app_firewall_is_off(self):
+    def test_pf_unreadable_and_app_firewall_off_warns(self):
         out = collect(mac(pf=None, app="socketfilterfw_off.txt"), "darwin")
-        self.assertEqual((out["status"], out["backend"]), ("unknown", "unknown"))
+        self.assertEqual((out["status"], out["backend"]), ("warn", "macos-application-firewall"))
+        self.assertTrue(any("pf unreadable" in d for d in out["details"]))
         self.assertIn("pf: unreadable", out["details"])
 
     def test_pf_permission_denied_with_app_firewall_on_still_reports_it(self):
@@ -132,6 +137,20 @@ class MacPosture(unittest.TestCase):
         self.assertEqual(out["status"], "fail")
         self.assertTrue(out["ipv6_wildcard"])
 
+    def test_no_engine_seen_is_unknown_not_loopback_only(self):
+        """lsof as a normal user misses other users' sockets: no engine row must not read as loopback-only."""
+        run = FakeRun({LSOF: "ruby 1 u 3u IPv4 0x1 0t0 TCP 100.101.102.103:11436 (LISTEN)\n",
+                       PF: fixture("pfctl_enabled.txt"), APP: fixture("socketfilterfw_on.txt")})
+        out = collect(run, "darwin")
+        self.assertEqual((out["status"], out["engine_loopback_only"]), ("unknown", None))
+
+    def test_custom_engine_port_is_watched(self):
+        run = FakeRun({LSOF: "ollama 1 u 3u IPv4 0x1 0t0 TCP *:9999 (LISTEN)\n"
+                       "x 1 u 3u IPv4 0x1 0t0 TCP 100.101.102.103:11436 (LISTEN)\n",
+                       PF: fixture("pfctl_enabled.txt"), APP: fixture("socketfilterfw_on.txt")})
+        out = runner.collect_posture(run, platform="darwin", engine_ports=(11434, 9999), wall=lambda: 1.0)
+        self.assertEqual((out["status"], out["engine_loopback_only"]), ("fail", False))
+
     def test_runner_not_seen_is_unknown(self):
         run = FakeRun({LSOF: "ollama 1 u 3u IPv4 0x1 0t0 TCP 127.0.0.1:11434 (LISTEN)\n",
                        PF: fixture("pfctl_enabled.txt"), APP: fixture("socketfilterfw_on.txt")})
@@ -149,10 +168,40 @@ class WindowsPosture(unittest.TestCase):
         self.assertEqual(out["status"], "fail")
         self.assertTrue(any("engine port(s) 11434, 11435" in d for d in out["details"]))
 
+    def test_ipv6_wildcard_engine_fails(self):
+        out = collect(windows(netstat6="netstat_win_wildcard6.txt"), "win32")
+        self.assertEqual(out["status"], "fail")
+        self.assertTrue(out["ipv6_wildcard"])
+
+    def test_unreadable_ipv6_table_is_unknown_not_pass(self):
+        out = collect(windows(netstat6=None), "win32")
+        self.assertEqual(out["status"], "unknown")
+
+    def test_app_rule_for_another_program_does_not_fail(self):
+        out = collect(windows(rules="netsh_rules_program_app.txt"), "win32")
+        self.assertEqual(out["status"], "pass", out["details"])
+
+    def test_any_port_rule_for_an_engine_program_fails(self):
+        out = collect(windows(rules="netsh_rules_engine_program.txt"), "win32")
+        self.assertEqual(out["status"], "fail")
+
+    def test_runner_rule_from_a_lan_subnet_warns(self):
+        out = collect(windows(rules="netsh_rules_runner_subnet.txt"), "win32")
+        self.assertEqual(out["status"], "warn")
+        self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]))
+
+    def test_remote_entry_forms(self):
+        for entry in ("100.64.1.2", "100.64.1.2/32", "100.64.1.2/255.255.255.255", "100.64.0.0/10",
+                      "100.64.1.1-100.64.1.9", "fd7a:115c:a1e0::1/128"):
+            self.assertTrue(runner._remote_in_tailnet(entry), entry)
+        for entry in ("Any", "LocalSubnet", "Internet", "0.0.0.0/0", "192.168.0.0/16", "100.0.0.0/8",
+                      "100.64.1.1-101.0.0.1", "garbage"):
+            self.assertFalse(runner._remote_in_tailnet(entry), entry)
+
     def test_runner_allowed_from_any_source_warns_and_disabled_rules_are_ignored(self):
         out = collect(windows(rules="netsh_rules_runner_any.txt"), "win32")
         self.assertEqual(out["status"], "warn")
-        self.assertTrue(any("allowed from any source" in d for d in out["details"]))
+        self.assertTrue(any("outside the master's tailnet" in d for d in out["details"]))
         self.assertFalse(any("engine port" in d for d in out["details"]))
 
     def test_profile_off_warns(self):
@@ -224,7 +273,7 @@ class Collector(unittest.TestCase):
         collector.once()
         clock[0] = 42.5
         snap = collector.snapshot()
-        self.assertEqual((snap["status"], snap["age_s"], snap["checked_at"]), ("pass", 42.5, 5000.0))
+        self.assertEqual((snap["status"], snap["age_s"], snap["checked_at"]), ("warn", 42.5, 5000.0))
 
     def test_check_now_is_rate_limited_and_read_only(self):
         clock, run = [0.0], mac()

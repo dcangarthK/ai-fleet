@@ -164,6 +164,46 @@ class LiveMachine(unittest.TestCase):
         self.assertEqual(self.row(runner=runner)["failures"], ["firewall", "engine"])
 
 
+class LiteLLMGuard(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+
+    def seed(self, node_id, firewall):
+        with db() as c:
+            c.execute("DELETE FROM assignments WHERE node=?", (node_id,))
+            c.execute("DELETE FROM nodes WHERE id=?", (node_id,))
+            c.execute("INSERT INTO nodes (id,name,ip,engine,port,models,status,runner,fails) "
+                      "VALUES (?,?,?,'ollama',11434,?,'approved',?,0)",
+                      (node_id, node_id, "100.9.9.9", json.dumps(["m:1"]), json.dumps({"firewall": firewall})))
+            c.execute("INSERT INTO assignments (role,node,model,engine,state) VALUES ('coder',?,'m:1','ollama','active')",
+                      (node_id,))
+
+    def test_loopback_only_remote_engine_is_skipped_with_a_warning(self):
+        controller._loopback_warned.discard("lb1")
+        self.seed("lb1", dict(GOOD, engine_loopback_only=True))
+        with mock.patch.object(events, "emit") as emit:
+            self.assertFalse([k for k in controller.desired_deployments() if "--lb1--" in k])
+            controller.desired_deployments()
+        self.assertEqual(emit.call_count, 1, "warned once, not on every reconcile")
+        self.assertEqual(emit.call_args.args[1], "deployment.skipped")
+
+    def test_engine_not_known_loopback_is_still_routed(self):
+        self.seed("lb2", dict(GOOD, engine_loopback_only=None))
+        deployed = controller.desired_deployments()
+        self.assertEqual([d["litellm_params"]["api_base"] for k, d in deployed.items() if "--lb2--" in k],
+                         ["http://100.9.9.9:11434"])
+
+
+class CheckNowAge(unittest.TestCase):
+    def test_fresh_check_shows_its_age_even_when_the_last_poll_is_old(self):
+        old = live.FIREWALL_STALE + 500
+        runner = {"firewall": GOOD, "firewall_seen_at": 1000.0 + old - 3}
+        fw = live.firewall_view(runner, 1000.0, 1000.0 + old)
+        self.assertEqual(fw["status"], "pass")
+        self.assertEqual(fw["age_s"], 15)  # 3 s since the check + the runner's own 12 s
+
+
 class CheckNow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

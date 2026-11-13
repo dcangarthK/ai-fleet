@@ -1,5 +1,6 @@
 // Live (docs/SPEC-live-monitor.md 5): who is doing what, where, with which model, on which account, right now.
-// Read-only: actions stay on the existing pages, which every row links to.
+// Read-only: actions stay on the existing pages, which every row links to. The one button, "Check now", only asks a
+// node's runner to re-read its firewall state (no change is applied).
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -274,10 +275,10 @@ function FirewallBadge({ m }: { m: Machine }) {
   // Read-only: asks the node's runner to re-read its firewall state; nothing is applied.
   const check = useMutation({
     mutationFn: () => post(`/api/nodes/${encodeURIComponent(m.node)}/posture/check`),
-    onSettled: () => client.invalidateQueries(),
+    onSettled: () => client.invalidateQueries({ queryKey: ["live"] }),
   });
   return (
-    <span className="row" style={{ gap: 8 }} title={badge.details.join("\n") || undefined}>
+    <span className="row" style={{ gap: 8 }}>
       <span className={`state small tone-${badge.tone}`}>{badge.label}</span>
       <span className="small quiet">{badge.age}</span>
       <button className="btn small" disabled={check.isPending || !!m.offline} onClick={() => check.mutate()}>

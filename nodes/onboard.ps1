@@ -6,7 +6,7 @@
 #   .\onboard.ps1 -ScanOnly                    just rescan and republish (runs hourly after onboarding)
 param([switch]$ScanOnly, [switch]$Yes, [string[]]$Models = @(), [string[]]$AllowRoot = @(),
       [string]$FleetDir = "", [string]$Enroll = "", [string]$EnrollFile = "", [switch]$EnrollPrompt,
-      [string]$Master = "")
+      [string]$Master = "", [switch]$EnableDmr)
 $ErrorActionPreference = "Stop"
 # Prefer -EnrollPrompt (asks, input hidden) or -EnrollFile PATH: a code given as -Enroll VALUE stays in the
 # process command line and PowerShell history.
@@ -14,7 +14,6 @@ $EnrollRequested = [bool]($Enroll -or $EnrollFile -or $EnrollPrompt)
 $EnrollCode = ""
 $AllowRootsSet = $PSBoundParameters.ContainsKey("AllowRoot")
 if (-not $FleetDir) { $FleetDir = if ($env:FLEET_DIR) { $env:FLEET_DIR } else { Join-Path $env:ProgramData "ai-fleet" } }
-$InfoPort = 11435
 $RunnerTokenValue = ""
 New-Item -ItemType Directory -Force -Path (Join-Path $FleetDir "public") | Out-Null
 
@@ -76,6 +75,7 @@ function Configure-Ollama($ip) {
     if (-not (Ask "Ollama is not installed. Install it to serve local models?")) { return }
     winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements
   }
+  # Compatibility hold: controller inventory/probes/evals still directly use this endpoint (NETWORKING-OWNER-CHECKLIST N3).
   Say "Configuring Ollama to listen on the tailnet only (${ip}:11434)"
   foreach ($kv in @(@("OLLAMA_HOST", "${ip}:11434"), @("OLLAMA_KEEP_ALIVE", "10m"), @("OLLAMA_FLASH_ATTENTION", "1"))) {
     [Environment]::SetEnvironmentVariable($kv[0], $kv[1], "User")
@@ -117,7 +117,7 @@ function Scan($ip) {
                 else { @($body.data | ForEach-Object { [ordered]@{ name = $_.id } }) }
       $routed = @(11434, 8000, 1234, 8080) -contains $port
       $servers += [ordered]@{ engine = $engine; port = $port; models = $models; reachable_from_master = [bool]($ip -and $h -eq $ip -and $routed)
-        hint = $(if ($h -eq $ip -and $routed) { "" } elseif ($h -eq $ip) { "port $port isn't routed by the fleet; serve it on 8000, 1234 or 8080" } else { "bound to localhost only; bind it to the tailnet IP to use it in the fleet" }) }
+        hint = $(if ($h -eq $ip -and $routed) { "compatibility endpoint; migrate controller reads before loopback-only enforcement" } elseif ($h -eq $ip) { "port $port isn't routed by the fleet" } else { "bound to localhost only" }) }
       break
     }
   }
@@ -183,13 +183,14 @@ function Scan($ip) {
 }
 
 function Install-Services($ip) {
-  Say "Publishing inventory on ${ip}:$InfoPort (tailnet only) and rescanning hourly"
+  Say "Publishing compatibility inventory on ${ip}:11435 and rescanning hourly"
   $self = Join-Path $FleetDir "onboard.ps1"
   if ($PSCommandPath -ne $self) { Copy-Item -LiteralPath $PSCommandPath -Destination $self -Force }
+
   $server = Join-Path $FleetDir "serve-info.ps1"
   $serverSource = @"
 `$l = New-Object System.Net.HttpListener
-`$l.Prefixes.Add("http://${ip}:$InfoPort/")
+`$l.Prefixes.Add("http://${ip}:11435/")
 `$fleetJson = Join-Path `$PSScriptRoot "public\fleet.json"
 `$l.Start()
 while (`$l.IsListening) {
@@ -218,10 +219,7 @@ while (`$l.IsListening) {
   $scanSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
   Register-ScheduledTask -TaskName "AI Fleet Scan" -Action $scan -Trigger $hourly -Settings $scanSettings -User $env:USERNAME -Force | Out-Null
 
-  # Allow only tailnet addresses (100.64.0.0/10) to reach the model and inventory ports.
-  Get-NetFirewallRule -DisplayName "AI Fleet" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-  New-NetFirewallRule -DisplayName "AI Fleet" -Direction Inbound -Protocol TCP -LocalPort 11434, $InfoPort, 11436, 1234, 8000, 8080 `
-    -RemoteAddress 100.64.0.0/10 -Action Allow | Out-Null
+  Write-Host "Defender Firewall was not changed. If owner-approved, use nodes/windows/set-defender-runner-rule.ps1 for TCP 11436 only."
 }
 
 # ---------- agent runner ----------
@@ -4474,6 +4472,14 @@ function Configure-RunnerPolicy($cfg) {
   Set-DefaultProperty $config "power" ([PSCustomObject]@{ min_battery_pct = 30 })
   # Written out so the owner can see the switch; the console may install models only when it is true.
   Set-DefaultProperty $config "models" ([PSCustomObject]@{ remote_management = $false; max_loaded = 1; disk_reserve_gb = 8; ram_reserve_gb = 4 })
+  if ($EnableDmr) {
+    Set-DefaultProperty $config "engines" ([PSCustomObject]@{})
+    if ($null -eq $config.engines -or -not ($config.engines -is [PSCustomObject])) { $config.engines = [PSCustomObject]@{} }
+    Set-DefaultProperty $config.engines "dmr" ([PSCustomObject]@{ enabled = $true; base_url = "http://127.0.0.1:12434/engines/v1" })
+    Set-DefaultProperty $config.engines.dmr "base_url" "http://127.0.0.1:12434/engines/v1"
+    $config.engines.dmr.enabled = $true
+    Write-Host "DMR enabled in runner.json. Verify Docker Desktop's actual host bind is loopback-only before use."
+  }
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
 }
 

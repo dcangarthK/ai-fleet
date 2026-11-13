@@ -443,5 +443,48 @@ class OllamaRelay(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 502)
 
 
+class DmrRelay(unittest.TestCase):
+    URL = "http://127.0.0.1:12434/engines/v1"
+
+    def call(self, body, url=None, reply=None):
+        engine = FakeEngine(reply if reply is not None else {"choices": []})
+        return runner.dmr_relay(url or self.URL, body, urlopen=engine), engine
+
+    def chat(self, **over):
+        body = {"model": "ai/gemma3:4B-Q4_0", "stream": False, "temperature": 0, "seed": 1,
+                "messages": [{"role": "user", "content": "x"}]}
+        body.update(over)
+        return {"path": "/chat/completions", "body": body}
+
+    def test_chat_and_models_paths(self):
+        _, engine = self.call(self.chat(response_format={"type": "json_object"}, max_tokens=5))
+        self.assertEqual((engine.requests[0].full_url, engine.requests[0].get_method()),
+                         (self.URL + "/chat/completions", "POST"))
+        _, engine = self.call({"path": "/models", "body": {"model": "ignored"}})
+        self.assertEqual((engine.requests[0].full_url, engine.requests[0].get_method(), engine.requests[0].data),
+                         (self.URL + "/models", "GET", None))
+
+    def test_rejections_are_400(self):
+        for body in ({"path": "/api/chat", "body": {}}, {"path": "http://evil/models", "body": None},
+                     self.chat(stream=True), self.chat(tools=[]), self.chat(messages="x"),
+                     self.chat(model="../../etc"), self.chat(model=""), self.chat(model="a b"),
+                     self.chat(model="a\nb"), self.chat(model=5)):
+            with self.assertRaises(runner.HttpError, msg=str(body)) as ctx:
+                self.call(body)
+            self.assertEqual(ctx.exception.status, 400)
+
+    def test_refuses_a_non_loopback_base(self):
+        with self.assertRaises(runner.HttpError) as ctx:
+            self.call(self.chat(), url="http://100.101.102.103:12434/engines/v1")
+        self.assertEqual(ctx.exception.status, 502)
+
+    def test_engine_down_is_a_502(self):
+        def down(request, timeout=None):
+            raise OSError("refused")
+        with self.assertRaises(runner.HttpError) as ctx:
+            runner.dmr_relay(self.URL, self.chat(), urlopen=down)
+        self.assertEqual(ctx.exception.status, 502)
+
+
 if __name__ == "__main__":
     unittest.main()

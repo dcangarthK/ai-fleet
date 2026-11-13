@@ -93,9 +93,13 @@ SANDBOX_MODE = "auto"  # set from --sandbox / --unsafe-exec in main()
 RELAY: str | None = None  # a node runner URL: engine calls go through its token-checked /engines/ollama/request
 
 
-def ollama(base: str, path: str, body: dict | None = None, timeout: float = 600) -> dict:
+ENGINE = "ollama"  # "ollama" or "dmr" (Docker Model Runner, OpenAI-compatible); set from --engine in main()
+DMR_DEFAULT_URL = "http://127.0.0.1:12434/engines/v1"
+
+
+def ollama(base: str, path: str, body: dict | None = None, timeout: float = 600, engine: str = "ollama") -> dict:
     if RELAY:  # the engine is loopback-only on the node; only the runner (11436) is reachable (docs/SPEC-networking.md)
-        req = urllib.request.Request(RELAY.rstrip("/") + "/engines/ollama/request",
+        req = urllib.request.Request(RELAY.rstrip("/") + f"/engines/{engine}/request",
                                      data=json.dumps({"path": path, "body": body}).encode(), method="POST",
                                      headers={"Content-Type": "application/json",
                                               "X-Runner-Token": os.environ.get("FLEET_EVAL_RUNNER_TOKEN", "")})
@@ -108,8 +112,32 @@ def ollama(base: str, path: str, body: dict | None = None, timeout: float = 600)
         return json.load(r)
 
 
+def dmr_chat(base: str, model: str, system: str, prompt: str, json_mode: bool, temperature: float, seed: int) -> dict:
+    body = {"model": model, "stream": False, "temperature": temperature, "seed": seed,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    started = time.monotonic()
+    out = ollama(base, "/chat/completions", body, engine="dmr")
+    elapsed = time.monotonic() - started
+    choices = out.get("choices") or [{}]
+    text = ((choices[0] or {}).get("message") or {}).get("content") or ""
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    tokens = (out.get("usage") or {}).get("completion_tokens") or 0
+    tps = tokens / elapsed if tokens and elapsed > 0 else 0
+    return {"text": text, "seconds": elapsed, "tokens_per_s": tps, "logprobs": []}
+
+
+def dmr_models(base: str) -> list[str]:
+    """Model ids the DMR engine serves (GET /models, data[].id)."""
+    return [m["id"] for m in ollama(base, "/models", None, timeout=30, engine="dmr").get("data", [])
+            if isinstance(m, dict) and isinstance(m.get("id"), str)]
+
+
 def chat(base: str, model: str, system: str, prompt: str, json_mode: bool = False,
          temperature: float = 0, logprobs: bool = False, seed: int = 42, think: bool = False) -> dict:
+    if ENGINE == "dmr":  # no logprobs from DMR: logprob-based metrics get an empty list and degrade
+        return dmr_chat(base, model, system, prompt, json_mode, temperature, seed)
     # "think" is Ollama's documented switch for reasoning models (qwen3 etc.); False skips the thinking phase.
     body = {"model": model, "stream": False, "keep_alive": "5m", "think": think,
             "options": {"temperature": temperature, "seed": seed, "num_ctx": 8192},
@@ -129,6 +157,8 @@ def chat(base: str, model: str, system: str, prompt: str, json_mode: bool = Fals
 
 
 def loaded_size_gb(base: str, model: str) -> float | None:
+    if ENGINE == "dmr":
+        return None
     try:
         for m in ollama(base, "/api/ps").get("models", []):
             if canonical(m.get("name", "")) == canonical(model) or canonical(m.get("model", "")) == canonical(model):
@@ -143,6 +173,8 @@ def canonical(name: str) -> str:
 
 
 def unload(base: str, model: str) -> None:
+    if ENGINE == "dmr":
+        return
     try:
         ollama(base, "/api/generate", {"model": model, "keep_alive": 0}, timeout=60)
     except OSError:
@@ -683,6 +715,9 @@ def main() -> int:
     ap.add_argument("--models", default="")
     ap.add_argument("--roles", default="coder,reviewer,fast")
     ap.add_argument("--ollama", default=os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434"))
+    ap.add_argument("--engine", choices=["ollama", "dmr"], default="ollama",
+                    help="engine serving the models (dmr = Docker Model Runner)")
+    ap.add_argument("--dmr", default=DMR_DEFAULT_URL, help="DMR OpenAI-compatible base URL (without --runner)")
     ap.add_argument("--runner", default=None,
                     help="node runner URL; engine calls are relayed by it (token in FLEET_EVAL_RUNNER_TOKEN)")
     ap.add_argument("--out", default=str(HERE / "results"))
@@ -692,8 +727,10 @@ def main() -> int:
     ap.add_argument("--report-only", action="store_true",
                     help="regenerate LEADERBOARD.md and GROUNDING.md from results.json; calls no model")
     args = ap.parse_args()
-    global RELAY
+    global RELAY, ENGINE
     RELAY = args.runner
+    ENGINE = args.engine
+    base_url = args.dmr if ENGINE == "dmr" else args.ollama
     if not args.report_only and not args.models:
         ap.error("--models is required unless --report-only is given")
     global SANDBOX_MODE
@@ -708,9 +745,18 @@ def main() -> int:
     previous = {}
     if (out / "results.json").exists():  # keep earlier models so the leaderboard grows run by run
         previous = {r["model"]: r for r in json.loads((out / "results.json").read_text())}
-    for model in [] if args.report_only else [m for m in args.models.split(",") if m]:
+    wanted = [] if args.report_only else [m for m in args.models.split(",") if m]
+    if ENGINE == "dmr" and wanted:
+        try:
+            served = set(dmr_models(base_url))
+        except (OSError, ValueError) as exc:
+            ap.error(f"cannot list DMR models: {exc}")
+        missing = [m for m in wanted if m not in served]
+        if missing:
+            ap.error(f"models not served by DMR: {', '.join(missing)}")
+    for model in wanted:
         print(f"== {model}", flush=True)
-        previous[model] = merge_result(previous.get(model), eval_model(args.ollama, model, roles, args.repeat))
+        previous[model] = merge_result(previous.get(model), eval_model(base_url, model, roles, args.repeat))
     results = list(previous.values())
     if not args.report_only:
         (out / "results.json").write_text(json.dumps(results, indent=2))

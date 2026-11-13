@@ -28,7 +28,16 @@ function Quote-WindowsPath($Path) { return '"' + $Path + '"' }
 function Escape-CmdValue($Value) { return ([string]$Value).Replace("%", "%%") }
 function RamGB { [int]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) }
 function GpuGB {
-  if (Have nvidia-smi) { $v = nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | Sort-Object { [int]$_ } | Select-Object -Last 1; return [int]([int]$v / 1024) }
+  # A broken driver prints e.g. "Failed to initialize NVML: Unknown Error"; never let that throw.
+  try {
+    if (Have nvidia-smi) {
+      $out = @(& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>&1)
+      if ($LASTEXITCODE -eq 0) {
+        $mb = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^\s*\d+\s*$' } | ForEach-Object { [int]$_.Trim() } | Sort-Object)
+        if ($mb.Count -gt 0) { return [int]($mb[-1] / 1024) }
+      }
+    }
+  } catch { }
   return 0
 }
 function GetJson($url) { try { Invoke-RestMethod $url -TimeoutSec 2 } catch { $null } }

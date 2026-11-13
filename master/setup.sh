@@ -79,13 +79,46 @@ print(name + ":8443" if name else "")' 2>/dev/null || true
 # Tag this Mac tag:master without touching its other Tailscale preferences (exit node, routes, DNS, SSH).
 # `tailscale set` changes only the flags given; older CLIs without it get `tailscale up` without --reset, which
 # Tailscale refuses if other non-default flags would be dropped. --reset only with --reset-tailscale.
+# Pick Tailscale's suggested `tailscale up ...` line out of its refusal text. Echo it only if it carries
+# --advertise-tags=tag:master and nothing but allowlisted flags. Never run it.
+suggested_up() {
+  local line tok has_tag=0 ok=1
+  line="$(printf '%s\n' "$1" | grep -E 'tailscale up ' | head -n1)" || true
+  [ -n "$line" ] || return 1
+  line="${line#*tailscale up }"
+  for tok in $line; do
+    case "$tok" in
+      --advertise-tags=tag:master) has_tag=1 ;;
+      --accept-routes|--ssh|--accept-dns=*|--exit-node=*|--advertise-routes=*|--operator=*|--hostname=*) ;;
+      *) ok=0 ;;
+    esac
+  done
+  [ "$has_tag" = 1 ] && [ "$ok" = 1 ] || return 1
+  echo "tailscale up $line"
+}
+
 tag_master() {
-  local help=""
+  local help="" up_out="" suggestion=""
+  if "$TS" status --json 2>/dev/null | python3 -c '
+import json, sys
+tags = (json.load(sys.stdin).get("Self") or {}).get("Tags") or []
+sys.exit(0 if "tag:master" in tags else 1)' 2>/dev/null; then
+    echo "Already tagged tag:master"
+    return 0
+  fi
   help="$("$TS" set --help 2>&1 || true)"
   if [[ "$help" == *advertise-tags* ]]; then
     "$TS" set --advertise-tags=tag:master && return 0
   else
-    "$TS" up --advertise-tags=tag:master && return 0
+    if up_out="$("$TS" up --advertise-tags=tag:master 2>&1)"; then
+      [ -n "$up_out" ] && echo "$up_out"
+      return 0
+    fi
+    echo "$up_out"
+    if suggestion="$(suggested_up "$up_out")"; then
+      echo "Tailscale suggests this command, which keeps this Mac's other settings. Run it yourself, then re-run setup:"
+      echo "  $suggestion"
+    fi
   fi
   if [ "$RESET_TAILSCALE" = 1 ]; then
     echo "--reset-tailscale: retrying with 'tailscale up --reset'. This resets this Mac's other Tailscale"

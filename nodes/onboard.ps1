@@ -2771,8 +2771,7 @@ class JobManager:
             denied = list(policy_tools.get("claude_deny") or [])
             if (policy.get("network") or {}).get("agents") == "deny":
                 denied += ["WebFetch", "WebSearch"]
-            if mode != "full":
-                denied += ["Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"]  # a worker never publishes
+            denied += ["Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"]  # a worker never publishes, in any mode
             denied = list(dict.fromkeys(denied))
             if denied:
                 cmd += ["--disallowedTools", ",".join(denied)]

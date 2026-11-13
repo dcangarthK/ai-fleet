@@ -260,13 +260,11 @@ class Launch(Base):
         cmd = self.m._command(self.job(mode="read-only"), "p", ["Edit", "Grep"], False)
         self.assertEqual(flag(cmd, "--allowedTools"), "Grep")
 
-    def test_workers_may_not_push_or_change_remotes_except_in_full(self):
-        for mode in ("auto-edit", "supervised", "read-only"):
+    def test_workers_may_not_push_or_change_remotes_in_any_mode(self):
+        for mode in ("auto-edit", "supervised", "read-only", "full"):
             denied = flag(self.m._command(self.job(kind="build", mode=mode), "p", [], False), "--disallowedTools")
             for rule in ("Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"):
                 self.assertIn(rule, denied.split(","), mode)  # N4
-        self.assertIsNone(flag(self.m._command(self.job(kind="build", mode="full"), "p", [], False),
-                               "--disallowedTools"))
 
     def test_controller_approved_tools_cap_the_settings_allow(self):
         cmd = self.m._command(self.job(kind="build"), "p", ["Read"], False)

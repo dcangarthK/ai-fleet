@@ -95,15 +95,25 @@ class RunnerAvailabilityTests(unittest.TestCase):
 
 
 class OnboardingHookTests(unittest.TestCase):
-    def test_onboarding_preserves_compatibility_paths_and_opt_in_dmr_config(self):
+    def test_onboarding_is_loopback_only_and_retires_11435(self):
         text = (ROOT / "nodes" / "onboard.ps1").read_text()
         self.assertIn('[switch]$EnableDmr', text)
-        self.assertIn('"OLLAMA_HOST", "${ip}:11434"', text)
-        self.assertIn('"OLLAMA_URL=http://${ip}:11434"', text)
+        self.assertIn('"OLLAMA_HOST", "127.0.0.1:11434"', text)
+        self.assertNotIn('"OLLAMA_HOST", "${ip}:11434"', text)
+        self.assertIn('"OLLAMA_URL=http://127.0.0.1:11434"', text)
+        self.assertNotIn("http://${ip}:11434", text)
         self.assertIn('base_url = "http://127.0.0.1:12434/engines/v1"', text)
         self.assertIn("Defender Firewall was not changed", text)
-        self.assertIn("AI Fleet Info", text)
-        self.assertIn("http://${ip}:11435/", text)
+        self.assertNotIn("HttpListener", text)
+        self.assertNotIn("http://${ip}:11435/", text)
+        self.assertIn("Unregister-ScheduledTask -TaskName \"AI Fleet Info\"", text)
+
+    def test_defender_script_allows_only_11436(self):
+        text = (WINDOWS / "set-defender-runner-rule.ps1").read_text()
+        self.assertIn("-LocalPort 11436", text)
+        self.assertNotIn("11434,11435", text)
+        self.assertNotIn("-LocalPort 11434", text)
+        self.assertNotIn("-LocalPort 11435", text)
 
 
 if __name__ == "__main__":

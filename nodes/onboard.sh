@@ -1599,16 +1599,18 @@ _ENGINE_PROGRAMS = ("ollama", "docker", "model-runner", "llama", "vllm", "lmstud
 
 
 def _remote_in_tailnet(entry):
-    """True only when a netsh RemoteIP entry (address, /prefix, /dotted mask or a-b range) lies inside the tailnet."""
+    """True only when a netsh RemoteIP entry (address, /prefix, /dotted mask or a-b range) is a single tailnet host (/32 or /128)."""
     import ipaddress
     nets = [ipaddress.ip_network(n) for n in _TAILNETS]
     try:
         if "-" in entry:
             ends = [ipaddress.ip_address(x.strip()) for x in entry.split("-", 1)]
-            return all(any(e.version == n.version and e in n for n in nets) for e in ends)
+            return ends[0] == ends[1] and any(ends[0].version == n.version and ends[0] in n for n in nets)
         net = ipaddress.ip_network(entry.strip(), strict=False)
     except ValueError:
         return False  # Any, LocalSubnet, Internet, ... are broader than the master's tailnet addresses
+    if net.num_addresses != 1:
+        return False  # a subnet (even the whole tailnet) is wider than the master's own host address(es)
     return any(net.version == n.version and net.subnet_of(n) for n in nets)
 
 

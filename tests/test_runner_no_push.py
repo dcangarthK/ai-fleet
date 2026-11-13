@@ -78,6 +78,26 @@ class NoPushTests(Base):
         self.assertEqual(done.returncode, 0, done.stderr)
 
 
+    def test_unwritable_config_refuses_to_launch_the_worker(self):
+        blocker = self.base / "not-a-dir"
+        blocker.write_text("x")
+        os.environ["FLEET_DIR"] = str(blocker)  # worker.gitconfig can't be created under a file
+        with self.assertRaises(RuntimeError):
+            self.m.agent_env("claude", dict(os.environ), None)
+        job = self.job(kind="build", cwd=str(self.code))
+        with self.assertRaises(Exception):
+            self.m._launch(job, "p", [], False)  # create() turns this into a failed job, never a running one
+
+    def test_fleet_vars_survive_and_a_patched_subprocess_does_not_break_it(self):
+        real = runner.subprocess.Popen
+        runner.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError("patched"))
+        try:
+            env = self.m.agent_env("claude", {"FLEET_JOB_DIR": "/j", "FLEET_X": "1"}, None)
+        finally:
+            runner.subprocess.Popen = real
+        self.assertEqual((env["FLEET_JOB_DIR"], env["FLEET_X"]), ("/j", "1"))
+
+
 class ServiceRestartCommandTests(Base):
     def test_linux_uses_sudo_and_the_units_onboarding_installs(self):
         self.assertEqual(runner.service_restart_command("runner", "linux", 1000),

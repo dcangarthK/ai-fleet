@@ -3465,7 +3465,7 @@ def _git_identity():
         try:
             done = subprocess.run(["git", "config", "--global", key], capture_output=True, text=True, timeout=5)
             value = done.stdout.strip() if done.returncode == 0 else ""
-        except (OSError, subprocess.TimeoutExpired):
+        except Exception:  # any failure (no git, a patched subprocess in tests) just means the default identity
             value = ""
         out[key] = value
     return out
@@ -3503,9 +3503,10 @@ def no_push_env(env):
     for key in PUSH_ENV_DROP:
         env.pop(key, None)
     path = ensure_no_push_config()
-    if path is not None:
-        env["GIT_CONFIG_GLOBAL"] = str(path)
-        env["GIT_CONFIG_NOSYSTEM"] = "1"  # system gitconfig credential helpers (osxkeychain, manager) stay out
+    if path is None:  # fail closed: without the config a worker could push, so it must not launch
+        raise RuntimeError("cannot write the worker git config %s; refusing to launch a worker" % no_push_config_path())
+    env["GIT_CONFIG_GLOBAL"] = str(path)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"  # system gitconfig credential helpers (osxkeychain, manager) stay out
     return env
 
 

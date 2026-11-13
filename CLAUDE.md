@@ -24,7 +24,8 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
   It is event-based: one long-poll the controller wakes on task events, so nothing loops or prints while you wait.
 - **Orchestrator hygiene** (docs/SPEC-token-budget.md 3.11): `wait_tasks` and `task_status` return a trimmed view
   by default: state, verdict line, findings (HIGH/MED/LOW blocks) and gate summary (Ran/OK/FAILED lines, failing
-  test names). Pass `full=True` for the whole result and gate tail (or set `FLEET_MCP_TRIM=0`). State lives in
+  test names). Pass `full=True` for the untrimmed output (or set `FLEET_MCP_TRIM=0`); for the whole record incl. gate tail
+  use `task_status(id, full=True)` (`wait_tasks(full=True)` only has the first 2000 chars of the result, no gate). State lives in
   fleet.db and the stored plan (`get_plan`/`put_plan`), not in chat; start a fresh session per batch from the
   req 3 handoff summary instead of carrying a long conversation.
 - Review with `task_diff` and `task_log`; steer with `message_task` (same session, keeps context).

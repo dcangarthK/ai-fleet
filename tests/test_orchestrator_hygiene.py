@@ -86,6 +86,66 @@ class Tools(unittest.TestCase):
     def test_env_off(self):
         os.environ["FLEET_MCP_TRIM"] = "0"
         self.assertIn("chatter", server.task_status("t-1"))
+        self.assertIn("chatter", server.wait_tasks(["t-1"]))
+
+
+class Fallbacks(unittest.TestCase):
+    def test_other_finding_formats(self):
+        for line in ("- **High** \u2014 bad thing", "[HIGH] bad thing", "1. HIGH: bad thing", "### HIGH \u2014 bad thing",
+                     "HIGH (a.py:10): bad thing", "| HIGH | bad thing |", "| High | bad thing |"):
+            v = server.trim_task({"id": "t", "state": "review", "result": f"intro\n{line}\n\nend"})
+            self.assertEqual(len(v["findings"]), 1, line)
+
+    def test_prose_not_a_finding(self):
+        v = server.trim_task({"id": "t", "state": "review", "result": "Low-hanging fruit first.\nLow: tide today."})
+        self.assertEqual(v["findings"], [])
+
+    def test_unmatched_format_keeps_tail(self):
+        text = "x" * 5000 + "\nThe answer is 42."
+        v = server.trim_task({"id": "t", "state": "done", "result": text})
+        self.assertTrue(v["result_tail"].endswith("The answer is 42."))
+        self.assertLessEqual(len(v["result_tail"]), server.RESULT_TAIL)
+
+    def test_non_approve_verdict_without_findings_keeps_tail(self):
+        v = server.trim_task({"id": "t", "state": "review", "result": "Verdict: request_changes\nsee notes below"})
+        self.assertIn("see notes below", v["result_tail"])
+
+    def test_approve_verdict_no_tail(self):
+        v = server.trim_task({"id": "t", "state": "review", "result": "Verdict: approve\nfine"})
+        self.assertNotIn("result_tail", v)
+
+    def test_failed_gate_unknown_output_keeps_tail(self):
+        out = "\n".join(f"line {i}" for i in range(50)) + "\nGate timed out after 900 seconds"
+        v = server.trim_task({"id": "t", "state": "failed", "result": "",
+                              "gate_result": {"state": "failed", "exit_code": None, "output_tail": out}})
+        self.assertEqual(len(v["gate"]["tail"]), server.GATE_TAIL_LINES)
+        self.assertEqual(v["gate"]["tail"][-1], "Gate timed out after 900 seconds")
+
+    def test_passed_gate_no_tail(self):
+        v = server.trim_task({"id": "t", "state": "review", "result": "",
+                              "gate_result": {"state": "passed", "exit_code": 0, "output_tail": "all fine"}})
+        self.assertNotIn("tail", v["gate"])
+
+    def test_denials_and_planned_kept(self):
+        v = server.trim_task({"id": "t", "state": "blocked", "result": "", "planned": {"action": "wait"},
+                              "denials": [{"tool_name": "Bash"}, {"tool": "Write"}, {"tool_name": "Bash"}]})
+        self.assertEqual(v["denials"], ["Bash", "Write"])
+        self.assertEqual(v["planned"], {"action": "wait"})
+
+    def test_active_states_skip_extra_get(self):
+        calls = []
+        saved = server._controller
+        server._controller = lambda *a, **k: calls.append(a) or "{}"
+        try:
+            for st in ("queued", "awaiting_approval", "starting", "working"):
+                server._full_record({"id": "t", "state": st})
+        finally:
+            server._controller = saved
+        self.assertEqual(calls, [])
+
+    def test_active_states_match_controller(self):
+        import tasks
+        self.assertEqual(server.ACTIVE_STATES, set(tasks.ACTIVE))
 
 
 class Docs(unittest.TestCase):

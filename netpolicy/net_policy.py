@@ -1,4 +1,4 @@
-"""Pure-python evaluator for policy/tailnet-policy.hujson (SPEC-networking.md section 4).
+"""Pure-python evaluator for netpolicy/tailnet-policy.hujson (SPEC-networking.md section 4).
 
 Deny by default: a connection is allowed only if some grant matches source, destination and port.
 Reads the file only; touches no network, firewall or Tailscale state.

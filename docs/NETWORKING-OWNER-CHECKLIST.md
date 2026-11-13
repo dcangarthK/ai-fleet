@@ -4,7 +4,7 @@ Steps only the owner can apply (SPEC-networking.md section 11). Nothing in the r
 
 ## Phase N0: tailnet policy and 11435 audit
 
-1. Review `policy/tailnet-policy.hujson` against SPEC-networking.md section 4.
+1. Review `netpolicy/tailnet-policy.hujson` against SPEC-networking.md section 4.
 2. In the Tailscale admin console, Access controls: paste the file (it replaces `tailscale/policy.hujson`) and
    check the console's own "tests" pass. It drops master -> worker 11434/11435/8000/1234/8080 and keeps 11436.
 3. Enrol new nodes while untagged (they reach the master on 8443 as owner-member devices), approve the node in

@@ -8,11 +8,19 @@ import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "scripts"))
+import importlib.util  # noqa: E402
 
-from policy import net_policy as np  # noqa: E402
-import audit_11435 as audit  # noqa: E402
+
+def _load(name, path):
+    # load by file path so sys.path order (e.g. master/controller/policy.py) can never shadow it
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+np = _load("fleet_netpolicy_net_policy", ROOT / "netpolicy" / "net_policy.py")
+audit = _load("fleet_audit_11435", ROOT / "scripts" / "audit_11435.py")
 
 FIX = ROOT / "tests" / "fixtures"
 RAW_PORTS = [11434, 11435, 12434, 1234, 8000, 8080]

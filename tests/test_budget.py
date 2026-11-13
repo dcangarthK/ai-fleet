@@ -653,7 +653,7 @@ class BudgetApiTests(unittest.TestCase):
 
     def test_model_less_claude_is_held_by_the_limit_breaker(self):
         self.limited_codex(agent="claude", model=None)  # a Claude task with no model hit its limit
-        t = self.ok(agent="claude", kind="build", gate="pytest")
+        t = self.ok(agent="claude", gate="pytest")  # no kind: the model-less routing
         self.assertEqual(t["state"], "queued")
         self.assertRegex(t["error"], r"claude (account )?limited until \d{1,2}:\d\d [AP]M")
         self.assertNotIn(t["id"], FakeRunner.jobs)
@@ -664,14 +664,14 @@ class BudgetApiTests(unittest.TestCase):
         del body["models"]["claude:*"]
         self.put_rules(body)
         self.limited_codex(agent="claude", model=None)
-        t = self.ok(agent="claude", kind="build", gate="pytest")
+        t = self.ok(agent="claude", gate="pytest")  # no kind: the model-less routing
         self.assertEqual(t["state"], "queued")
         self.assertIn("limited until", t["error"])
         self.assertEqual(t["budget_key"], "claude:*")  # the governed fallback identity
 
     def test_model_less_claude_is_held_when_a_named_claude_model_is_limited(self):
         self.limited_codex(agent="claude", model="claude-opus-5-5")  # we can't know the default isn't Opus
-        t = self.ok(agent="claude", kind="build", gate="pytest")
+        t = self.ok(agent="claude", gate="pytest")  # no kind: the model-less routing
         self.assertEqual(t["state"], "queued")
         self.assertIn("limited until", t["error"])
 
@@ -679,17 +679,17 @@ class BudgetApiTests(unittest.TestCase):
         body = rules()
         body["models"]["claude:*"]["max_concurrent"] = 1
         self.put_rules(body)
-        first = self.ok(agent="claude", kind="draft")
-        second = self.ok(agent="claude", kind="draft")
+        first = self.ok(agent="claude")
+        second = self.ok(agent="claude")
         self.assertEqual(first["state"], "working")
         self.assertEqual((second["state"], second["error"]), ("queued", "waiting for a claude:* slot"))
         body = rules()
         del body["models"]["claude:*"]  # no rule at all: still bounded by the conservative fallback
         self.put_rules(body)
         self.settle_all()
-        one = self.ok(agent="claude", kind="draft")
-        two = self.ok(agent="claude", kind="draft")
-        three = self.ok(agent="claude", kind="draft")
+        one = self.ok(agent="claude")
+        two = self.ok(agent="claude")
+        three = self.ok(agent="claude")
         self.assertEqual([one["state"], two["state"], three["state"]], ["working", "working", "queued"])
 
     def test_the_runners_reported_default_model_is_the_admission_identity(self):
@@ -710,8 +710,28 @@ class BudgetApiTests(unittest.TestCase):
         self.addCleanup(restore)
         self.c.post("/api/refresh", headers=W)
         wait_for(lambda: reported() == "claude-sonnet-5-5")
-        t = self.ok(agent="claude", kind="draft")
+        t = self.ok(agent="claude")
         self.assertEqual((t["budget_key"], t["budget_identity"]), ("claude:claude-sonnet-*", "claude:claude-sonnet-5-5"))
+
+    def test_a_named_kind_with_no_model_is_admitted_on_the_kinds_default_model(self):
+        """H3: budget identity, row and runner all see the model that really runs (spec req 7)."""
+        t = self.ok(agent="claude", kind="draft")
+        self.assertEqual((t["budget_key"], t["budget_identity"]),
+                         ("claude:claude-haiku-*", "claude:claude-haiku-5-5"))
+        self.assertIsNone(t["model"])  # the row stays model-less by design; the default is sent at start
+        self.assertEqual(self.sent(t["id"]).get("model"), "claude-haiku-5-5")
+        named = self.ok(agent="claude", kind="draft", model="claude-sonnet-5-5")
+        self.assertEqual(named["model"], "claude-sonnet-5-5")  # a named model is never replaced
+        self.assertEqual(self.sent(named["id"]).get("model"), "claude-sonnet-5-5")
+
+    def test_independence_checks_the_kind_default_not_the_node_default(self):
+        """H3: a review with no model is a Haiku/Sonnet review, so it is checked as that model."""
+        build = self.ok(agent="claude", kind="build", model="claude-sonnet-5-5", gate="pytest")
+        r = self.post(agent="claude", kind="review", parent_id=build["id"], link="check", mode="read-only",
+                      worktree=False)  # the review default is Sonnet: the builder's own model
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("independ", r.text)
+        self.assertIn("claude-sonnet-5-5", r.text)
 
     def test_a_cancelled_task_does_not_clear_an_active_limit(self):
         self.limited_codex()
@@ -723,6 +743,74 @@ class BudgetApiTests(unittest.TestCase):
         t = self.ok(agent="codex", kind="build", gate="pytest")
         self.assertEqual(t["state"], "queued")
         self.assertIn("limited until", t["error"])
+
+    def test_a_task_with_no_model_gets_its_kinds_default_never_the_parents(self):
+        for kind, model in (("build", "claude-sonnet-5-5"), ("test", "claude-haiku-5-5"),
+                            ("final_review", "claude-opus-5-5")):
+            t = self.ok(agent="claude", kind=kind, mode="read-only", worktree=False)
+            self.assertEqual(self.sent(t["id"]).get("model"), model, kind)
+            self.settle_all()
+        named = self.ok(agent="claude", kind="build", model="claude-haiku-5-5", mode="read-only", worktree=False)
+        self.assertEqual(self.sent(named["id"]).get("model"), "claude-haiku-5-5")  # an explicit model is kept
+
+    def test_a_lead_is_refused_without_an_allowed_model_and_gets_the_30_turn_cap(self):
+        r = self.post(agent="claude", kind="lead", model="claude-haiku-5-5")
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("lead tasks require", r.text)
+        lead = self.ok(agent="claude", kind="lead", model="claude-sonnet-5-5")
+        self.assertEqual(self.sent(lead["id"]).get("max_turns"), 30)
+
+    def test_continue_job_must_be_the_replaced_task_with_a_worktree(self):
+        first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
+        self.settle_all()
+        r = self.post(agent="claude", kind="build", continue_job=first["id"], worktree=True)  # no replaces
+        self.assertEqual(r.status_code, 400, r.text)
+        r = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"], worktree=False)
+        self.assertEqual(r.status_code, 400, r.text)
+
+    def test_a_continuation_keeps_the_old_tasks_node_agent_and_needs_a_budget_runner(self):
+        first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
+        self.settle_all()
+        wrong_node = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"],
+                               worktree=True, node="nowhere")
+        self.assertEqual(wrong_node.status_code, 400, wrong_node.text)
+        self.assertIn("runs on node", wrong_node.text)
+        wrong_agent = self.post(agent="codex", kind="build", continue_job=first["id"], replaces=first["id"],
+                                worktree=True, model="gpt-5.6-terra")
+        self.assertEqual(wrong_agent.status_code, 400, wrong_agent.text)
+        self.assertIn("same agent", wrong_agent.text)
+        with db() as c:
+            row = c.execute("SELECT node_id FROM tasks WHERE id=?", (first["id"],)).fetchone()
+            saved = c.execute("SELECT runner FROM nodes WHERE id=?", (row["node_id"],)).fetchone()["runner"]
+            c.execute("UPDATE nodes SET runner=? WHERE id=?", (json.dumps({"agents": {"claude": "/x"}}), row["node_id"]))
+        try:
+            old_runner = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"],
+                                   worktree=True)
+            self.assertEqual(old_runner.status_code, 400, old_runner.text)
+            self.assertIn("newer runner", old_runner.text)
+        finally:
+            with db() as c:
+                c.execute("UPDATE nodes SET runner=? WHERE id=?", (saved, row["node_id"]))
+
+    def test_start_falls_back_to_the_kind_default_only_when_the_placement_key_is_absent(self):
+        legacy = {"agent": "claude", "kind": "review", "placement": {"pinned": False}}
+        self.assertEqual(tasks._default_model_of(legacy), "claude-sonnet-5-5")  # N3: a row from before the key
+        self.assertIsNone(tasks._default_model_of(legacy | {"placement": {"default_model": None}}))
+        self.assertEqual(tasks._default_model_of(legacy | {"placement": {"default_model": "claude-haiku-5-5"}}),
+                         "claude-haiku-5-5")
+        t = self.ok(agent="claude", kind="draft")
+        self.assertIn("default_model", t["placement"])  # a new kind-without-model task always stores the key
+
+    def test_a_continuation_prompt_over_4_kb_is_refused(self):
+        first = self.ok(agent="claude", kind="build", mode="read-only", worktree=True)
+        self.settle_all()
+        big = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"], worktree=True,
+                        prompt="x" * 4097)
+        self.assertEqual(big.status_code, 400, big.text)
+        self.assertIn("4 KB", big.text)
+        small = self.post(agent="claude", kind="build", continue_job=first["id"], replaces=first["id"],
+                          worktree=True, prompt="x" * 4096)
+        self.assertNotIn("4 KB", small.text)  # the size check passes; other admission rules are not under test
 
     def test_tasks_record_the_profile_and_account_label_when_known(self):
         plain = self.ok(agent="codex", kind="build", gate="pytest")

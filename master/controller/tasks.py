@@ -51,6 +51,7 @@ NEEDS_APPROVAL = {"supervised", "full"}
 AGENTS = {"claude", "codex", "ollama"}
 ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 ACTIVE = {"queued", "awaiting_approval", "starting", "working"}
+CONTINUATION_PROMPT_MAX = 4096  # Part H 3.3: bytes
 SETTLED = {"review", "failed", "blocked", "interrupted", "done", "cancelled", "capped"}  # capped: Part H, not a failure
 RESUMABLE = {"review", "failed", "blocked", "interrupted", "capped"}
 
@@ -767,6 +768,15 @@ def budget_support(node: dict) -> bool:
     return bool((node.get("runner") or {}).get("budget"))
 
 
+def _default_model_of(task: dict) -> str | None:
+    """The kind default recorded at admission (placement.default_model). A row from before that key existed
+    (key absent, not None) falls back to the kind's default."""
+    placement = task.get("placement") or {}
+    if "default_model" in placement:
+        return placement["default_model"]
+    return budget.default_model(task["agent"], task.get("kind"))
+
+
 async def start(task: dict) -> None:
     """Start (or adopt) the runner job. Caller holds the task lock and has moved it to 'starting'."""
     node = node_of(task)
@@ -775,7 +785,9 @@ async def start(task: dict) -> None:
     if "task_minutes" in (policy.get("limits") or {}):
         runner_policy["limits"] = {"task_minutes": policy["limits"]["task_minutes"]}
     body = {"id": task["id"], "agent": task["agent"], "prompt": task["prompt"], "mode": task["mode"],
-            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None, "model": task["model"],
+            "repo": task["repo"], "worktree": bool(task["worktree"]), "cwd": None,
+            # Part H 3.7: the kind's default for a task that named a kind but no model (admitted on it).
+            "model": task["model"] or _default_model_of(task),
             "gate": task["gate"], "allowed_tools": list(task.get("approved_tools") or []), "resume_session": None,
             "instructions": task["instructions"], "policy": runner_policy, "policy_hash": task["policy_hash"]}
     if task["agent"] == "ollama" and (task.get("engine") or "ollama") != "ollama":
@@ -797,6 +809,8 @@ async def start(task: dict) -> None:
             body["tools"] = extra["tools"]
         if extra.get("max_turns"):
             body["max_turns"] = extra["max_turns"]
+        if extra.get("continue_job"):
+            body["continue_job"] = extra["continue_job"]  # same worktree and branch as the capped task (Part H 3.3)
         if task.get("review_of"):
             # Review the build's worktree itself (read-only), so any file the reviewer opens is current.
             source = get_task(task["review_of"])
@@ -1119,6 +1133,8 @@ class TaskIn(BaseModel):
     independence: str | None = None
     independence_reason: str | None = None
     pin: bool = False  # Part G: never move this queued task to another account or model
+    # Part H 3.3: carry on in the capped task's worktree and branch (a fresh session). Needs replaces to be the same task.
+    continue_job: str | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -1318,6 +1334,11 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, "a gate runs shell commands, so it needs auto-edit or full mode")
     if t.link_reason is not None and not t.replaces:
         raise HTTPException(400, "link_reason needs replaces")
+    if t.continue_job and (t.continue_job != t.replaces or not t.worktree):
+        raise HTTPException(400, "continue_job must be the task named in replaces, and needs a worktree")
+    if t.continue_job and len(t.prompt.encode("utf-8")) > CONTINUATION_PROMPT_MAX:
+        raise HTTPException(400, f"a continuation prompt must be under {CONTINUATION_PROMPT_MAX // 1024} KB: the "
+                                 "capped task's handoff has the history (Part H 3.3)")
     if t.replaces:
         # Part F 5: a task made in place of another is a retry of it; the old one settles as handed_off.
         if t.link_reason is not None and t.link_reason not in REPLACE_REASONS:
@@ -1325,7 +1346,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         if t.parent_id and t.parent_id != t.replaces or t.link not in (None, "retry"):
             raise HTTPException(400, "replaces sets parent_id and link itself")
         with db() as c:
-            old = c.execute("SELECT state, resolution FROM tasks WHERE id=?", (t.replaces,)).fetchone()
+            old = c.execute("SELECT state, resolution, node_id, agent, profile FROM tasks WHERE id=?",
+                            (t.replaces,)).fetchone()
         if not old:
             raise HTTPException(400, f"unknown task {t.replaces} to replace")
         if old["state"] in RUNNING:
@@ -1333,6 +1355,26 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         if old["resolution"]:
             raise HTTPException(409, f"{t.replaces} is already resolved")
         t.parent_id, t.link = t.replaces, "retry"
+        if t.continue_job:
+            # The worktree and branch live on the old task's node, under its account: run there or not at all.
+            if t.agent != old["agent"]:
+                raise HTTPException(400, f"a continuation runs the same agent as {t.replaces} ({old['agent']})")
+            if t.node and t.node != old["node_id"]:
+                raise HTTPException(400, f"a continuation runs on node {old['node_id']}, where {t.replaces} left its worktree")
+            if t.profile and t.profile != (old["profile"] or "fleet"):
+                raise HTTPException(400, f"a continuation runs on profile {old['profile'] or 'fleet'}")
+            t.node = old["node_id"]
+            if (old["profile"] or "fleet") != "fleet" and not t.profile:
+                t.profile = old["profile"]
+            with db() as c:
+                row = c.execute("SELECT runner FROM nodes WHERE id=?", (t.node,)).fetchone()
+            try:
+                runner_info = json.loads(row["runner"] or "null") if row else None
+            except (TypeError, ValueError):
+                runner_info = None
+            if not budget_support({"runner": runner_info or {}}):
+                raise HTTPException(400, f"node {t.node}'s runner can't continue a worktree (it needs a newer runner); "
+                                         "update it first")
     if t.link is not None and t.link not in LINKS:
         raise HTTPException(400, f"link must be one of {list(LINKS)}")
     if t.link and t.link != "check" and not t.parent_id:
@@ -1369,6 +1411,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, f"kind must be one of {list(budget.KINDS)}")
     if kind == "lead" and not budget.lead_allowed(t.agent, t.model):
         raise HTTPException(400, "lead tasks require codex:gpt-5.6-terra or a Claude Opus/Sonnet model")
+    # Part H 3.7: a task that names a kind but no model runs on the kind's default, never the parent's or the node's.
+    # Admission and independence see that model; the task row keeps model=None (the task is model-less by design:
+    # fleet-profile only, no profile pin, runner default in the row) and the default is sent to the runner at start.
+    kind_default = budget.default_model(t.agent, kind) if (t.kind and not t.model) else None
     if t.effort is not None and t.effort not in budget.EFFORTS:
         raise HTTPException(400, f"effort must be one of {list(budget.EFFORTS)}")
     if t.origin_kind is not None and (kind != "re_review" or t.origin_kind not in budget.ORIGIN_KINDS):
@@ -1422,7 +1468,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             raise HTTPException(400, f"no usable fleet profile for {t.agent}: name a model to run on another profile")
 
     try:
-        decision = budget.admit(agent=t.agent, model=t.model, kind=kind, effort=t.effort, override=bool(override),
+        decision = budget.admit(agent=t.agent, model=t.model or kind_default, kind=kind, effort=t.effort, override=bool(override),
                                 failures=failures, node_id=t.node, origin_kind=t.origin_kind,
                                 accounts_for=lambda of_agent: accounts_of(slots_for(of_agent), of_agent),
                                 forbidden=forbidden, reroute=not t.profile)  # a pinned profile never moves
@@ -1431,6 +1477,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
         raise HTTPException(refusal.status, refusal.detail)
     agent, model = decision["agent"], decision["model"]
+    row_model = None if (kind_default and not t.model and agent == t.agent and model == kind_default) else model
     engine = local_engine(agent, model, t.role, t.node, t.engine)
     task_policy = t.policy
     review_exec = decision.get("review_exec") or {}
@@ -1456,6 +1503,10 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                                                    engine=engine or "ollama")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if kind == "lead" and not budget_support(node):
+        # Part H 3.4: the 30-turn and 30-minute caps set below are passed only to a runner that enforces them.
+        raise HTTPException(400, f"lead tasks need caps (30 turns, 30 minutes) and node {node['id']}'s runner can't "
+                                 "enforce them; update its runner first")
     # The profile this task runs under: the chosen account's slot on the chosen node.
     slot = next((s for s in on_account if s["node"] == node["id"]), None)
     if slot is None and agent in budget.PAID_AGENTS:
@@ -1469,7 +1520,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     placed = {"pinned": bool(requested_node or t.review_of), "role": t.role, "skills": list(t.skills),
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
-              "pin": bool(t.pin), "model_pinned": bool(t.model)}
+              "pin": bool(t.pin), "model_pinned": bool(t.model),
+              "default_model": kind_default if kind_default and agent == t.agent and model == kind_default else None}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})
@@ -1484,6 +1536,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     # Part G req 11 / Part H req 4: a controller lead is always a short-lived session.
     if kind == "lead":
         extra["max_turns"] = 30
+    if t.continue_job:
+        extra["continue_job"] = t.continue_job
     ids: list[str] = []
     for index, part in enumerate(parts):
         task_id = "t-" + secrets.token_hex(4)
@@ -1495,7 +1549,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             parent_id, link = (t.parent_id, t.link or "review") if t.parent_id else (ids[0], "review")
         part_title = title if len(parts) == 1 else f"{title[:68]} (part {index + 1}/{len(parts)})"
         row = {
-            "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": model,
+            "id": task_id, "parent_id": parent_id, "title": part_title, "agent": agent, "model": row_model,
             "engine": engine,
             "prompt": part, "mode": t.mode, "repo": t.repo, "worktree": int(t.worktree), "gate": t.gate,
             "node_id": node["id"], "state": state, "created_at": now, "updated_at": now,

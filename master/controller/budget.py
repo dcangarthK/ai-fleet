@@ -89,6 +89,22 @@ def lead_allowed(agent: str, model: str | None) -> bool:
             (agent == "claude" and (model.startswith("claude-opus-") or model.startswith("claude-sonnet-"))))
 
 
+# Part H 3.7: the model a Claude task of each kind runs on when none is named. The cheapest capable one, never the
+# parent's or the owner's own default (CLAUDE.md "Who does what"). Fable never builds, so it is not here.
+KIND_DEFAULT_MODEL = {
+    "build": "claude-sonnet-5-5", "fix": "claude-sonnet-5-5", "review": "claude-sonnet-5-5",
+    "re_review": "claude-sonnet-5-5", "merge": "claude-sonnet-5-5", "benchmark": "claude-sonnet-5-5",
+    "final_review": "claude-opus-5-5", "security_review": "claude-opus-5-5",
+    "check": "claude-haiku-5-5", "draft": "claude-haiku-5-5", "test": "claude-haiku-5-5",
+}
+
+
+def default_model(agent: str, kind: str | None) -> str | None:
+    """The kind's default model for a Claude task; None for any other agent or a kind with no default (a lead
+    names its model; Codex and local models keep their own defaults)."""
+    return KIND_DEFAULT_MODEL.get(kind or "") if agent == "claude" else None
+
+
 # ---------- globs ----------
 
 def valid_glob(pattern) -> bool:

@@ -3,7 +3,9 @@ Run: python3 -m unittest -v tests/test_runner_caps.py
 """
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -44,7 +46,9 @@ sys.exit(1)
 '''
 
 
-class Caps(Base):
+class CapsHelpers:
+    """Fake-claude helpers shared by Caps and Continuation (a mixin, so tests are not collected twice)."""
+
     def setUp(self):
         super().setUp()
         self.saved = {k: os.environ.get(k) for k in ("FLEET_TOKEN_CAPS", "FLEET_LEAN_PROFILE")}
@@ -76,6 +80,8 @@ class Caps(Base):
         return {"id": "cap1", "agent": "claude", "prompt": "x", "mode": "auto-edit", "cwd": str(self.code),
                 "kind": "build"} | kw
 
+
+class Caps(CapsHelpers, Base):
     def test_job_at_its_turn_cap_settles_capped_with_a_summary(self):
         self.fake(ENDLESS)
         os.environ["FLEET_TOKEN_CAPS"] = json.dumps({"build": {"turns": 2}})
@@ -116,9 +122,12 @@ class Caps(Base):
         self.wait(job)
         old = before - 86400
         os.utime(self.fleet / "jobs" / "cap4" / "events.jsonl", (old, old))  # an old mtime changes nothing
-        seen = self.m.claude_usage()["fleet"]
+        seen = self.m.claude_usage()[self.job_profile(job)]
         self.assertGreaterEqual(seen["observed_at"], before)
         self.assertAlmostEqual(seen["windows"]["5h"]["used_percent"], 30.0)
+
+    def job_profile(self, job):
+        return job.get("profile") or "fleet"
 
     def test_old_job_without_a_live_stamp_gives_no_usage(self):
         folder = self.m.jobs_dir / "old1"
@@ -195,13 +204,74 @@ class Launch(Base):
             self.assertEqual(settings.parent, self.m._job_dir(job))
             text = settings.read_text()
             self.assertNotIn("{{", text)
-            self.assertNotIn("allow", json.loads(text).get("permissions", {}))  # tool control: runner flags only
+            granted = flag(cmd, "--allowedTools")
+            self.assertEqual(json.loads(text)["permissions"]["allow"], granted.split(",") if granted else [], kind)
             if profile != "review":
                 hook = json.loads(text)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
                 import shlex
                 self.assertEqual(shlex.split(hook), [sys.executable, str(runner.WORKER_DIR / "quiet_bash.py")])
             mcp = Path(cmd[cmd.index("--mcp-config") + 1])
             self.assertTrue(mcp.is_absolute() and mcp.name == "mcp-empty.json")
+
+    def settings_allow(self, **kw):
+        cmd = self.m._command(self.job(**kw), "p", [], False)
+        allow = json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"]
+        granted = flag(cmd, "--allowedTools")
+        self.assertEqual(allow, granted.split(",") if granted else [])  # never wider than --allowedTools
+        return allow
+
+    def test_settings_allow_lets_build_and_test_run_python_and_git_scoped(self):
+        build = self.settings_allow(kind="build")
+        self.assertIn("Bash(python3:*)", build)
+        self.assertIn("Bash(git:*)", build)
+        self.assertNotIn("Bash", build)  # H1: no plain Bash
+        self.assertEqual(self.settings_allow(kind="test"), SCOPED_BASH.split(","))
+        self.assertEqual(self.settings_allow(kind="review"), ["Read", "Grep", "Glob"])
+
+    def test_settings_allow_follows_mode(self):
+        self.assertEqual(self.settings_allow(kind="build", mode="supervised"), [])
+        self.assertEqual(self.settings_allow(kind="build", mode="read-only"), ["Read", "Grep", "Glob"])
+
+    def test_policy_scoped_git_does_not_widen_to_plain_bash_or_python(self):
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Bash(git:*)"]}})
+        self.assertEqual(allow, ["Bash(git:*)"])  # H2: not "Bash", not python3
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}})
+        self.assertIn("Bash(python3:*)", allow)  # a policy that lists plain Bash covers the scoped rules
+        self.assertEqual(self.settings_allow(kind="re_review", tools=["Read", "Grep"]), ["Read", "Grep"])
+
+    def test_policy_allow_is_a_ceiling_never_a_grant_in_supervised(self):
+        policy = {"tools": {"claude_allow": ["Read", "Bash"]}}
+        self.assertEqual(self.settings_allow(kind="build", mode="supervised", policy=policy), [])  # N1
+        cmd = self.m._command(self.job(kind="build", mode="supervised", policy=policy), "p", [], False)
+        self.assertNotIn("--allowedTools", cmd)
+
+    def test_policy_plain_bash_is_scoped_for_a_worker_in_auto_edit(self):
+        allow = self.settings_allow(kind="build", policy={"tools": {"claude_allow": ["Read", "Bash"]}})
+        self.assertNotIn("Bash", allow)  # N1
+        allow = self.m._command(self.job(agent="claude", mode="auto-edit", policy={"tools": {"claude_allow": ["Bash"]}}),
+                                "p", [], False)  # no kind: the old launch, policy list only
+        self.assertEqual(flag(allow, "--allowedTools"), "Bash(python3:*),Bash(git:*),Bash(uv run:*),"
+                         "Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*)")
+
+    def test_mode_filter_applies_to_explicit_tool_lists(self):
+        self.assertEqual(self.settings_allow(kind="re_review", mode="read-only", tools=["Read", "Bash", "Edit"]),
+                         ["Read"])  # N2
+        self.assertEqual(self.settings_allow(kind="re_review", mode="supervised", tools=["Read", "Grep"]), [])
+        cmd = self.m._command(self.job(mode="read-only"), "p", ["Edit", "Grep"], False)
+        self.assertEqual(flag(cmd, "--allowedTools"), "Grep")
+
+    def test_workers_may_not_push_or_change_remotes_except_in_full(self):
+        for mode in ("auto-edit", "supervised", "read-only"):
+            denied = flag(self.m._command(self.job(kind="build", mode=mode), "p", [], False), "--disallowedTools")
+            for rule in ("Bash(git push:*)", "Bash(git remote:*)", "Bash(git config:*)"):
+                self.assertIn(rule, denied.split(","), mode)  # N4
+        self.assertIsNone(flag(self.m._command(self.job(kind="build", mode="full"), "p", [], False),
+                               "--disallowedTools"))
+
+    def test_controller_approved_tools_cap_the_settings_allow(self):
+        cmd = self.m._command(self.job(kind="build"), "p", ["Read"], False)
+        self.assertEqual(json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"], ["Read"])
+        self.assertEqual(flag(cmd, "--allowedTools"), "Read")
 
     def test_flag_off_or_no_kind_keeps_the_old_launch(self):
         os.environ["FLEET_LEAN_PROFILE"] = "off"
@@ -246,6 +316,193 @@ class Launch(Base):
                 os.environ.pop("FLEET_TOKEN_CAPS", None)
             else:
                 os.environ["FLEET_TOKEN_CAPS"] = saved
+
+
+SCOPED_BASH = "Bash(python3:*),Bash(git:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*)," \
+              "Bash(npx vitest:*)"
+SCOPED_BUILD = "Read,Edit,Write," + SCOPED_BASH + ",Grep,Glob"
+
+
+def flag(cmd, name):
+    return cmd[cmd.index(name) + 1] if name in cmd else None
+
+
+class LeanTools(Base):
+    """Part H 3.1/3.7: the per-kind tool list is the real tool set (--tools), not only a pre-approval."""
+
+    def setUp(self):
+        super().setUp()
+        self.m.cli_help = lambda agent: "--tools --effort --max-turns"
+
+    def cmd(self, kind, **kw):
+        return self.m._command(self.job(kind=kind, **kw), "p", [], False)
+
+    def test_build_and_fix_get_only_the_six_tools(self):
+        for kind in ("build", "fix"):
+            cmd = self.cmd(kind)
+            self.assertEqual(flag(cmd, "--tools"), "Read,Edit,Write,Bash,Grep,Glob", kind)
+            self.assertEqual(flag(cmd, "--allowedTools"), SCOPED_BUILD, kind)  # Bash only as scoped rules
+
+    def test_test_kind_gets_bash_so_a_haiku_test_can_run(self):
+        cmd = self.cmd("test", model="claude-haiku-5-5")
+        self.assertEqual(flag(cmd, "--tools"), "Bash")
+        self.assertEqual(flag(cmd, "--allowedTools"), SCOPED_BASH)
+
+    def test_policy_still_narrows_the_lean_list(self):
+        cmd = self.cmd("build", policy={"tools": {"claude_allow": ["Read", "Grep"]}})
+        self.assertEqual(flag(cmd, "--tools"), "Read,Grep")
+        self.assertEqual(flag(cmd, "--allowedTools"), "Read,Grep")
+
+    def test_supervised_pre_approves_nothing_in_flags_or_settings(self):
+        cmd = self.cmd("build", mode="supervised")
+        self.assertNotIn("--allowedTools", cmd)
+        self.assertEqual(flag(cmd, "--tools"), "Read,Edit,Write,Bash,Grep,Glob")  # the tools exist, each call asks
+        self.assertEqual(json.loads(Path(flag(cmd, "--settings")).read_text())["permissions"]["allow"], [])
+
+    def test_an_explicit_review_tool_list_is_unchanged(self):
+        cmd = self.cmd("re_review", tools=["Read", "Grep", "Glob"])
+        self.assertEqual(flag(cmd, "--tools"), "Read,Grep,Glob")
+
+    def test_no_kind_or_lean_off_keeps_the_old_tools(self):
+        self.assertNotIn("--tools", self.m._command(self.job(), "p", [], False))
+        os.environ["FLEET_LEAN_PROFILE"] = "off"
+        try:
+            self.assertNotIn("--tools", self.cmd("build"))
+        finally:
+            os.environ.pop("FLEET_LEAN_PROFILE")
+
+    def test_cli_without_tools_flag_is_not_given_one(self):
+        self.m.cli_help = lambda agent: ""
+        self.assertNotIn("--tools", self.cmd("build"))
+
+
+class LeadCaps(Base):
+    def body(self, **kw):
+        return {"id": "lead1", "agent": "claude", "prompt": "x", "mode": "auto-edit", "cwd": str(self.code),
+                "kind": "lead"} | kw
+
+    def test_lead_without_a_turn_cap_is_refused_with_a_reason(self):
+        for kind in ("lead", "orchestrator"):
+            with self.assertRaises(runner.HttpError) as caught:
+                self.m.create(self.body(kind=kind))
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("max_turns", str(caught.exception.detail))
+
+    def test_lead_with_caps_starts(self):
+        job = self.m.create(self.body(max_turns=30))
+        self.assertEqual(job["id"], "lead1")
+
+
+class QuietBashRepeat(unittest.TestCase):
+    """Part H 3.6: the third identical test command in a job is refused: "the gate will run this"."""
+    HOOK = str(Path(runner.WORKER_DIR) / "quiet_bash.py")
+
+    def run_hook(self, command, job_dir):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        done = subprocess.run([sys.executable, self.HOOK], input=payload, capture_output=True, text=True,
+                              env=dict(os.environ, FLEET_JOB_DIR=job_dir))
+        return json.loads(done.stdout) if done.stdout.strip() else None
+
+    def test_third_identical_run_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            cmd = "python3 -m unittest tests/test_a.py"
+            for _ in range(2):
+                out = self.run_hook(cmd, d)
+                self.assertIn("updatedInput", out["hookSpecificOutput"])
+            out = self.run_hook(cmd, d)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertIn("the gate will run this", out["permissionDecisionReason"])
+
+    def test_different_commands_and_other_jobs_count_apart(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as e:
+            for _ in range(2):
+                self.run_hook("python3 -m unittest tests/test_a.py", d)
+            out = self.run_hook("python3 -m unittest tests/test_b.py", d)
+            self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
+            out = self.run_hook("python3 -m unittest tests/test_a.py", e)
+            self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
+
+    def test_whitespace_does_not_hide_a_repeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.run_hook("python3 -m unittest  tests/test_a.py", d)
+            self.run_hook("python3 -m unittest tests/test_a.py ", d)
+            out = self.run_hook("python3   -m unittest tests/test_a.py", d)["hookSpecificOutput"]
+            self.assertEqual(out["permissionDecision"], "deny")
+
+    def test_flags_prefixes_python_and_argument_order_do_not_hide_a_repeat(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.run_hook("python3 -m unittest tests/a.py tests/b.py", d)
+            self.run_hook("cd . && python -m unittest -v tests/b.py tests/a.py", d)
+            out = self.run_hook("python3 -m unittest -q tests/a.py   tests/b.py && echo done", d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_calling_the_wrapper_directly_still_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            cmd = "python3 -m unittest tests/a.py"
+            self.run_hook(cmd, d)
+            self.run_hook(cmd, d)
+            wrapped = "python3 %s --wrap /tmp/x.log -- %s" % (self.HOOK, cmd)
+            out = self.run_hook(wrapped, d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_first_direct_wrapper_call_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d))
+
+    def test_non_test_commands_are_never_counted(self):
+        with tempfile.TemporaryDirectory() as d:
+            for _ in range(4):
+                self.assertIsNone(self.run_hook("ls -la", d))
+
+
+def git(*args, cwd):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+class Continuation(CapsHelpers, Base):
+    """Part H 3.3: a continuation job reuses the capped job's worktree and branch."""
+
+    def setUp(self):
+        super().setUp()
+        git("init", "-q", "-b", "main", cwd=self.code)
+        (self.code / "a.txt").write_text("a")
+        git("add", "-A", cwd=self.code)
+        git("commit", "-qm", "init", cwd=self.code)
+
+    def capped(self):
+        self.fake(ENDLESS)
+        os.environ["FLEET_TOKEN_CAPS"] = json.dumps({"build": {"turns": 2}})
+        job = self.start(self.body(id="cap1", cwd=None, repo=str(self.code), worktree=True))
+        self.wait(job)
+        self.assertEqual(job["state"], "capped")
+        return job
+
+    def test_continuation_keeps_worktree_and_branch(self):
+        old = self.capped()
+        new = self.start(self.body(id="cap2", cwd=None, repo=str(self.code), worktree=True, continue_job="cap1"))
+        self.assertEqual((new["cwd"], new["branch"], new["base"]), (old["cwd"], old["branch"], old["base"]))
+        self.assertEqual(old["worktree_moved_to"], "cap2")
+        listing = subprocess.run(["git", "worktree", "list"], cwd=self.code, capture_output=True, text=True)
+        self.assertEqual(len(listing.stdout.strip().splitlines()), 2)  # main + the one shared worktree
+
+    def test_cleaning_up_the_old_job_leaves_the_shared_worktree(self):
+        old = self.capped()
+        self.start(self.body(id="cap2", cwd=None, repo=str(self.code), worktree=True, continue_job="cap1"))
+        self.m.cleanup(old)
+        self.assertTrue(Path(old["cwd"]).exists())
+
+    def test_only_a_capped_job_can_be_continued(self):
+        self.fake(ENDLESS)
+        with self.assertRaises(runner.HttpError):
+            self.m.create(self.body(id="cap3", cwd=None, repo=str(self.code), worktree=True, continue_job="nope"))
+
+    def test_commits_lists_the_branch_log(self):
+        old = self.capped()
+        (Path(old["cwd"]) / "b.txt").write_text("b")
+        git("add", "-A", cwd=old["cwd"])
+        git("commit", "-qm", "add b", cwd=old["cwd"])
+        self.assertIn("add b", self.m.commits(old)["log"])
 
 
 if __name__ == "__main__":

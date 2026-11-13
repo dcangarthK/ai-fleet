@@ -208,7 +208,8 @@ class RunnerPolicy(unittest.TestCase):
         self.wait_done("tools")
         argv = self.records("claude")[-1]["argv"]
         denied = argv[argv.index("--disallowedTools") + 1].split(",")
-        self.assertEqual(sorted(denied), ["Bash", "WebFetch", "WebSearch"])
+        self.assertEqual(sorted(denied), sorted(["Bash", "WebFetch", "WebSearch", "Bash(git push:*)",
+                                                 "Bash(git remote:*)", "Bash(git config:*)"]))  # + N4 git rules
         allowed = argv[argv.index("--allowedTools") + 1].split(",")
         self.assertEqual(allowed, ["Read"])  # request ∩ policy
 

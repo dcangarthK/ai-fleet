@@ -1976,6 +1976,11 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 if result["action"] in ("handoff", "wait", "left"):
                     await _pipeline_step_unlocked(p, {"type": "build_limited", **result})
                 return
+            if build["state"] == "capped":
+                new_id = await tasks.auto_continue(build["id"])  # Part H 3.3: follow the continuation
+                if new_id:
+                    await _pipeline_step_unlocked(p, {"type": "build_limited", "action": "handoff", "task_id": new_id})
+                    return
             if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped"):
                 await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"],
                                                   **loopheal.gate_event(build)})

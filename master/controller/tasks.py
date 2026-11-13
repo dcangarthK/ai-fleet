@@ -932,6 +932,8 @@ async def poll_task(task_id: str) -> None:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
         await handoff.after_settled(task_id)
+    elif get_task(task_id)["state"] == "capped":
+        await auto_continue(task_id)  # Part H 3.3: a capped build carries on in a fresh session
 
 
 # Consecutive GET /jobs/{id} polls per working task that the runner answered with an HTTP error
@@ -986,6 +988,37 @@ async def _poll_task(task_id: str) -> bool:
                 await auto_approve_denials(get_task(task_id))
             return new in ("failed", "interrupted")
     return False
+
+
+def _clip(text: str, limit: int) -> str:
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+async def auto_continue(task_id: str) -> str | None:
+    """Part H 3.3 (docs/SPEC-token-budget.md req 3): a capped build/fix with a branch and worktree re-queues as a
+    continuation (replaces=<capped id>, same branch/worktree/agent/node/profile). Admission may defer it: it then
+    waits queued. Once per capped task: a resolved task is never continued again. Returns the new task id."""
+    task = get_task(task_id)
+    if (task["state"] != "capped" or task.get("kind") not in ("build", "fix") or not task.get("worktree")
+            or not task.get("branch") or task.get("resolution")):
+        return None
+    summary = _clip((task.get("result") or "").strip(), 1800)
+    prompt = (f"Continue the work of capped task {task_id} on branch {task['branch']} (same worktree). Read "
+              f"`git log` for what is committed, finish the remaining work, and commit.\n\n"
+              f"Original task (clipped):\n{_clip(task['prompt'], 1500)}\n\n"
+              f"Handoff summary of the capped session:\n{summary or '(none was written)'}\n")
+    try:
+        created = await create_task(TaskIn(
+            agent=task["agent"], model=task.get("model"), engine=task.get("engine"), mode=task["mode"],
+            repo=task.get("repo"), worktree=True, gate=task.get("gate"), node=task["node_id"],
+            profile=task["profile"] if (task.get("profile") or "fleet") != "fleet" else None,
+            prompt=_clip(prompt, CONTINUATION_PROMPT_MAX), title=f"continue: {task['title']}"[:80],
+            replaces=task_id, continue_job=task_id, kind=task.get("kind"), role=task.get("role"),
+            stage=task.get("stage")), pipeline=True)
+    except HTTPException as exc:
+        emit(task_id, "task.continuation_failed", {"title": task["title"], "reason": str(exc.detail)[:300]})
+        return None
+    return created.get("id")
 
 
 def record_usage(task_id: str, outcome_name: str | None = None) -> None:
@@ -1052,6 +1085,8 @@ AUTO_APPROVE_ROUNDS = 3
 
 async def auto_approve_denials(task: dict) -> None:
     """If the task's policy pre-approves denied tools for its agent, resume with them (a few rounds at most)."""
+    if task.get("mode") == "supervised":
+        return  # supervised: only the owner's explicit grant after a denial
     auto = (task.get("policy") or {}).get("auto_approve") or {}
     if not (auto.get("denied_tools") and task["agent"] in (auto.get("agents") or [])):
         return
@@ -1231,8 +1266,8 @@ def gate_failures(parent_id: str | None) -> int:
 def launch_tools(agent: str, policy: dict, mode: str | None = None) -> list[str]:
     """Tools a stored policy pre-approves, granted at launch instead of after a denial (SPEC-paid-budget 3.8).
     Only when the policy would auto-approve denied tools for this agent anyway; claude_deny still wins.
-    A read-only task never had them, so it gets none."""
-    if mode == "read-only":
+    A read-only task never had them, so it gets none; a supervised one is asked after each denial."""
+    if mode in ("read-only", "supervised"):
         return []
     auto = policy.get("auto_approve") or {}
     if agent not in (auto.get("agents") or []) or auto.get("denied_tools") is not True:

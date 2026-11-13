@@ -141,6 +141,12 @@ def _lead_slots(now: float) -> list[dict]:
     rows = handoff.resources(now=now)
     candidates = [row for row in rows if row["state"] == "free" and row.get("concrete_model")
                   and "lead" in row.get("allowed_kinds", []) and budget.lead_allowed(row["agent"], row["concrete_model"])]
+    def waits(row: dict) -> bool:  # a near-limit account would only queue the lead (budget.start_wait, as placement)
+        probe = {"id": "", "created_at": now, "agent": row["agent"], "model": row["concrete_model"], "kind": "lead", "budget_key": row.get("model"),
+                 "budget_identity": budget.identity(row["agent"], row["concrete_model"]), "account": row["account"]}
+        return budget.start_wait(probe, now)[0] == "limit"
+    ready = [row for row in candidates if not waits(row)]
+    candidates = ready or candidates  # when every slot would wait, the lead queues on the best one
     return sorted(candidates, key=lambda row: (0 if row["agent"] == "codex" else 1 if "opus" in row["concrete_model"].lower() else 2,
                                                 row["account"] or ""))
 
@@ -257,6 +263,8 @@ async def tick(now: float | None = None) -> dict | None:
                 pass
         old_limited = bool(old and any(row.get("account") == old.get("account") and row.get("concrete_model") == old.get("model")
                                        and row.get("state") in ("limited", "at_budget") for row in handoff.resources(now=now)))
+        if old_task and old_task["state"] == "queued" and not old_limited:
+            return {"waiting": old_task.get("budget_wait") or old_task.get("error") or "lead task queued"}
         if old and old.get("halted") and old.get("plan_revision") == plan["revision"]:
             return {"halted": True}
         if old_task and old_task["state"] in tasks.ACTIVE and not old_limited:

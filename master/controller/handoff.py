@@ -222,6 +222,7 @@ def resources(nodes: list[dict] | None = None, now: float | None = None) -> list
               if key.split(":", 1)[0] in budget.PAID_AGENTS}
     known = known_models(rules)
     defaults: dict = {}
+    frozen = budget.held_accounts()  # the owner's hold (req 9): a held account takes no new placement anywhere
     rows = []
     for node in nodes:
         runner = node.get("runner") or {}
@@ -242,6 +243,8 @@ def resources(nodes: list[dict] | None = None, now: float | None = None) -> list
                         state = "offline"
                     elif not tasks.usable(slot):
                         state = "not_signed_in"
+                    elif account in frozen:
+                        state = "held"
                     elif (until := key_limited(rules, snaps[account], agent, key)):
                         state = "limited"
                     elif (snaps[account].get("hard") or {}).get(key):

@@ -688,19 +688,21 @@ class TailnetPolicy(unittest.TestCase):
 class MasterTailscaleTag(OnboardHarness):
     """master/setup.sh tags the Mac tag:master without resetting its other Tailscale preferences."""
 
-    def fake(self, has_set=True, up_ok=True, set_ok=True):
+    def fake(self, has_set=True, up_ok=True, set_ok=True, tagged=False, suggest=""):
         log = self.tmp / "ts.argv"
         log.unlink(missing_ok=True)
         help_text = "USAGE\n  tailscale set [flags]\n  --advertise-tags string" if has_set else ""
+        status_cmd = ("echo '" + json.dumps({"Self": {"Tags": ["tag:master"]}}) + "'") if tagged else "exit 1"
         return write_exec(self.bin / "tailscale", f"""\
             echo "$*" >> "{log}"
             case "$1" in
+              status) {status_cmd} ;;
               set) if [ "$2" = --help ]; then
                      [ -n "{help_text}" ] || {{ echo "tailscale: unknown subcommand: set" >&2; exit 1; }}
                      printf '{help_text}\\n' >&2; exit 0
                    fi
                    [ {int(set_ok)} = 1 ] ;;
-              up) [ {int(up_ok)} = 1 ] || {{ echo "Error: changing settings via 'tailscale up' requires mentioning all non-default flags" >&2; exit 1; }} ;;
+              up) [ {int(up_ok)} = 1 ] || {{ echo "Error: changing settings via 'tailscale up' requires mentioning all non-default flags" >&2; echo "{suggest}" >&2; exit 1; }} ;;
               *) exit 1 ;;
             esac
             """), log
@@ -732,6 +734,25 @@ class MasterTailscaleTag(OnboardHarness):
                 self.assertFalse([c for c in calls if "--reset" in c], calls)
                 self.assertIn("--reset-tailscale", result.stdout)
                 self.assertIn("tailscale/policy.hujson", result.stdout)
+
+    def test_already_tagged_returns_without_changing_anything(self):
+        result, calls = self.tag(tagged=True, has_set=False, up_ok=False)
+        self.assertIn("RC=0", result.stdout, result.stdout + result.stderr)
+        self.assertIn("Already tagged tag:master", result.stdout)
+        self.assertFalse([c for c in calls if c.startswith(("up", "set"))], calls)
+
+    def test_refused_up_prints_allowlisted_suggestion_without_running_it(self):
+        cmd = "tailscale up --advertise-tags=tag:master --accept-routes"
+        result, calls = self.tag(has_set=False, up_ok=False, suggest="\t" + cmd)
+        self.assertIn("RC=1", result.stdout)
+        self.assertIn(cmd, result.stdout)
+        self.assertEqual(1, len([c for c in calls if c.startswith("up")]), calls)
+
+    def test_refused_up_ignores_suggestion_with_other_flags(self):
+        cmd = "tailscale up --advertise-tags=tag:master --auth-key=tskey-x"
+        result, calls = self.tag(has_set=False, up_ok=False, suggest="\t" + cmd)
+        self.assertIn("RC=1", result.stdout)
+        self.assertNotIn("tskey-x", result.stdout)
 
     def test_reset_only_with_the_opt_in_flag(self):
         result, calls = self.tag("--reset-tailscale", has_set=False, up_ok=False)

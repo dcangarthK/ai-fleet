@@ -254,6 +254,85 @@ def _controller(method: str, path: str, body: dict | None = None, scope: str | N
     return json.dumps(r.json(), indent=2)
 
 
+_FINDING_RE = re.compile(
+    r"^\s*(?P<pre>(?:[-*>#|]+\s*|\d+[.)]\s*)*)(?P<wrap>\*\*|\[)?(?P<word>HIGH|MEDIUM|MED|LOW)"
+    r"(?:\*\*|\]|\s*(?:[:(|\u2014\u2013]|-\s|\)))", re.I)
+_VERDICT_RE = re.compile(r"^\s*[-*#>\s]*\**verdict\b", re.I)
+_APPROVE_RE = re.compile(r"approve|lgtm|\bpass|\bok\b|no (issues|findings)", re.I)
+_GATE_RE = re.compile(r"^(Ran \d+ tests?\b|OK\b|FAILED\b)")
+_FAILING_RE = re.compile(r"^(FAIL|ERROR): ")
+ACTIVE_STATES = {"queued", "awaiting_approval", "starting", "working"}  # tasks.ACTIVE
+RESULT_TAIL = 1500  # chars of result kept when nothing review-shaped was found
+GATE_TAIL_LINES = 10  # lines of gate output kept when a failed gate has no recognised summary
+
+
+def _is_finding(line: str) -> bool:
+    """A severity word at the start of a line, in the shapes reviewers write (HIGH:, **High** -, [HIGH], 1. HIGH:,
+    ### HIGH -, HIGH (a.py:10):, | HIGH |). Title-case prose like "Low: ..." only counts when marked up."""
+    m = _FINDING_RE.match(line)
+    if not m:
+        return False
+    pre = m.group("pre")
+    marked = m.group("wrap") or "|" in pre or "#" in pre or "**" in pre
+    return bool(marked or m.group("word").isupper())
+
+
+def _trim_on(full: bool) -> bool:
+    """Trimmed unless full=True or FLEET_MCP_TRIM=0 (docs/SPEC-token-budget.md 3.11)."""
+    return not full and os.environ.get("FLEET_MCP_TRIM", "1") != "0"
+
+
+def trim_task(t: dict) -> dict:
+    """The orchestrator's view of a task: state, verdict line, findings (HIGH/MED/LOW blocks, each to the next
+    blank line) and gate summary (Ran/OK/FAILED lines plus failing test names). Fallbacks so nothing is silently
+    lost: with no verdict and no findings, or findings empty under a non-approve verdict, the last 1500 chars of
+    the result are kept as `result_tail`; a failed gate with no recognised summary keeps its last 10 lines as
+    `tail`. full=True on the tools returns everything."""
+    result = t.get("result") or ""
+    verdict, findings, block = "", [], None
+    for line in result.splitlines():
+        if _VERDICT_RE.match(line) and not verdict:
+            verdict, block = line.strip(), None
+        elif _is_finding(line):
+            block = [line.strip()]
+            findings.append(block)
+        elif block is not None and line.strip():
+            block.append(line.rstrip())
+        else:
+            block = None
+    gate = t.get("gate_result")
+    if isinstance(gate, dict):
+        lines = [x.strip() for x in (gate.get("output_tail") or "").splitlines()]
+        gate = {"state": gate.get("state"), "exit_code": gate.get("exit_code"),
+                "summary": [x for x in lines if _GATE_RE.match(x)],
+                "failing": [x for x in lines if _FAILING_RE.match(x)]}
+        if gate["state"] == "failed" and not gate["summary"] and not gate["failing"]:
+            gate["tail"] = [x for x in lines if x][-GATE_TAIL_LINES:]
+    else:
+        gate = None
+    keep = ("id", "title", "state", "agent", "node_id", "exit_code", "error", "kind", "branch", "planned",
+            "budget_wait")
+    out = {k: t[k] for k in keep if k in t}
+    if t.get("denials"):
+        out["denials"] = sorted({d.get("tool_name") or d.get("tool") or "?" if isinstance(d, dict) else str(d)
+                                 for d in t["denials"]})
+    out |= {"verdict": verdict, "findings": ["\n".join(b) for b in findings], "gate": gate}
+    if result and (not findings and (not verdict or not _APPROVE_RE.search(verdict))):
+        out["result_tail"] = result[-RESULT_TAIL:]
+    return out
+
+
+def _full_record(t: dict) -> dict:
+    """The wait endpoint returns a 2000-char result and no gate; for a settled task read the record so the
+    trimmed view has the whole findings list and the gate summary. Falls back to what the wait returned."""
+    if t.get("state") in ACTIVE_STATES or not t.get("id"):
+        return t
+    try:
+        return json.loads(_controller("GET", f"/api/tasks/{_q(t['id'])}"))
+    except ValueError:
+        return t
+
+
 @mcp.tool()
 def fleet_status() -> str:
     """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
@@ -387,15 +466,20 @@ def set_chain(work_item: str, stages: list[dict]) -> str:
 
 
 @mcp.tool()
-def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False) -> str:
+def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False, full: bool = False) -> str:
     """Block until the tasks settle (review/failed/blocked/interrupted/done/cancelled), or until any one does
-    with any_of=True. Returns each task's state and final result text. Max timeout 1800s."""
+    with any_of=True. One long-poll the controller wakes on task events: nothing prints or loops while you
+    wait. Returns each task's state, verdict line, findings and gate summary; full=True returns the result text
+    (first 2000 chars) instead. Max timeout 1800s."""
     params = f"ids={','.join(_q(i) for i in ids)}&timeout={timeout_seconds}&mode={'any' if any_of else 'all'}"
     try:
         r = httpx.get(f"{CONTROLLER}/api/tasks/wait?{params}", headers=_headers(), timeout=timeout_seconds + 30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__})"
-    return json.dumps(r.json(), indent=2)
+    data = r.json()
+    if _trim_on(full) and isinstance(data.get("tasks"), list):
+        data["tasks"] = [trim_task(_full_record(t)) for t in data["tasks"]]
+    return json.dumps(data, indent=2)
 
 
 @mcp.tool()
@@ -406,9 +490,17 @@ def list_tasks(state: str = "", parent_id: str = "") -> str:
 
 
 @mcp.tool()
-def task_status(task_id: str) -> str:
-    """Full task record: state, node, branch/worktree, result, denied tools, gate result."""
-    return _controller("GET", f"/api/tasks/{_q(task_id)}")
+def task_status(task_id: str, full: bool = False) -> str:
+    """Task state, verdict line, findings (HIGH/MED/LOW blocks) and gate summary (Ran/OK/FAILED lines, failing
+    test names). full=True: the whole record (result, denied tools, gate output tail). FLEET_MCP_TRIM=0 makes
+    full the default."""
+    out = _controller("GET", f"/api/tasks/{_q(task_id)}")
+    if _trim_on(full):
+        try:
+            return json.dumps(trim_task(json.loads(out)), indent=2)
+        except ValueError:
+            pass  # an error string from _controller: pass it through
+    return out
 
 
 @mcp.tool()

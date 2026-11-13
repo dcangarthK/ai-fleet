@@ -137,10 +137,25 @@ def _next_item(items: list[dict]) -> dict | None:
     return next((item for item in items if item["status"] in ACTIVE_STATUSES and item["next_steps"]), None)
 
 
-def _lead_slots(now: float) -> list[dict]:
+def _waits(row: dict, now: float, kind: str = "lead") -> bool:
+    """A near-limit account would only queue the task (budget.start_wait, as normal placement)."""
+    probe = {"id": "", "created_at": now, "agent": row["agent"], "model": row["concrete_model"], "kind": kind,
+             "budget_key": row.get("model"), "budget_identity": budget.identity(row["agent"], row["concrete_model"]),
+             "account": row["account"]}
+    return budget.start_wait(probe, now)[0] == "limit"
+
+
+def _ready_lead_slots(now: float) -> list[dict]:
+    """Free lead slots that would start at once (held accounts are never free in resources)."""
+    return [row for row in _lead_slots(now, ready_only=True)]
+
+
+def _lead_slots(now: float, ready_only: bool = False) -> list[dict]:
     rows = handoff.resources(now=now)
     candidates = [row for row in rows if row["state"] == "free" and row.get("concrete_model")
                   and "lead" in row.get("allowed_kinds", []) and budget.lead_allowed(row["agent"], row["concrete_model"])]
+    ready = [row for row in candidates if not _waits(row, now)]
+    candidates = ready if ready_only else (ready or candidates)  # when every slot would wait, the lead queues on the best one
     return sorted(candidates, key=lambda row: (0 if row["agent"] == "codex" else 1 if "opus" in row["concrete_model"].lower() else 2,
                                                 row["account"] or ""))
 
@@ -214,9 +229,10 @@ async def _queue_pending_reviews(now: float) -> None:
             if _unresolved_review(source["id"]):
                 _mark_review_queued(item)
                 continue
-            slot = next((row for row in handoff.resources(now=now) if row["state"] == "free" and row["agent"] == "claude"
-                         and row["node"] == source["node_id"] and "review" in row.get("allowed_kinds", [])
-                         and budget.lead_allowed("claude", row.get("concrete_model"))), None)
+            fits = [row for row in handoff.resources(now=now) if row["state"] == "free" and row["agent"] == "claude"
+                    and row["node"] == source["node_id"] and "review" in row.get("allowed_kinds", [])
+                    and budget.lead_allowed("claude", row.get("concrete_model"))]
+            slot = next((row for row in fits if not _waits(row, now, "review")), None) or (fits[0] if fits else None)
             if not slot:
                 continue
             await tasks.create_task(tasks.TaskIn(agent="claude", model=slot["concrete_model"], profile=slot["profile"],
@@ -255,13 +271,21 @@ async def tick(now: float | None = None) -> dict | None:
                 old_task = tasks.get_task(old["session_task_id"])
             except HTTPException:
                 pass
+        moved = False
         old_limited = bool(old and any(row.get("account") == old.get("account") and row.get("concrete_model") == old.get("model")
                                        and row.get("state") in ("limited", "at_budget") for row in handoff.resources(now=now)))
+        if old_task and old_task["state"] == "queued" and not old_limited:
+            better = old_task.get("budget_wait") and [row for row in _ready_lead_slots(now)
+                                                       if row["account"] != old.get("account")]
+            moved = bool(better and await _cancel_old(old_task))  # a ready slot elsewhere: re-place the queued lead
+            if not moved:
+                return {"waiting": old_task.get("budget_wait") or old_task.get("error") or "lead task queued"}
+            old_task = tasks.get_task(old_task["id"])
         if old and old.get("halted") and old.get("plan_revision") == plan["revision"]:
             return {"halted": True}
         if old_task and old_task["state"] in tasks.ACTIVE and not old_limited:
             return None
-        is_limit = bool(old_limited or (old_task and old_task.get("failure_reason") == "limit"))
+        is_limit = bool(old_limited or moved or (old_task and old_task.get("failure_reason") == "limit"))
         if old_task and not is_limit and old_task["state"] not in tasks.ACTIVE and old.get("plan_revision") == plan["revision"]:
             with db() as c:
                 c.execute("UPDATE leader SET halted=1 WHERE id=1")

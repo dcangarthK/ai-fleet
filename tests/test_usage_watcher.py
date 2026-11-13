@@ -26,14 +26,14 @@ class UsageWatcherTests(CapacityBase):
         near = self.records({"claude/owner-max": 95, "claude/spare": 95}, resets)
         with patch.object(capacity.budget, "usage_records", return_value=near):
             task = self.build()
-        queued = tasks.get_task(task["id"])
-        self.assertEqual(queued["state"], "queued")
-        self.assertEqual(queued["not_before"], resets["claude/spare"])
-        self.assertEqual(queued["account"], "claude/spare")
-        self.assertIn("waiting for", queued["error"])
-        shown = next(row for row in live.queue(usage.now()) if row["task_id"] == task["id"])
-        self.assertEqual(shown["until"], resets["claude/spare"])
-        self.assertIn("waiting for", shown["reason"])
+            queued = tasks.get_task(task["id"])
+            self.assertEqual(queued["state"], "queued")
+            self.assertEqual(queued["not_before"], resets["claude/spare"])
+            self.assertEqual(queued["account"], "claude/spare")
+            self.assertIn("waiting for", queued["error"])
+            shown = next(row for row in live.queue(usage.now()) if row["task_id"] == task["id"])
+            self.assertEqual(shown["until"], resets["claude/spare"])
+            self.assertIn("waiting for", shown["reason"])
 
         with patch.object(capacity.budget, "usage_records", return_value=near):
             self.c.portal.call(capacity.tick)

@@ -58,7 +58,9 @@ DEFAULT_RULES = {
                # A stalled task (docs/SPEC-stall-reroute.md 12.7, 12.10): reroute its work, or leave it for the
                # owner. By kind; "*" covers the rest. At most max_stall_handoffs stall reroutes per work item,
                # counted apart from limit handoffs; the next stall escalates.
-               "on_task_stall": {"*": "reroute"}, "max_stall_handoffs": 2},
+               "on_task_stall": {"*": "reroute"}, "max_stall_handoffs": 2,
+               # Part H 3.3: automatic fresh-session continuations of one capped build; past this it escalates.
+               "max_continuations": 3},
     "effort_ladder": {"build": ["medium", "medium", "high"], "fix": ["low", "medium", "high"], "re_review": ["low", "medium"]},
     # "auto": a Claude limit holds the whole account (every model shares it), Codex limits stay per model.
     "limit_scope": "auto",
@@ -212,7 +214,7 @@ def validate_rules(body) -> dict:
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
     _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor", "on_task_stall",
-                      "max_stall_handoffs", "near_limit_percent"}, "limits")
+                      "max_stall_handoffs", "near_limit_percent", "max_continuations"}, "limits")
     if "near_limit_percent" in limits and (not _number(limits["near_limit_percent"], 0)
                                             or limits["near_limit_percent"] > 100):
         raise ValueError("limits.near_limit_percent must be greater than 0 and at most 100")
@@ -220,6 +222,8 @@ def validate_rules(body) -> dict:
     if not isinstance(on_stall, dict) or any((k != "*" and k not in KINDS) or v not in ("reroute", "leave")
                                              for k, v in on_stall.items()):
         raise ValueError("limits.on_task_stall maps task kinds (or '*') to reroute or leave")
+    if "max_continuations" in limits and not _int(limits["max_continuations"], 0):
+        raise ValueError("limits.max_continuations must be a non-negative integer")
     if "max_stall_handoffs" in limits and not _int(limits["max_stall_handoffs"], 0):
         raise ValueError("limits.max_stall_handoffs must be a non-negative integer")
     if limits.get("on_limit") not in ("queue", "fallback", "refuse"):

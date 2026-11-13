@@ -6,7 +6,7 @@ All four phases (N0, N2, N3, N4) are merged on main as of 13 Nov 06:20; nothing 
 ## Start here: order of operations (13 Nov build)
 
 1. **Push main** (the fleet never pushes).
-2. **Re-onboard nodes in this order**: master first, then each Linux/Mac node, then Windows (Laptop 2).
+2. **Re-onboard nodes in this order**: master first, then each Linux/Mac node (Laptop 2 = MacBook Pro M1), then any Windows node.
    Re-onboarding installs the new runner, which reports posture (`engine_loopback_only`, firewall state) in /health.
 3. **LiteLLM migration order (important).** After N2, the controller drops a remote Ollama route only when a node
    reports `engine_loopback_only` as not False. Runners that predate N2 send no posture and stay routed. So:
@@ -16,7 +16,7 @@ All four phases (N0, N2, N3, N4) are merged on main as of 13 Nov 06:20; nothing 
    (narrowed ACL). Apply in the admin console yourself; test with `tailscale ping` from master to each node.
 5. **11435 audit**: run `python3 scripts/audit_11435.py` on each node. Non-root on macOS reports partial/unknown;
    run with sudo for a full listing. Retire 11435 only when no clients are seen.
-6. **Windows (Laptop 2)**: run `nodes/windows/set-defender-runner-rule.ps1 -DryRun` first, read the plan, then
+6. **Windows nodes** (not Laptop 2, which is a Mac): run `nodes/windows/set-defender-runner-rule.ps1 -DryRun` first, read the plan, then
    `-Approve`. It removes the legacy broad "AI Fleet" rule only after approval. Run
    `nodes/windows/discover-dmr.ps1` and `nodes/windows/test-runner-service.ps1` and check output.
 7. **Router (N4)**: built and tested on fakes only. No real router adapter exists; nothing touches the router.

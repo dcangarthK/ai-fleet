@@ -116,7 +116,9 @@ rm -f ~/.fleet-enroll-code
 What success looks like in its output:
 1. `Enrolling <laptop2-name> with https://<master>:8443` → `Enrolled as '<laptop2-name>'; it will show as pending`.
 2. `Joining the tailnet as tag:llm-node` (a login URL may appear: open it and approve).
-3. `Configuring Ollama to listen on the tailnet only (100.x.y.z:11434)`, then the model downloads.
+3. `Configuring Ollama to listen on loopback only (127.0.0.1:11434); the runner is the only way in`, then the model
+   downloads. Since the networking build (N2) the master reaches this node only through the runner on :11436, and
+   the old :11435 inventory server (`.info` job) is removed.
 4. The inventory summary (`Model servers: ollama :11434 2 models [fleet-ready]`).
 5. `Installing the agent runner on 100.x.y.z:11436 (max mode: auto-edit)`, then `Done`.
 
@@ -128,9 +130,9 @@ reach the master: make a new code (M4) and re-run L3. It also prints the manual 
 Local checks on Laptop 2:
 ```bash
 IP=$(tailscale ip -4 2>/dev/null || /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4)
-launchctl list | grep ai-fleet          # → local.ai-fleet.ollama, .info, .scan, .runner
-curl -s http://$IP:11434/api/tags | python3 -c 'import json,sys; print([m["name"] for m in json.load(sys.stdin)["models"]])'
-curl -s http://$IP:11435/fleet.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["hardware"])'
+launchctl list | grep ai-fleet          # → local.ai-fleet.ollama, .scan, .runner (no .info)
+curl -s http://127.0.0.1:11434/api/tags | python3 -c 'import json,sys; print([m["name"] for m in json.load(sys.stdin)["models"]])'
+lsof -nP -iTCP:11434 -sTCP:LISTEN                # → 127.0.0.1 only; nothing on :11435
 # the runner needs its token even for /health; this passes it as a header file, not in argv or on screen
 curl -s -H @<(printf 'X-Runner-Token: %s\n' "$(cat ~/.ai-fleet/runner.token)") http://$IP:11436/health \
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["ok"], d["max_jobs"], d["power"], d["agents"])'
@@ -273,11 +275,11 @@ stays (removing it breaks the policy's master → node rules).
 | onboard: "Too many failed enrollment attempts" (429) | 5 failures in 10 minutes (shared by all devices, because behind `tailscale serve` every client is 127.0.0.1) | Wait 10 minutes, new code |
 | onboard stops with "Could not tag this machine as tag:llm-node" | Policy missing, or Tailscale wants existing flags repeated | Step M1; or run the command Tailscale suggests, keeping `--advertise-tags=tag:llm-node`. If enrollment already succeeded, re-run without `--enroll`; the token is already registered, so ignore the manual steps |
 | Node never appears in Nodes | Not tagged `tag:llm-node`, offline, or the master's Tailscale is down | `tailscale status` on the master should list Laptop 2 with `tag:llm-node` |
-| Node appears, models empty / "LOCAL ONLY" | Ollama bound to localhost (Ollama.app also running) or macOS firewall blocking | Quit Ollama.app and remove it from Login Items; System Settings > Network > Firewall: allow `ollama` and `python3` incoming |
+| Node appears, models empty | Ollama.app also running (two servers clash on 11434), runner down, or macOS firewall blocking the runner | Quit Ollama.app and remove it from Login Items; System Settings > Network > Firewall: allow `python3` incoming (runner :11436) |
 | `runner_ok` false | Token not stored (enrollment failed) or runner down | Manual token steps above; on Laptop 2 `tail ~/.ai-fleet/runner.log` and `launchctl kickstart -k gui/$(id -u)/local.ai-fleet.runner` |
 | Node shows "update available" (right after onboarding, or after the master updates) | Old script: it installed `runner.py` with build markers, so digests never matched; or the master's runner is newer | First copy a fresh `onboard.sh` to Laptop 2 (e.g. `scp ~/ai-fleet/nodes/onboard.sh laptop2:~/onboard.sh` from the master; the policy grants your admin devices tcp:22), then run `bash ~/onboard.sh` there. Re-running the saved `~/.ai-fleet/onboard.sh` reinstalls its own embedded runner, so it doesn't update the runner |
 | Re-run fails with "Bootstrap failed: 5: Input/output error" | Old script reloaded launchd jobs too fast | Fixed (waits and retries); with the old script, run it again |
 | `--yes` run dies with "ALLOW_ROOTS[@]: unbound variable" | Old script under macOS's bash 3.2 | Fixed; with the old script pass `--allow-root <dir>` |
-| Role not **Live**, or calls to Laptop 2 time out | LiteLLM (in Docker) can't reach the tailnet IP, or the node is asleep | From the master: `curl -s http://<laptop2-ip>:11434/api/tags`; keep Laptop 2 awake on power |
+| Role not **Live**, or calls to Laptop 2 time out | Runner unreachable from the master, or the node is asleep | Live page > Laptop 2 > **Check now**; `runner_ok` in `/api/fleet`; keep Laptop 2 awake on power |
 | Slow answers, model reloads every call | Two models assigned on Laptop 2 and used in turn | One hot model per 16 GB node (N3) |
 | Claude/Codex tasks refused "on battery (23%)" | `power.min_battery_pct` | Plug in, or lower it in `runner.json` (not recommended on a laptop) |

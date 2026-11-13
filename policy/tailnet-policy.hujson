@@ -1,0 +1,26 @@
+// SPEC-networking.md section 4 / phase N0. Paste into Tailscale admin console -> Access controls (owner step,
+// see docs/NETWORKING-OWNER-CHECKLIST.md). Deny by default: only the grants below work.
+// Replaces tailscale/policy.hujson once the owner applies it. Nothing here is applied by the repo.
+{
+  "tagOwners": {
+    "tag:master":   ["autogroup:admin"], // Laptop 1: controller, console on 8443 via Tailscale Serve
+    "tag:llm-node": ["autogroup:admin"], // worker machines. Applied by the owner AFTER enrolment completes.
+  },
+
+  "grants": [
+    // Master reaches the token-checked runner only. Raw engine/inventory ports are never granted.
+    {"src": ["tag:master"], "dst": ["tag:llm-node"], "ip": ["tcp:11436"]},
+    // Workers push signed heartbeats to the master's HTTPS endpoint. No worker -> worker grant exists.
+    {"src": ["tag:llm-node"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    // Owner tailnet members (phone, laptop) and not-yet-tagged nodes owned by a member reach the console and
+    // enrolment on 8443. This is what lets a node enrol before it receives tag:llm-node.
+    {"src": ["autogroup:member"], "dst": ["tag:master"], "ip": ["tcp:8443"]},
+    // Tailnet admins SSH to fleet machines for maintenance.
+    {"src": ["autogroup:admin"], "dst": ["tag:master", "tag:llm-node"], "ip": ["tcp:22"]},
+  ],
+
+  "tests": [
+    {"src": "tag:master", "accept": ["tag:llm-node:11436"], "deny": ["tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:12434", "tag:llm-node:1234", "tag:llm-node:8000", "tag:llm-node:8080", "tag:llm-node:22"]},
+    {"src": "tag:llm-node", "accept": ["tag:master:8443"], "deny": ["tag:master:22", "tag:master:8700", "tag:llm-node:11436", "tag:llm-node:11434", "tag:llm-node:11435", "tag:llm-node:12434", "tag:llm-node:22"]},
+  ],
+}

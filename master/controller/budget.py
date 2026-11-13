@@ -47,6 +47,9 @@ DEFAULT_RULES = {
                "exclude_globs": ["master/controller/ui/dist/**", "**/*.min.js", "**/*.bundle.js",
                                  "**/package-lock.json", "evals/results/*.json"]},
     "limits": {"on_limit": "queue",
+               # Fresh live usage at or above this percentage is held for the next window reset.  This leaves
+               # headroom for work already running instead of starting work that will immediately hit a limit.
+               "near_limit_percent": 90,
                "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
                # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
                # or wait for the reset. By kind; "*" covers the rest.
@@ -193,7 +196,9 @@ def validate_rules(body) -> dict:
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
     _unknown(limits, {"on_limit", "fallbacks", "on_task_limit", "max_handoffs", "allow_cross_vendor", "on_task_stall",
-                      "max_stall_handoffs"}, "limits")
+                      "max_stall_handoffs", "near_limit_percent"}, "limits")
+    if not _number(limits.get("near_limit_percent"), 0) or limits["near_limit_percent"] > 100:
+        raise ValueError("limits.near_limit_percent must be greater than 0 and at most 100")
     on_stall = limits.get("on_task_stall", {})
     if not isinstance(on_stall, dict) or any((k != "*" and k not in KINDS) or v not in ("reroute", "leave")
                                              for k, v in on_stall.items()):
@@ -882,6 +887,24 @@ def usage_records() -> dict[str, dict]:
     return out
 
 
+def near_limit_until(rules: dict, account: str | None, agent: str, now: float) -> float | None:
+    """The earliest fresh reset for an account that has reached the watch threshold.
+
+    Usage is reported per account by the runner, so it governs every budget model on that account.  Unknown and
+    stale observations deliberately leave placement alone; only fresh live observations reserve headroom.
+    """
+    if not account:
+        return None
+    record = usage_records().get(account)
+    if not record or record.get("agent") != agent:
+        return None
+    threshold = rules["limits"]["near_limit_percent"]
+    resets = [window.get("resets_at") for window in (record.get("windows") or {}).values()
+              if isinstance(window, dict) and now - window.get("observed_at", 0) <= usage.STALE_S
+              and window.get("used_percent", 0) >= threshold and window.get("resets_at", 0) > now]
+    return min(resets) if resets else None
+
+
 def rate_limit_until(record: dict, now: float) -> float | None:
     """When Codex is free again: the latest reset among windows that are used up and whose reset is still ahead."""
     ends = [w["resets_at"] for w in (record.get("primary"), record.get("secondary"))
@@ -1077,8 +1100,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         chosen, first = None, (None, None)
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
+            # Requirement 10: fresh usage near the window limit reserves the remaining headroom.  This watcher is
+            # live-mode only while shadow mode continues to describe the existing placement decisions.
+            near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
+            if near and not until:
+                until, why = near, f"waiting for {label(of_key)} at {clock(near)}"
             if until:
-                first = first if first[0] else (until, why)
+                if first[0] is None or until < first[0]:
+                    first = (until, why)
                 continue
             maximum = of_entry.get("max_concurrent")
             if maximum is None or of_key is None or running_count(of_key, account=account) < maximum:
@@ -1136,7 +1165,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                     rerouted = True
                     break
             if not rerouted:
-                decision.update(wait="limit", reason=why, until=until)
+                decision.update(wait="limit", reason=why, until=until, not_before=until)
         if decision["key"]:
             maybe_soft_notice(rules, decision["key"], now)
     decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)

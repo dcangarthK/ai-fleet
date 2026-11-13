@@ -860,7 +860,10 @@ async def recover() -> None:
     import handoff  # local import: handoff builds on this module
     await handoff.recover_claims()
     with db() as c:
-        pending = [r[0] for r in c.execute("SELECT id FROM tasks WHERE state IN ('queued','starting')")]
+        # The schema has no separate priority column; creation order is the queue priority used by start_wait.
+        # Keep recovery in that order so timed queues drain deterministically at a reset.
+        pending = [r[0] for r in c.execute(
+            "SELECT id FROM tasks WHERE state IN ('queued','starting') ORDER BY created_at, rowid")]
 
     async def one(task_id: str) -> None:
         async with _locks[task_id]:
@@ -871,7 +874,12 @@ async def recover() -> None:
             if get_task(task_id)["state"] == "starting":
                 await start(get_task(task_id))
 
-    await asyncio.gather(*(one(i) for i in pending), return_exceptions=True)
+    for task_id in pending:
+        try:
+            await one(task_id)
+        except Exception:
+            # A runner can be unavailable during recovery; it remains queued for the next poll.
+            continue
 
 
 # ---------- polling runners ----------
@@ -1492,6 +1500,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                                if index == 0 else None),
             "review_of": t.review_of, "launch_extra": json.dumps(extra) if extra else None,
             "budget_wait": decision["wait"] if state == "queued" else None,
+            # Part G req 10: a new task held because every eligible account is near its live-usage limit waits for
+            # the earliest reset instead of being retried on every poll.
+            "not_before": decision.get("not_before") if state == "queued" else None,
             "approved_tools": json.dumps(tools_at_launch),
             "profile": slot["profile"] if slot else "fleet", "account_label": slot["label"] if slot else None,
             "account": account, "stage": t.stage, "independence": json.dumps(waiver) if waiver else None,

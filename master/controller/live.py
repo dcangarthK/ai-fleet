@@ -281,7 +281,7 @@ def pipeline_strip(p: dict) -> list[dict]:
 # ---------- §4.2 /api/live ----------
 
 WORKER_FIELDS = ("id, title, agent, model, account_label, profile, kind, effort, stage, node_id, branch, started_at, "
-                 "independence, state, created_at, budget_wait, error, account, budget_identity")
+                 "independence, state, created_at, budget_wait, error, account, budget_identity, not_before")
 
 
 def _json(value):
@@ -356,10 +356,13 @@ def queue(now: float) -> list[dict]:
             wait, reason = "approval", "needs your approval"
         elif r["budget_wait"] in ("limit", "slot"):
             wait, reason = r["budget_wait"], r["error"]
+            if r.get("not_before") and r["not_before"] > now:
+                until = r["not_before"]
             if wait == "limit" and r["agent"] in budget.PAID_AGENTS:
                 snap = budget.limit_snapshot(rules, now, budget.task_account(r))
                 ident = r["budget_identity"] or budget.identity(r["agent"], r["model"])
-                until = budget.limited_for(snap, r["agent"], ident, rules)[0]
+                limited_until = budget.limited_for(snap, r["agent"], ident, rules)[0]
+                until = limited_until or until
         elif r["error"]:
             wait, reason = "node", r["error"]
         else:

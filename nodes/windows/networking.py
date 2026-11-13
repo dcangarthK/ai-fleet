@@ -13,6 +13,7 @@ import json
 import re
 import sys
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -69,7 +70,12 @@ def powershell_rule_summary(rule: Mapping[str, Any]) -> str:
 
 def parse_docker_model_ls(output: str | None) -> list[dict[str, str | None]]:
     """Use the runner's sole DMR parser so Windows discovery matches /health."""
-    from nodes.runner import parse_docker_model_ls as runner_parser
+    try:
+        from nodes.runner import parse_docker_model_ls as runner_parser
+    except ModuleNotFoundError:
+        # `python networking.py dmr` starts with nodes/windows as sys.path[0].
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from nodes.runner import parse_docker_model_ls as runner_parser
     return runner_parser(output)
 
 

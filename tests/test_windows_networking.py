@@ -1,9 +1,10 @@
 """Phase N3 Windows helpers and owner scripts use fixture data only."""
 
 import importlib.util
+import json
 import shutil
 import subprocess
-import tempfile
+import sys
 import unittest
 from pathlib import Path
 
@@ -37,7 +38,7 @@ class DefenderProposalTests(unittest.TestCase):
         self.assertLess(approval, mutation)
         self.assertIn("[switch]$DryRun", text)
         self.assertIn("-InterfaceAlias $TailscaleInterfaceAlias", text)
-        self.assertIn("-Profile $profile", text)
+        self.assertIn("-Profile $firewallProfile", text)
         self.assertIn("$legacy | Remove-NetFirewallRule", text)
         self.assertIn("$helper rule @MasterTailnetIp", text)
         self.assertIn("-LocalPort 11436", text)
@@ -66,6 +67,13 @@ class DmrFixtureTests(unittest.TestCase):
             {"engine": "dmr", "reference": "ai/qwen3:latest", "digest": "0123456789ab", "size": None,
              "warm": "unknown", "warm_source": None},
         ], networking.parse_docker_model_ls(output))
+
+    def test_cli_dmr_works_when_started_from_its_own_directory(self):
+        output = "MODEL ID SIZE\nai/qwen3:latest 7b 0123456789ab 4GB\n"
+        result = subprocess.run([sys.executable, "networking.py", "dmr"], input=output,
+                                text=True, capture_output=True, cwd=WINDOWS, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("ai/qwen3:latest", json.loads(result.stdout)[0]["reference"])
 
 
 class RunnerAvailabilityTests(unittest.TestCase):

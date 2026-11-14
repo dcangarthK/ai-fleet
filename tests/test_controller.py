@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch, AsyncMock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1914,13 +1915,31 @@ Imported body.
     def test_request_while_an_operation_is_being_started_is_refused(self):
         from store import db
         self.c.post("/api/models", json={"reference": "tiny:1b"}, headers=W)
-        with db() as c:
-            c.execute("INSERT OR REPLACE INTO node_models (node,catalog_id,desired,state,progress,params,updated_at) "
-                      "VALUES ('master','tiny-1b','present','starting','{}','{}',?)", (time.time(),))
-        r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent"}, headers=W)
-        self.assertEqual(r.status_code, 409)
-        with db() as c:
-            c.execute("DELETE FROM node_models WHERE node='master' AND catalog_id='tiny-1b'")
+        # Ensure tiny:1b is not in the cached node.models, then block reconcile_models during the
+        # critical section so it can't claim the 'starting' row and POST an operation. This prevents
+        # reconcile from incorrectly transitioning state to 'ready', which would make the PUT succeed.
+        FakeRunner.models.pop("tiny:1b", None)
+        self.c.post("/api/refresh", headers=W)
+        FakeRunner.op_script = ["pulling"] * 50  # Keep any ops busy before the patch
+        try:
+            with patch.object(controller, "reconcile_models", new=AsyncMock(return_value=None)):
+                with db() as c:
+                    c.execute("INSERT OR REPLACE INTO node_models (node,catalog_id,desired,state,progress,params,updated_at) "
+                              "VALUES ('master','tiny-1b','present','starting','{}','{}',?)", (time.time(),))
+                r = self.c.put("/api/nodes/master/models/tiny-1b", json={"desired": "absent"}, headers=W)
+                self.assertEqual(r.status_code, 409)
+        finally:
+            # Clean up: stop keeping ops busy, set them to ready, delete the row,
+            # and remove lingering tiny:1b ops from FakeRunner to avoid interference.
+            FakeRunner.op_script = []
+            for op in FakeRunner.ops.values():
+                op["script"] = ["ready"]
+            with db() as c:
+                c.execute("DELETE FROM node_models WHERE node='master' AND catalog_id='tiny-1b'")
+            # Remove any lingering tiny:1b operations from FakeRunner.ops to avoid interference with subsequent tests.
+            for op_id in list(FakeRunner.ops.keys()):
+                if FakeRunner.ops[op_id].get("ref") == "tiny:1b":
+                    FakeRunner.ops.pop(op_id, None)
 
     def test_role_with_settings_waits_for_the_derived_model(self):
         self.c.post("/api/models", json={"reference": "tiny:1b", "defaults": {"temperature": 0.1}}, headers=W)

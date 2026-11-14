@@ -2264,6 +2264,51 @@ Imported body.
         public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
         self.assertEqual(public.get("/enroll/onboard.sh").status_code, 200)
 
+    def test_windows_enrollment_path_public_access_and_response(self):
+        public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        ps1_resp = public.get("/enroll/onboard.ps1")
+        self.assertEqual(ps1_resp.status_code, 200, ps1_resp.text)
+        self.assertEqual(ps1_resp.headers.get("content-type"), "text/plain; charset=utf-8")
+        self.assertIn("onboard.ps1", ps1_resp.headers.get("content-disposition", ""))
+        script = ps1_resp.text
+        self.assertIn("param(", script, "served file should be the Windows onboard script")
+        self.assertIn("-EnrollPrompt", script)
+        self.assertTrue(len(script) > 1000, "script should not be truncated or empty")
+
+        enroll_resp = self.c.post("/api/enroll", json={"name": "laptop3"}, headers=W)
+        self.assertEqual(enroll_resp.status_code, 200)
+        enrollment = enroll_resp.json()
+        self.assertIn("windows_command", enrollment)
+        self.assertNotIn(enrollment["code"], enrollment["windows_command"],
+                        "enrollment code must not be in the windows command (kept in history)")
+        self.assertRegex(enrollment["windows_command"],
+                        r'-EnrollPrompt.*-Master.*https://master\.tail\.ts\.net',
+                        "windows command should have -EnrollPrompt and -Master with base URL")
+        self.assertIn("onboard.ps1", enrollment["windows_command"])
+        self.assertIn("Invoke-WebRequest", enrollment["windows_command"])
+        self.assertIn("Out-File", enrollment["windows_command"])
+
+    def test_enrollment_paths_only_public_paths(self):
+        public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        auth_paths = [
+            "/api/nodes",
+            "/api/roles",
+            "/api/tasks",
+            "/api/fleet",
+            "/api/models",
+        ]
+        for path in auth_paths:
+            resp = public.get(path)
+            self.assertEqual(resp.status_code, 403, f"{path} should require auth, got {resp.status_code}")
+
+        unauthenticated_paths = [
+            "/enroll/onboard.sh",
+            "/enroll/onboard.ps1",
+        ]
+        for path in unauthenticated_paths:
+            resp = public.get(path)
+            self.assertEqual(resp.status_code, 200, f"{path} should be public, got {resp.status_code}")
+
 
 if __name__ == "__main__":
     unittest.main()

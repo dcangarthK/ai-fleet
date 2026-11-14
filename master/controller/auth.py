@@ -33,7 +33,7 @@ ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies"
 HEARTBEAT_PATH = "/api/nodes/heartbeat"
 # Paths whose handler does all of the auth itself: enrollment, and runner heartbeats signed with the node's runner
 # token (docs/SPEC-live-monitor.md 12.1). Neither gets an API scope.
-PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete", HEARTBEAT_PATH}
+PUBLIC_PATHS = {"/enroll/onboard.sh", "/enroll/onboard.ps1", "/api/enroll/complete", HEARTBEAT_PATH}
 
 # Set by the controller: called with every request that passed auth, for orchestrator presence (live monitor 2.4).
 presence_hook = None

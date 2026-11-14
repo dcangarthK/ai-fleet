@@ -2071,6 +2071,18 @@ Imported body.
         self.assertIs(assignment["routed"], False)
         self.assertEqual(assignment["route_reason"], "litellm not configured")
 
+    def test_route_ineligible_engine_loopback_only(self):
+        assignment = {"engine": "ollama", "state": "active", "model": "m:1b"}
+
+        def node(loopback_only):
+            fw = {"runner_tailnet_only": True, "engine_loopback_only": loopback_only, "ipv6_wildcard": False,
+                  "details": []}
+            return {"id": "remote-n", "status": "approved", "fails": 0, "engine": "ollama",
+                    "models": json.dumps(["m:1b"]), "runner": json.dumps({"firewall": fw})}
+
+        self.assertEqual(controller._route_ineligible(assignment, node(True)), "engine loopback-only")
+        self.assertIsNone(controller._route_ineligible(assignment, node(False)))
+
     def test_enrollment_single_use_expiry_binding_audit_and_rate_limit(self):
         original = controller.now
         clock = [1_900_000_000.0]

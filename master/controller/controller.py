@@ -468,6 +468,8 @@ def _route_ineligible(assignment, node) -> str | None:
             return "node unhealthy"
     except (ValueError, TypeError):
         return "node unhealthy"
+    if node["id"] != tasks.MASTER_ID and engine_not_reachable_remotely(node):
+        return "engine loopback-only"
     return None
 
 

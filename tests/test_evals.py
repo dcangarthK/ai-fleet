@@ -828,5 +828,41 @@ class RunnerRelay(unittest.TestCase):
         self.assertNotIn("11434", seen["url"])
 
 
+class SandboxPython(unittest.TestCase):
+    @staticmethod
+    def _ok(*_a, **_k):
+        return mock.Mock(returncode=0)
+
+    def test_users_interpreter_replaced_by_system_one(self):
+        with (mock.patch.object(sys, "executable", "/Users/x/.cache/uv/py/bin/python"),
+              mock.patch.object(sys, "base_prefix", "/Users/x/.cache/uv/py"),
+              mock.patch("os.path.realpath", side_effect=lambda p: p),
+              mock.patch("os.path.exists", side_effect=lambda p: p == "/opt/homebrew/bin/python3"),
+              mock.patch("subprocess.run", side_effect=self._ok)):
+            self.assertEqual(E._sandbox_python(), "/opt/homebrew/bin/python3")
+
+    def test_outside_users_kept(self):
+        with (mock.patch.object(sys, "executable", "/usr/local/bin/python3.12"),
+              mock.patch.object(sys, "base_prefix", "/usr/local"),
+              mock.patch("os.path.realpath", side_effect=lambda p: p),
+              mock.patch("subprocess.run", side_effect=self._ok) as run):
+            self.assertEqual(E._sandbox_python(), "/usr/local/bin/python3.12")
+            run.assert_not_called()
+
+    def test_none_available_exits(self):
+        with (mock.patch.object(sys, "executable", "/Users/x/venv/bin/python"),
+              mock.patch.object(sys, "base_prefix", "/Users/x/venv"),
+              mock.patch("os.path.realpath", side_effect=lambda p: p),
+              mock.patch("os.path.exists", return_value=False)):
+            with self.assertRaises(SystemExit):
+                E._sandbox_python()
+
+    def test_macos_command_uses_helper(self):
+        with (mock.patch.object(E, "SANDBOX_MODE", "macos"),
+              mock.patch.object(E, "_sandbox_python", return_value="/usr/bin/python3")):
+            cmd = E._command("/tmp/w")
+        self.assertEqual(cmd[3], "/usr/bin/python3")
+
+
 if __name__ == "__main__":
     unittest.main()

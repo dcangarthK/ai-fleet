@@ -659,7 +659,8 @@ def create_enrollment(body: EnrollmentBody) -> dict:
     command = f"curl -fsS {base}/enroll/onboard.sh | bash -s -- --enroll --master {base}"
     # Windows PowerShell command: downloads the script to a temp file with byte-preserving -OutFile and runs it
     # with -EnrollPrompt to prompt for the code (keeping it out of the command line), and -Master pointing to the enrollment server.
-    windows_command = f'$f="$env:TEMP\\onboard-$(Get-Random).ps1"; Invoke-WebRequest "{base}/enroll/onboard.ps1" -UseBasicParsing -OutFile $f; & $f -EnrollPrompt -Master "{base}"'
+    # Uses -ExecutionPolicy Bypass scoped to the child process only; never use Set-ExecutionPolicy.
+    windows_command = f'$f="$env:TEMP\\onboard-$(Get-Random).ps1"; Invoke-WebRequest "{base}/enroll/onboard.ps1" -UseBasicParsing -OutFile $f; powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$f" -EnrollPrompt -Master "{base}"'
     return {"code": code, "expires_at": expires, "command": command, "windows_command": windows_command}
 
 

@@ -1011,6 +1011,11 @@ class OnboardPs1SyntaxTests(unittest.TestCase):
         self.assertNotIn("System.Net.HttpListener", text)
         self.assertNotIn("${ip}:11435", text)
 
+    def test_worker_tag_uses_up_not_set(self):
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertIn("up --advertise-tags=tag:llm-node", text)
+        self.assertNotIn("set --advertise-tags", text)
+
     def test_no_scoped_variable_pitfalls_in_double_quoted_strings(self):
         text = (ROOT / "nodes" / "onboard.ps1").read_text()
         self.assertEqual(scoped_var_pitfalls(text), [],

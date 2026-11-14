@@ -66,8 +66,16 @@ function Ensure-WorkerTag {
   $tags = try { @(((& $TS status --json) | ConvertFrom-Json).Self.Tags) } catch { @() }
   if (-not ($tags -contains "tag:llm-node")) {
     Say "Advertising tag:llm-node after enrollment"
-    & $TS set --advertise-tags=tag:llm-node
-    if ($LASTEXITCODE -ne 0) { throw "Could not advertise tag:llm-node" }
+    & $TS up --advertise-tags=tag:llm-node
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Could not advertise tag:llm-node. Two usual causes:"
+      Write-Host " - the tailnet policy has no tag:llm-node owner: paste tailscale/policy.hujson into the Tailscale"
+      Write-Host "   admin console (Access controls);"
+      Write-Host " - Tailscale wants this machine's existing non-default flags repeated: run the command it suggests"
+      Write-Host "   above, keeping --advertise-tags=tag:llm-node."
+      Write-Host "Enrollment is complete. Just run the tailscale up command; no need to re-run this script."
+      throw "Could not advertise tag:llm-node"
+    }
   }
 }
 

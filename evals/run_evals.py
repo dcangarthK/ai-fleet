@@ -203,6 +203,30 @@ def _limits() -> None:  # runs in the child before exec
             pass
 
 
+def _under_users(path: str) -> bool:
+    real = os.path.realpath(path)
+    return real == "/Users" or real.startswith("/Users/")
+
+
+def _sandbox_python() -> str:
+    """Interpreter for the macOS sandbox, which denies reads under /Users (so a uv/venv python there can't exec).
+    The model-code harness (TEST_RUNNER) is stdlib only (json, os, sys, unittest), so any python3 >= 3.9 works."""
+    if not _under_users(sys.executable) and not _under_users(sys.base_prefix):
+        return sys.executable
+    for cand in ("/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"):
+        if not os.path.exists(cand) or _under_users(cand):
+            continue
+        try:
+            ok = subprocess.run([cand, "-I", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"],
+                                capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if ok:
+            return cand
+    raise SystemExit("No python3 (>=3.9) outside /Users found for the macOS sandbox (tried /usr/bin/python3, "
+                     "/opt/homebrew/bin/python3, /usr/local/bin/python3). Install one, or pass --unsafe-exec.")
+
+
 def _command(work: str) -> list[str]:
     mode = SANDBOX_MODE
     if mode == "auto":
@@ -210,7 +234,7 @@ def _command(work: str) -> list[str]:
                "docker" if shutil.which("docker") else "refuse"
     if mode == "macos":
         profile = SANDBOX_PROFILE.format(work=os.path.realpath(work))
-        return ["sandbox-exec", "-p", profile, sys.executable, "-I", "runner.py"]
+        return ["sandbox-exec", "-p", profile, _sandbox_python(), "-I", "runner.py"]
     if mode == "docker":
         return ["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--memory", "256m",
                 "--pids-limit", "64", "--cpus", "1", "--user", "65534:65534", "-v", f"{work}:/work:ro", "-w", "/work",

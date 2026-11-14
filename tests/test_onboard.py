@@ -879,7 +879,10 @@ class WindowsPythonInterpreter(unittest.TestCase):
     def test_validate_function_gates_on_exit_status(self):
         """Validate-PythonInterpreter must check LASTEXITCODE."""
         text = (ROOT / "nodes" / "onboard.ps1").read_text()
-        self.assertIn("$LASTEXITCODE -eq 0", text,
+        validate_start = text.index("function Validate-PythonInterpreter")
+        validate_end = text.index("\nfunction", validate_start + 1)
+        validate = text[validate_start:validate_end]
+        self.assertIn("$LASTEXITCODE -eq 0", validate,
                      "Validate-PythonInterpreter must gate on exit status")
 
     def test_validate_function_runs_candidate_with_import(self):
@@ -928,15 +931,18 @@ class WindowsPythonInterpreter(unittest.TestCase):
                      "runner.cmd must invoke Python from the validated path")
 
     def test_winget_failure_throws_not_returns(self):
-        """Install-Runner must throw on winget failure, not return (prevents enrollment fallthrough)."""
+        """Install-Runner must throw on no interpreter (prevents enrollment fallthrough)."""
         text = (ROOT / "nodes" / "onboard.ps1").read_text()
         install_runner_start = text.index("function Install-Runner")
         install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
         install_runner = text[install_runner_start:install_runner_end]
-        winget_failure_section = install_runner[install_runner.index("winget install"):]
-        winget_failure_section = winget_failure_section[:winget_failure_section.index("}\n")]
-        self.assertIn("throw", winget_failure_section,
-                     "winget failure must throw (not return) to stop enrollment")
+        winget_section = install_runner[install_runner.index("winget install"):]
+        self.assertIn("$wingetCode = $LASTEXITCODE", winget_section,
+                     "Must capture winget exit code")
+        self.assertIn("Resolve-PythonInterpreter", winget_section,
+                     "Must re-resolve after winget (exit code is not an error)")
+        self.assertIn("winget exit code $wingetCode", winget_section,
+                     "Error message must include winget exit code")
 
     def test_resolves_after_install(self):
         """Install-Runner must re-resolve after winget install, not blindly use a path."""
@@ -957,9 +963,13 @@ class WindowsPythonInterpreter(unittest.TestCase):
         install_runner_start = text.index("function Install-Runner")
         install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
         install_runner = text[install_runner_start:install_runner_end]
-        after_resolve = install_runner[install_runner.rindex("Resolve-PythonInterpreter"):]
-        self.assertIn("throw", after_resolve,
-                     "No interpreter after install must throw to stop enrollment")
+        after_winget = install_runner[install_runner.index("$wingetCode = $LASTEXITCODE"):]
+        self.assertIn("Resolve-PythonInterpreter", after_winget,
+                     "Must re-resolve after winget")
+        self.assertIn("if (-not $py)", after_winget,
+                     "Must check if resolve returned nothing")
+        self.assertIn("throw", after_winget,
+                     "Must throw when no interpreter found")
 
     def test_resolve_discovers_all_path_matches(self):
         """Resolve-PythonInterpreter must use Get-Command -All, not just the first."""

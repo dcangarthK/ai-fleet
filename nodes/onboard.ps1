@@ -4727,12 +4727,10 @@ function Install-Runner($ip) {
   if (-not $py) {
     if (-not (Ask "Python is needed for the agent runner. Install it?")) { return }
     winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0) {
-      throw "Failed to install Python with winget. Please install Python 3.12 manually and try again."
-    }
+    $wingetCode = $LASTEXITCODE
     $py = Resolve-PythonInterpreter
     if (-not $py) {
-      throw "Python installation completed, but no usable interpreter was found."
+      throw "No usable Python interpreter found after winget install (winget exit code $wingetCode). Install Python 3.12 manually and rerun."
     }
   }
   $runnerPath = Join-Path $FleetDir "runner.py"

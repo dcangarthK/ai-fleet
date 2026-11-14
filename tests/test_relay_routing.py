@@ -195,18 +195,28 @@ class RelayParams(RelayBase):
 
 
 class RelayReconcile(RelayBase):
+    @staticmethod
+    def mine():
+        """This node's calls only: other test files in the same process leave their own nodes in the shared db."""
+        out = []
+        for path, body in FakeLiteLLM.posts:
+            mid = body.get("id") or (body.get("model_info") or {}).get("id", "")
+            if "--rl1--" in mid:
+                out.append((path, body))
+        return out
+
     def test_token_rotation_deletes_and_recreates_the_deployment(self):
         self.seed()
         self.reconcile()
-        self.assertEqual([p for p, _ in FakeLiteLLM.posts], ["/model/new"])
+        self.assertEqual([p for p, _ in self.mine()], ["/model/new"])
         FakeLiteLLM.posts.clear()
         self.reconcile()
-        self.assertEqual(FakeLiteLLM.posts, [], "unchanged: nothing to do")
+        self.assertEqual(self.mine(), [], "unchanged: nothing to do")
         with db() as c:
             c.execute("UPDATE nodes SET runner_token=? WHERE id='rl1'", ("rotated-" + NODE_TOKEN,))
         self.reconcile()
-        self.assertEqual([p for p, _ in FakeLiteLLM.posts], ["/model/delete", "/model/new"])
-        created = FakeLiteLLM.posts[-1][1]
+        self.assertEqual([p for p, _ in self.mine()], ["/model/delete", "/model/new"])
+        created = self.mine()[-1][1]
         self.assertEqual(created["litellm_params"]["api_key"], relay_of("rotated-" + NODE_TOKEN))
 
 
@@ -236,6 +246,19 @@ class RelayHealth(unittest.TestCase):
     def test_a_heartbeat_without_relay_chat_clears_a_stored_true(self):
         merged = tasks.merge_health({"relay_chat": True, "ok": True}, {"ok": True, "version": "2"})
         self.assertIs(merged["relay_chat"], False)
+
+
+class EventsClosedLoop(unittest.TestCase):
+    def test_emit_with_a_closed_bound_loop_does_not_raise(self):
+        loop = asyncio.new_event_loop()
+        loop.close()
+        previous = events._loop
+        events.bind_loop(loop)
+        try:
+            events._wake()
+            events.emit(None, "relay.test", {})
+        finally:
+            events._loop = previous
 
 
 if __name__ == "__main__":

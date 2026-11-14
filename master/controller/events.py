@@ -36,8 +36,8 @@ def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 def _wake() -> None:
     # asyncio.Event isn't thread-safe; sync endpoints run in a threadpool, so hop onto the loop.
-    if _loop is None:
-        return
+    if _loop is None or _loop.is_closed():
+        return  # a loop a finished test client left bound
     try:
         running = asyncio.get_running_loop()
     except RuntimeError:
@@ -45,7 +45,10 @@ def _wake() -> None:
     if running is _loop:
         _swap()
     else:
-        _loop.call_soon_threadsafe(_swap)
+        try:
+            _loop.call_soon_threadsafe(_swap)
+        except RuntimeError:
+            pass  # the loop closed between the check and the call
 
 
 def _swap() -> None:

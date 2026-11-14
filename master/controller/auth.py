@@ -31,9 +31,10 @@ ADMIN_PATHS = ("/api/roles", "/api/models", "/api/instructions", "/api/policies"
                # the owner's limit reset (docs/SPEC-live-monitor.md 13 b): the full path, nothing else under it
                "/api/budget/accounts/reset")
 HEARTBEAT_PATH = "/api/nodes/heartbeat"
+INSTALLER_PATHS = {"/enroll/onboard.sh", "/enroll/onboard.ps1"}
 # Paths whose handler does all of the auth itself: enrollment, and runner heartbeats signed with the node's runner
-# token (docs/SPEC-live-monitor.md 12.1). Neither gets an API scope.
-PUBLIC_PATHS = {"/enroll/onboard.sh", "/api/enroll/complete", HEARTBEAT_PATH}
+# token (docs/SPEC-live-monitor.md 12.1). Neither gets an API scope. Installer paths are public only for GET/HEAD.
+PUBLIC_PATHS = {"/api/enroll/complete", HEARTBEAT_PATH}
 
 # Set by the controller: called with every request that passed auth, for orchestrator presence (live monitor 2.4).
 presence_hook = None
@@ -109,7 +110,8 @@ def _deny(msg: str) -> JSONResponse:
 async def access_control(request: Request, call_next):
     host = (request.headers.get("host") or "").rsplit(":", 1)[0].lower()
     public_enrollment = request.url.path in PUBLIC_PATHS
-    if request.method not in ("GET", "HEAD") and not public_enrollment and request.headers.get("x-fleet") != "1":
+    public_installer = request.url.path in INSTALLER_PATHS and request.method in ("GET", "HEAD")
+    if request.method not in ("GET", "HEAD") and not public_enrollment and not public_installer and request.headers.get("x-fleet") != "1":
         return _deny("missing X-Fleet header")
     port = (request.scope.get("server") or ("", 0))[1]
     if port != PUBLIC_PORT:
@@ -124,10 +126,10 @@ async def access_control(request: Request, call_next):
                 return _deny(f"needs {required_scope(request)} access; this request asked for {scope}")
         request.state.scope = scope
         request.state.actor = request.state.actor_id = "local"
-        if not public_enrollment:
+        if not public_enrollment and not public_installer:
             _presence(request)
         return await call_next(request)
-    if request.url.path == "/login" or public_enrollment:
+    if request.url.path == "/login" or public_enrollment or public_installer:
         request.state.scope = "view"
         request.state.actor = "node" if request.url.path == HEARTBEAT_PATH else "enrollment"
         return await call_next(request)

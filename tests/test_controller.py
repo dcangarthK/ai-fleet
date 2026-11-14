@@ -2264,6 +2264,59 @@ Imported body.
         public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
         self.assertEqual(public.get("/enroll/onboard.sh").status_code, 200)
 
+    def test_windows_enrollment_path_public_access_and_response(self):
+        public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        ps1_resp = public.get("/enroll/onboard.ps1")
+        self.assertEqual(ps1_resp.status_code, 200, ps1_resp.text)
+        self.assertEqual(ps1_resp.headers.get("content-type"), "text/plain; charset=utf-8")
+        self.assertIn("onboard.ps1", ps1_resp.headers.get("content-disposition", ""))
+
+        served_content = ps1_resp.content
+        source_file = Path(__file__).resolve().parent.parent / "nodes" / "onboard.ps1"
+        source_content = source_file.read_bytes()
+        self.assertEqual(served_content, source_content, "served file must match nodes/onboard.ps1 byte-for-byte")
+
+        enroll_resp = self.c.post("/api/enroll", json={"name": "laptop3"}, headers=W)
+        self.assertEqual(enroll_resp.status_code, 200)
+        enrollment = enroll_resp.json()
+        self.assertIn("windows_command", enrollment)
+        self.assertNotIn(enrollment["code"], enrollment["windows_command"],
+                        "enrollment code must not be in the windows command (kept in history)")
+        self.assertRegex(enrollment["windows_command"],
+                        r'-EnrollPrompt.*-Master.*https://master\.tail\.ts\.net',
+                        "windows command should have -EnrollPrompt and -Master with base URL")
+        self.assertIn("-OutFile", enrollment["windows_command"], "command must use -OutFile for byte-preserving download")
+        self.assertNotIn(".Content |", enrollment["windows_command"], "command must not use Content decode/re-encode pipeline")
+        self.assertIn("onboard.ps1", enrollment["windows_command"])
+        self.assertIn("Invoke-WebRequest", enrollment["windows_command"])
+
+    def test_enrollment_paths_only_public_paths(self):
+        public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")
+        auth_paths = [
+            "/api/nodes",
+            "/api/roles",
+            "/api/tasks",
+            "/api/fleet",
+            "/api/models",
+        ]
+        for path in auth_paths:
+            resp = public.get(path)
+            self.assertEqual(resp.status_code, 403, f"{path} should require auth, got {resp.status_code}")
+
+        unauthenticated_paths = [
+            "/enroll/onboard.sh",
+            "/enroll/onboard.ps1",
+        ]
+        for path in unauthenticated_paths:
+            resp = public.get(path)
+            self.assertEqual(resp.status_code, 200, f"{path} should be public for GET, got {resp.status_code}")
+
+        for path in unauthenticated_paths:
+            post_resp = public.post(path, json={})
+            self.assertEqual(post_resp.status_code, 403, f"{path} should require auth for POST, got {post_resp.status_code}")
+            put_resp = public.put(path, json={})
+            self.assertEqual(put_resp.status_code, 403, f"{path} should require auth for PUT, got {put_resp.status_code}")
+
 
 if __name__ == "__main__":
     unittest.main()

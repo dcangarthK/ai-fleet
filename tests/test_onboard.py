@@ -961,6 +961,37 @@ class WindowsPythonInterpreter(unittest.TestCase):
         self.assertIn("throw", after_resolve,
                      "No interpreter after install must throw to stop enrollment")
 
+    def test_resolve_discovers_all_path_matches(self):
+        """Resolve-PythonInterpreter must use Get-Command -All, not just the first."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn("-All", resolve,
+                     "Must use Get-Command -All to discover all PATH matches")
+        self.assertIn("-CommandType Application", resolve,
+                     "Must filter by Application type")
+
+    def test_resolve_tries_multiple_candidates(self):
+        """Resolve-PythonInterpreter must iterate foreach candidates, not stop at first."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn("foreach ($candidate in $candidates)", resolve,
+                     "Must loop through all candidates")
+
+    def test_resolve_includes_machine_scope_path(self):
+        """Resolve-PythonInterpreter must include machine-scope install path."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn(r"$env:ProgramFiles\Python312", resolve,
+                     "Must include machine-scope install path")
+        self.assertIn("(Test-Path $machinePath)", resolve,
+                     "Must test path existence before adding as candidate")
+
 
 class OnboardPs1SyntaxTests(unittest.TestCase):
     def test_windows_onboard_is_loopback_and_retires_11435(self):

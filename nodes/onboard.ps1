@@ -4703,11 +4703,16 @@ function Validate-PythonInterpreter($Path) {
 function Resolve-PythonInterpreter {
   $candidates = @()
 
-  $cmdPy = (Get-Command python -ErrorAction SilentlyContinue).Source
-  if ($cmdPy) { $candidates += $cmdPy }
+  $cmdPy = Get-Command python -All -CommandType Application -ErrorAction SilentlyContinue
+  foreach ($cmd in $cmdPy) {
+    if ($cmd.Source) { $candidates += $cmd.Source }
+  }
 
-  $stablePath = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-  if ((Test-Path $stablePath)) { $candidates += $stablePath }
+  $userPath = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+  if ((Test-Path $userPath)) { $candidates += $userPath }
+
+  $machinePath = "$env:ProgramFiles\Python312\python.exe"
+  if ((Test-Path $machinePath)) { $candidates += $machinePath }
 
   foreach ($candidate in $candidates) {
     if (Validate-PythonInterpreter $candidate) {

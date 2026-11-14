@@ -3762,7 +3762,10 @@ def relay_prepare(manager, payload):
     model = payload.get("model")
     if not isinstance(model, str) or not EVAL_MODEL.fullmatch(model):
         raise HttpError(400, "a valid model is required")
-    if model not in relay_installed(manager, base) and model not in relay_installed(manager, base, refresh=True):
+    def present(names):
+        # Ollama lists every model with a tag; an untagged name resolves to :latest. The name is forwarded as sent.
+        return model in names or (":" not in model and model + ":latest" in names)
+    if not present(relay_installed(manager, base)) and not present(relay_installed(manager, base, refresh=True)):
         raise HttpError(400, "model not installed")
     if not isinstance(payload.get("messages"), list):
         raise HttpError(400, "messages must be a list")

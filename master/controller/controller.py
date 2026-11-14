@@ -497,7 +497,7 @@ async def reconcile() -> dict:
             mid = deployment_id(assignment["role"], assignment["node"], assignment["model"])
             reason = _route_ineligible(assignment, nodes.get(assignment["node"]))
             routed = int(mid in desired and reason is None)
-            if routed and desired[mid]["litellm_params"].get("api_key"):
+            if routed and desired[mid]["model_info"].get("relay_fp"):
                 # Advisory only: routed stays 1, route_reason is a note rather than "why not routed".
                 ignored = _relay_ignored(assignment)
                 reason = "relay: %s ignored" % ", ".join(ignored) if ignored else None

@@ -304,8 +304,25 @@ class RunnerValidation(RelayCase):
 
     def test_model_added_after_the_cache_was_filled_is_accepted(self):
         self.assertEqual(self.relay(body())[0], 200)
-        self.engine.models.append("fleet-coder-14b")
+        self.engine.models.append("fleet-coder-14b:latest")
         self.assertEqual(self.relay(body(model="fleet-coder-14b"))[0], 200)
+
+    def test_untagged_derived_model_matches_its_latest_tag_and_is_forwarded_as_sent(self):
+        self.engine.models.append("fleet-x:latest")
+        self.assertEqual(self.relay(body(model="fleet-x"))[0], 200)
+        self.assertEqual(json.loads(self.engine.chat_requests[-1][0].data)["model"], "fleet-x")
+
+    def test_untagged_model_not_installed_is_400_after_one_refresh(self):
+        self.relay(body())  # fills the cache
+        before = self.engine.tag_calls
+        self.assertEqual(self.relay(body(model="fleet-y"))[0], 400)
+        self.assertEqual(self.engine.tag_calls, before + 1)
+
+    def test_exact_tagged_match_still_works_and_a_tag_is_not_widened(self):
+        self.engine.models.append("fleet-z:v2")
+        self.assertEqual(self.relay(body(model="qwen2.5-coder:14b"))[0], 200)
+        self.assertEqual(self.relay(body(model="fleet-z"))[0], 400)  # only :latest stands in for no tag
+        self.assertEqual(self.relay(body(model="fleet-z:latest"))[0], 400)
 
     def test_tags_are_cached_for_a_while(self):
         self.relay(body())

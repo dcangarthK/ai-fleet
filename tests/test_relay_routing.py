@@ -249,6 +249,10 @@ class RelayHealth(unittest.TestCase):
 
 
 class EventsClosedLoop(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+
     def test_emit_with_a_closed_bound_loop_does_not_raise(self):
         loop = asyncio.new_event_loop()
         loop.close()

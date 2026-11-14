@@ -140,6 +140,7 @@ MIGRATIONS = {
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
                   "budget": "TEXT DEFAULT '{}'"},
     "plan_items": {"revision": "INTEGER NOT NULL DEFAULT 1"},
+    "eval_runs": {"engine": "TEXT DEFAULT 'ollama'"},
     "leader": {"plan_revision": "INTEGER DEFAULT 0", "halted": "INTEGER NOT NULL DEFAULT 0"},
 }
 

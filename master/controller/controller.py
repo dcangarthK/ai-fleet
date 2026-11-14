@@ -1327,6 +1327,7 @@ class EvalRequest(BaseModel):
     model: str
     node: str
     roles: list[str] | None = None
+    engine: str = "ollama"
 
 
 @app.get("/api/skills")
@@ -1387,15 +1388,24 @@ def list_evals() -> dict:
 
 @app.post("/api/evals")
 def start_eval(spec: EvalRequest) -> dict:
+    if spec.engine not in ("ollama", "dmr"):
+        raise HTTPException(400, f"unknown engine {spec.engine}; use ollama or dmr")
     with db() as c:
         node = resolve(c, spec.node)
         installed = json.loads(node["models"] or "[]")
-    if spec.model not in installed:
+        dmr_report = ((_json(node["runner"], {}) or {}).get("engines") or {}).get("dmr") or {}
+    if spec.engine == "dmr":
+        if dmr_report.get("reachable") is not True:
+            raise HTTPException(409, f"no reachable dmr engine on {node['name']}")
+        catalog = {m.get("reference") for m in dmr_report.get("models") or [] if isinstance(m, dict)}
+        if spec.model not in catalog:
+            raise HTTPException(409, f"model {spec.model} is not in the dmr catalog on {node['name']}")
+    elif spec.model not in installed:
         raise HTTPException(409, f"model {spec.model} is not installed on {node['name']}")
     roles = spec.roles or ["coder", "reviewer", "fast"]
     if not roles or any(role not in evaluations.KNOWN_ROLES for role in roles):
         raise HTTPException(400, f"roles must be drawn from {sorted(evaluations.KNOWN_ROLES)}")
-    return evaluations.enqueue(spec.model, node["id"], list(dict.fromkeys(roles)))
+    return evaluations.enqueue(spec.model, node["id"], list(dict.fromkeys(roles)), spec.engine)
 
 
 @app.get("/api/evals/recommendations")

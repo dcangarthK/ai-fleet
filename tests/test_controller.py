@@ -23,7 +23,9 @@ import argparse, json, time
 from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument("--models"); p.add_argument("--roles"); p.add_argument("--runner"); p.add_argument("--out")
+p.add_argument("--engine", default="ollama")
 a = p.parse_args()
+with open(str(Path(__file__).parent / "eval_args.log"), "a") as f: f.write(a.models + " " + a.engine + "\\n")
 time.sleep(0.25)
 path = Path(a.out) / "results.json"
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1150,6 +1152,62 @@ Imported body.
         recs = self.c.get("/api/evals/recommendations").json()
         self.assertTrue(any(row == {"node": "master", "role": "fast", "model": "fake-model:1b",
                                         "score": 91.0, "installed": True} for row in recs))
+
+    def test_eval_dmr_accepted_in_catalog_refused_otherwise_and_command_gets_engine(self):
+        import evaluations
+        log = FAKE_EVAL.parent / "eval_args.log"
+
+        def drop_eval_rows():  # keep the shared results/catalog as the other eval tests expect them
+            rows = [r for r in evaluations.read_results() if r["model"] != "ai/evalmodel"]
+            EVAL_RESULTS.write_text(json.dumps(rows))
+            with db() as c:
+                c.execute("DELETE FROM model_catalog WHERE reference LIKE 'ai/evalmodel%'")
+        self.addCleanup(drop_eval_rows)
+        self.report_dmr(["ai/evalmodel"])
+        refused = self.c.post("/api/evals", json={"model": "ai/other", "node": "master", "engine": "dmr"}, headers=W)
+        self.assertEqual(409, refused.status_code, refused.text)
+        # an ollama-installed model is not a dmr catalog model
+        self.assertEqual(409, self.c.post("/api/evals", json={"model": "fake-model:1b", "node": "master",
+                                                               "engine": "dmr"}, headers=W).status_code)
+        self.assertEqual(400, self.c.post("/api/evals", json={"model": "ai/evalmodel", "node": "master",
+                                                               "engine": "bogus"}, headers=W).status_code)
+        ok = self.c.post("/api/evals", json={"model": "ai/evalmodel", "node": "master", "engine": "dmr",
+                                              "roles": ["fast"]}, headers=W)
+        self.assertEqual(200, ok.status_code, ok.text)
+        self.assertEqual("dmr", ok.json()["engine"])
+        wait_for(lambda: {r["id"]: r for r in self.c.get("/api/evals").json()["runs"]}[ok.json()["id"]]["state"] == "done",
+                 timeout=20)
+        self.assertIn("ai/evalmodel dmr", log.read_text())
+        # ollama path: default engine, no --engine flag changes the run
+        plain = self.c.post("/api/evals", json={"model": "fake-model:1b", "node": "master",
+                                                 "roles": ["fast"]}, headers=W).json()
+        self.assertEqual("ollama", plain["engine"])
+        wait_for(lambda: {r["id"]: r for r in self.c.get("/api/evals").json()["runs"]}[plain["id"]]["state"] == "done",
+                 timeout=20)
+        self.assertIn("fake-model:1b ollama", log.read_text())
+
+    def test_eval_runs_old_schema_migrates_without_loss(self):
+        import sqlite3
+        import evaluations
+        import store
+        path = TMP / "old.db"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE eval_runs (id TEXT PRIMARY KEY, model TEXT, node TEXT, roles TEXT, state TEXT, "
+                     "started_at REAL, ended_at REAL, scores TEXT, errors TEXT, log_tail TEXT)")
+        conn.execute("INSERT INTO eval_runs (id,model,node,roles,state) VALUES ('e-old','m:1b','master','[\"fast\"]','done')")
+        conn.commit()
+        conn.close()
+        original = store.DB_PATH
+        store.DB_PATH = str(path)
+        try:
+            store.init_db()
+            with store.db() as c:
+                row = c.execute("SELECT * FROM eval_runs WHERE id='e-old'").fetchone()
+            self.assertEqual("m:1b", row["model"])
+            self.assertEqual("ollama", row["engine"])
+            self.assertEqual("ollama", evaluations.run_view(row)["engine"])
+        finally:
+            store.DB_PATH = original
 
     def test_pipeline_end_to_end_resolution_ready_escalation_cancel_and_events(self):
         original_call = controller.pipeline_model_call

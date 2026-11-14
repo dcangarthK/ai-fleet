@@ -200,6 +200,38 @@ class RunnerValidation(RelayCase):
         self.assertEqual(status_line.split()[1], b"413")
         self.assertFalse(self.engine.chat_requests)
 
+    def framing(self, *extra, length=None):
+        """Raw request with custom framing headers; returns (status, engine calls)."""
+        lines = ["POST %s HTTP/1.1" % CHAT, "Host: x", "Authorization: Bearer " + RELAY] + list(extra)
+        if length is not None:
+            lines.append("Content-Length: %s" % length)
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        try:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+            try:
+                sock.sendall(json.dumps(body()).encode())
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            head = self.read_headers(sock)
+        finally:
+            sock.close()
+        return int(head.split(b" ", 2)[1]), self.engine.tag_calls + len(self.engine.chat_requests)
+
+    def test_negative_content_length_is_400_and_nothing_reaches_the_engine(self):
+        self.assertEqual(self.framing(length=-1), (400, 0))
+
+    def test_invalid_or_duplicate_content_length_is_400(self):
+        for length in ("abc", "1.5", "+5", "0x10"):
+            self.assertEqual(self.framing(length=length), (400, 0), length)
+        self.assertEqual(self.framing("Content-Length: 5", length=5), (400, 0))
+
+    def test_transfer_encoding_is_rejected(self):
+        self.assertEqual(self.framing("Transfer-Encoding: chunked", length=10), (400, 0))
+        self.assertEqual(self.framing("Transfer-Encoding: chunked"), (400, 0))
+
+    def test_missing_content_length_is_411(self):
+        self.assertEqual(self.framing(), (411, 0))
+
     def test_non_loopback_ollama_url_is_502(self):
         self.manager.ollama_url = "http://100.101.102.103:11434"
         self.assertEqual(self.relay(body())[0], 502)
@@ -234,6 +266,35 @@ class RunnerValidation(RelayCase):
         self.assertEqual(json.loads(data), {"error": {"message": "relay busy", "type": "rate_limit_error",
                                                       "code": "rate_limit_exceeded"}})
         self.assertEqual(self.relay(body())[0], 200, "slots are released")
+
+    def test_slots_are_taken_before_the_body_is_read_or_tags_are_queried(self):
+        gate, started = threading.Event(), threading.Semaphore(0)
+
+        def slow(request):
+            started.release()
+            gate.wait(10)
+            return Response(b"{}")
+        self.engine.chat = slow
+        threads = [threading.Thread(target=self.relay, args=(body(),), daemon=True) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for _ in range(2):
+            self.assertTrue(started.acquire(timeout=5))
+        tags = self.engine.tag_calls
+        try:
+            status, _, _ = self.relay(body(model="never-checked:1b"))
+            self.assertEqual(status, 429)
+            self.assertEqual(self.engine.tag_calls, tags, "a rejected request must not query tags")
+            self.assertEqual(len(self.engine.chat_requests), 2)
+        finally:
+            gate.set()
+        for t in threads:
+            t.join(5)
+
+    def test_slot_is_released_after_validation_errors(self):
+        for _ in range(4):
+            self.assertEqual(self.relay(body(model="ghost:1b"))[0], 400)
+        self.assertEqual(self.relay(body())[0], 200)
 
     def test_unknown_model_refreshes_tags_once_then_400(self):
         self.relay(body())  # fills the cache

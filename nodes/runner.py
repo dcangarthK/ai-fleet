@@ -3917,13 +3917,26 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(relay_token(token), supplied[7:].strip())
 
-    def _relay_body(self):
+    def _relay_frame(self):
+        """The request body length from headers alone, before any body byte is read. Exactly one Content-Length, a
+        non-negative decimal within the cap, no Transfer-Encoding. Any framing error closes the connection."""
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            raise HttpError(400, "invalid content length")
-        if length > RELAY_MAX_BODY:
-            raise HttpError(413, "request body too large")
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise HttpError(400, "transfer-encoding is not supported")
+            values = self.headers.get_all("Content-Length") or []
+            if not values:
+                raise HttpError(411, "content length required")
+            if len(values) != 1 or not re.fullmatch(r"[0-9]{1,12}", values[0].strip()):
+                raise HttpError(400, "invalid content length")
+            length = int(values[0])
+            if length > RELAY_MAX_BODY:
+                raise HttpError(413, "request body too large")
+        except HttpError:
+            self.close_connection = True
+            raise
+        return length
+
+    def _relay_body(self, length):
         try:
             value = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, UnicodeDecodeError):
@@ -3944,21 +3957,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _relay(self):
         """POST /v1/chat/completions for LiteLLM (docs/SPEC-relay-routing.md 2). Never logs prompts or outputs."""
-        payload = self._relay_body()
-        stripped = sorted(str(key)[:64] for key in payload if key not in RELAY_KEYS)[:20]
-        model = payload.get("model")
-        self.manager.audit("relay_chat", {"model": model[:128] if isinstance(model, str) else None,
-                                          "remote_ip": getattr(self.manager.request_context, "remote", ""),
-                                          "stream": payload.get("stream") is True, "stripped_keys": stripped})
-        url, data, stream = relay_prepare(self.manager, payload)
-        with _RELAY_LOCK:
+        length = self._relay_frame()
+        with _RELAY_LOCK:  # the slot is taken before the body is read or any engine call is made
             busy = getattr(self.server, "relay_inflight", 0) >= RELAY_MAX_INFLIGHT
             if not busy:
                 self.server.relay_inflight = getattr(self.server, "relay_inflight", 0) + 1
         if busy:
+            self.close_connection = True  # the body was not read
             self._relay_busy()
             return
         try:
+            payload = self._relay_body(length)
+            stripped = sorted(str(key)[:64] for key in payload if key not in RELAY_KEYS)[:20]
+            model = payload.get("model")
+            self.manager.audit("relay_chat", {"model": model[:128] if isinstance(model, str) else None,
+                                              "remote_ip": getattr(self.manager.request_context, "remote", ""),
+                                              "stream": payload.get("stream") is True, "stripped_keys": stripped})
+            url, data, stream = relay_prepare(self.manager, payload)
             request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
             try:
                 upstream = loopback_urlopen(request, timeout=600)

@@ -133,8 +133,6 @@ async def access_control(request: Request, call_next):
         request.state.scope = "view"
         request.state.actor = "node" if request.url.path == HEARTBEAT_PATH else "enrollment"
         return await call_next(request)
-    if public_installer:
-        return _deny("authentication required for non-GET request")
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth.lower().startswith("bearer ") else request.cookies.get(COOKIE)
     identity = token_identity(token)

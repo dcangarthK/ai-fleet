@@ -3904,7 +3904,8 @@ EVAL_CHAT_KEYS = {"model", "messages", "stream", "keep_alive", "think", "options
 
 def ollama_relay(ollama_url, body, urlopen=None):
     """Controller evals reach the node's loopback Ollama through the runner (docs/SPEC-networking.md 4: raw engine ports
-    are never exposed). Only four fixed paths, no streaming, a validated model and a loopback engine URL."""
+    are never exposed). Only four fixed paths, no streaming (that applies to this eval relay only; LiteLLM chat,
+    streaming included, uses the /v1/chat/completions relay route), a validated model and a loopback engine URL."""
     path = body.get("path")
     payload = body.get("body")
     if path not in ("/api/chat", "/api/ps", "/api/generate", "/api/tags"):
@@ -3934,6 +3935,64 @@ def ollama_relay(ollama_url, body, urlopen=None):
         raise HttpError(502, "engine returned HTTP %s" % exc.code)
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+
+
+RELAY_MAX_BODY = 8 * 1024 * 1024
+RELAY_MAX_INFLIGHT = 2
+RELAY_TAGS_TTL = 30.0
+RELAY_KEYS = ("model", "messages", "temperature", "top_p", "max_tokens", "max_completion_tokens", "stop", "seed", "stream",
+              "stream_options", "response_format", "tools", "tool_choice", "parallel_tool_calls", "frequency_penalty",
+              "presence_penalty", "n", "user")
+RELAY_PATH = "/v1/chat/completions"
+_RELAY_LOCK = threading.Lock()
+
+
+def relay_token(token):
+    """The credential LiteLLM holds for this node (docs/SPEC-relay-routing.md 1): HMAC of the runner token. It opens the
+    relay route only, and the runner token can't be recovered from it."""
+    return hmac.new(str(token).encode("utf-8"), b"relay-chat-v1", hashlib.sha256).hexdigest()
+
+
+def relay_installed(manager, base, refresh=False):
+    """Installed model names from the loopback Ollama /api/tags, cached for 30 s on the manager."""
+    with _RELAY_LOCK:
+        cached = getattr(manager, "_relay_tags", None)
+        if cached and not refresh and time.time() - cached[0] < RELAY_TAGS_TTL:
+            return cached[1]
+    request = urllib.request.Request(base + "/api/tags", method="GET")
+    try:
+        with loopback_urlopen(request, timeout=10) as response:
+            data = json.loads(response.read() or b"{}")
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+    items = data.get("models") if isinstance(data, dict) else None
+    names = {item.get("name") for item in (items or []) if isinstance(item, dict)}
+    names = {name for name in names if isinstance(name, str)}
+    with _RELAY_LOCK:
+        manager._relay_tags = (time.time(), names)
+    return names
+
+
+def relay_prepare(manager, payload):
+    """Validate a relay chat body and return (url, forwarded body bytes, stream). Raises HttpError."""
+    try:
+        base = loopback_base_url(manager.ollama_url)
+    except ValueError as exc:
+        raise HttpError(502, str(exc))
+    model = payload.get("model")
+    if not isinstance(model, str) or not EVAL_MODEL.fullmatch(model):
+        raise HttpError(400, "a valid model is required")
+    def present(names):
+        # Ollama lists every model with a tag; an untagged name resolves to :latest. The name is forwarded as sent.
+        return model in names or (":" not in model and model + ":latest" in names)
+    if not present(relay_installed(manager, base)) and not present(relay_installed(manager, base, refresh=True)):
+        raise HttpError(400, "model not installed")
+    if not isinstance(payload.get("messages"), list):
+        raise HttpError(400, "messages must be a list")
+    if "stream" in payload and not isinstance(payload["stream"], bool):
+        raise HttpError(400, "stream must be a boolean")
+    forwarded = {key: payload[key] for key in RELAY_KEYS if key in payload}
+    return base + RELAY_PATH, json.dumps(forwarded).encode("utf-8"), payload.get("stream") is True
 
 
 DMR_CHAT_KEYS = {"model", "messages", "temperature", "seed", "max_tokens", "response_format", "stream"}
@@ -4074,11 +4133,126 @@ class Handler(BaseHTTPRequestHandler):
                 return self.manager.checkpoint(job, self._body())
         raise HttpError(404, "not found")
 
+    def _relay_authorized(self):
+        supplied = self.headers.get("Authorization", "")
+        token = self.server.runner_token
+        if not token or not supplied.startswith("Bearer "):
+            return False
+        return hmac.compare_digest(relay_token(token), supplied[7:].strip())
+
+    def _relay_frame(self):
+        """The request body length from headers alone, before any body byte is read. Exactly one Content-Length, a
+        non-negative decimal within the cap, no Transfer-Encoding. Any framing error closes the connection."""
+        try:
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise HttpError(400, "transfer-encoding is not supported")
+            values = self.headers.get_all("Content-Length") or []
+            if not values:
+                raise HttpError(411, "content length required")
+            if len(values) != 1 or not re.fullmatch(r"[0-9]{1,12}", values[0].strip()):
+                raise HttpError(400, "invalid content length")
+            length = int(values[0])
+            if length > RELAY_MAX_BODY:
+                raise HttpError(413, "request body too large")
+        except HttpError:
+            self.close_connection = True
+            raise
+        return length
+
+    def _relay_body(self, length):
+        try:
+            value = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            raise HttpError(400, "invalid JSON")
+        if not isinstance(value, dict):
+            raise HttpError(400, "JSON body must be an object")
+        return value
+
+    def _relay_busy(self):
+        data = json.dumps({"error": {"message": "relay busy", "type": "rate_limit_error",
+                                     "code": "rate_limit_exceeded"}}).encode("utf-8")
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Retry-After", "2")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _relay(self):
+        """POST /v1/chat/completions for LiteLLM (docs/SPEC-relay-routing.md 2). Never logs prompts or outputs."""
+        length = self._relay_frame()
+        with _RELAY_LOCK:  # the slot is taken before the body is read or any engine call is made
+            busy = getattr(self.server, "relay_inflight", 0) >= RELAY_MAX_INFLIGHT
+            if not busy:
+                self.server.relay_inflight = getattr(self.server, "relay_inflight", 0) + 1
+        if busy:
+            self.close_connection = True  # the body was not read
+            self._relay_busy()
+            return
+        try:
+            payload = self._relay_body(length)
+            stripped = sorted(str(key)[:64] for key in payload if key not in RELAY_KEYS)[:20]
+            model = payload.get("model")
+            self.manager.audit("relay_chat", {"model": model[:128] if isinstance(model, str) else None,
+                                              "remote_ip": getattr(self.manager.request_context, "remote", ""),
+                                              "stream": payload.get("stream") is True, "stripped_keys": stripped})
+            url, data, stream = relay_prepare(self.manager, payload)
+            request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+            try:
+                upstream = loopback_urlopen(request, timeout=600)
+            except urllib.error.HTTPError as exc:
+                raise HttpError(502, "engine returned HTTP %s" % exc.code)
+            except (OSError, ValueError, urllib.error.URLError) as exc:
+                raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+            with upstream:
+                if not stream:
+                    try:
+                        raw = upstream.read()
+                        value = json.loads(raw) if raw else {}
+                    except (OSError, ValueError) as exc:
+                        raise HttpError(502, "engine unreachable: %s" % exc.__class__.__name__)
+                    self._send(200, value)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                while True:
+                    try:
+                        chunk = upstream.readline()
+                    except OSError:
+                        return  # mid-stream error: close with nothing appended
+                    if not chunk:
+                        return
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except OSError:
+                        return  # the client left: leaving `with` closes the upstream so Ollama stops
+        finally:
+            with _RELAY_LOCK:
+                self.server.relay_inflight -= 1
+
     def _handle(self, method):
         try:
             self.manager.request_context.remote = self.client_address[0]
         except (AttributeError, IndexError, TypeError):
             self.manager.request_context.remote = ""
+        if method == "POST" and urlparse(self.path).path == RELAY_PATH:
+            # The relay route takes the relay-scoped token only (not the runner token), and no other route takes it.
+            if not self._relay_authorized():
+                self.manager.audit("auth_failed", "invalid relay token")
+                self._send(401, {"detail": "invalid relay token"})
+                return
+            try:
+                self._relay()
+            except HttpError as exc:
+                self._send(exc.status, {"detail": exc.detail})
+            except Exception:
+                self._send(500, {"detail": "internal server error"})
+            return
         if not self._authorized():
             self.manager.audit("auth_failed", "invalid runner token")
             self._send(401, {"detail": "invalid runner token"})
@@ -4313,7 +4487,8 @@ def health_report(manager):
               "inventory": {"hardware": {"ram_gb": round(metrics["mem_total_gb"]) if metrics and metrics.get("mem_total_gb") else None,
                                          "cores": os.cpu_count()}},
               # pushes heartbeats (informational: the controller trusts only heartbeats it accepted)
-              "heartbeat": bool(getattr(manager, "controller_url", None))}
+              "heartbeat": bool(getattr(manager, "controller_url", None)),
+              "relay_chat": True}
     if metrics is not None:
         report["metrics"] = metrics
         report["age_s"] = metrics.get("age_s")

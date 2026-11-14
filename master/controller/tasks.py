@@ -10,6 +10,8 @@ poller can't overwrite each other.
 """
 import asyncio
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -125,6 +127,12 @@ def node_runner_token(node: dict | str) -> str:
     return ""
 
 
+def relay_token(node_token: str) -> str:
+    """The LiteLLM credential for a node's runner relay (docs/SPEC-relay-routing.md 1): HMAC-SHA256 of the node's own
+    runner token. It opens only POST /v1/chat/completions on that runner. Never derived from the global fallback."""
+    return hmac.new(node_token.encode("utf-8"), b"relay-chat-v1", hashlib.sha256).hexdigest()
+
+
 async def runner_call(node: dict, method: str, path: str, body: dict | None = None, timeout: float = 20) -> dict:
     token = node_runner_token(node)
     headers = {"X-Runner-Token": token} if token else {}
@@ -161,7 +169,8 @@ NODE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 HEALTH_FIELDS = {"ok", "version", "digest", "power", "max_mode", "agents", "engines", "running", "gate_profiles",
                  "allow_raw_gates", "allowed_roots", "max_jobs", "models", "policy", "network", "budget",
                  "codex_profile", "claude_profile", "profiles", "checkpoint", "default_models", "metrics", "heartbeat",
-                 "age_s", "codex_rate_limits", "capacity", "services", "firewall", "inventory"}
+                 "age_s", "codex_rate_limits", "capacity", "services", "firewall", "inventory",
+                 "relay_chat"}
 POSTURE_STATUS = ("pass", "warn", "fail", "unknown")
 POSTURE_BACKENDS = ("macos-pf", "macos-application-firewall", "windows-defender", "unknown")
 
@@ -247,6 +256,7 @@ def merge_health(stored: dict, body: dict) -> dict:
     out = {**stored, **clean_health(body)}
     if "jobs" not in clean_health(body):
         out.pop("jobs", None)
+    out["relay_chat"] = body.get("relay_chat") is True  # a downgraded runner loses the flag on its next heartbeat
     return out
 
 

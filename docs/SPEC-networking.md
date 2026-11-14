@@ -97,6 +97,9 @@ outbound connection.
 | Master or worker | Internet | DNS UDP/TCP 53 to its configured resolver; NTP UDP 123; HTTPS TCP 443; Tailscale transport UDP 41641 **UNVERIFIED** plus stateful replies | Required for name/time sync, Tailscale/DERP, subscription CLIs, installs and model pulls. Exact Tailscale egress requirements must be verified before an optional WAN allowlist is enabled. |
 | Worker runner | Local engines | TCP 11434 Ollama; TCP 12434 DMR, loopback only | Local probes, catalog and inference through engine adapters. Never granted in Tailscale. |
 
+LiteLLM inference to loopback-only workers goes through the runner relay on 11436 (`/v1/chat/completions`,
+relay-scoped token, streaming allowed). Raw 11434/12434 stay closed. See [SPEC-relay-routing.md](SPEC-relay-routing.md).
+
 Required policy changes:
 
 - Reduce master → worker to TCP 11436.
@@ -407,6 +410,10 @@ tonight builds only the following.
    - Assert that worker → worker is denied and worker → master 8443 is allowed.
    - Don't narrow the 11434/11435 grants yet, because the controller probes and evals still use them
      (`controller.py:63,70,208`, `evaluations.py:241`).
+
+6. **Amendment (relay routing).** LiteLLM inference to loopback-only workers goes through the runner relay on 11436
+   (`/v1/chat/completions`, relay-scoped token, streaming allowed). Raw 11434/12434 stay closed
+   ([SPEC-relay-routing.md](SPEC-relay-routing.md)).
 
 **Deferred:**
 - the binding migration and ACL narrowing (after probes and evals move to the runner);

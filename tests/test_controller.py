@@ -2308,6 +2308,13 @@ Imported body.
         self.assertNotIn(".Content |", enrollment["windows_command"], "command must not use Content decode/re-encode pipeline")
         self.assertIn("onboard.ps1", enrollment["windows_command"])
         self.assertIn("Invoke-WebRequest", enrollment["windows_command"])
+        self.assertIn("-ExecutionPolicy Bypass -File \"$f\"", enrollment["windows_command"],
+                     "command must use -ExecutionPolicy Bypass scoped to child process")
+        self.assertIn("-EnrollPrompt", enrollment["windows_command"], "command must include -EnrollPrompt")
+        self.assertNotIn("Set-ExecutionPolicy", enrollment["windows_command"],
+                        "command must not use Set-ExecutionPolicy")
+        self.assertNotIn("& $f", enrollment["windows_command"],
+                        "command must not use direct script invocation operator")
 
     def test_enrollment_paths_only_public_paths(self):
         public = TestClient(controller.app, base_url="https://master.tail.ts.net:8701")

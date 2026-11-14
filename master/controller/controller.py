@@ -281,28 +281,73 @@ def desired_deployments() -> dict[str, dict]:
         if (not n or a["state"] != "active" or (n["id"] == tasks.MASTER_ID and not MASTER_MODEL_HOST)
                 or not healthy(n) or a["model"] not in json.loads(n["models"])):
             continue
+        relay = False
         if n["id"] != tasks.MASTER_ID and engine_not_reachable_remotely(n):
-            # LiteLLM would call http://<ip>:11434, which a loopback-only engine refuses (and the narrowed ACL
-            # blocks). Skip with a visible warning; the runner relay (11436) is not a LiteLLM route.
-            if n["id"] not in _loopback_warned:
-                _loopback_warned.add(n["id"])
-                print(f"warning: node {n['name']}: Ollama is loopback-only or its bind is unknown, its roles are not routed through LiteLLM")
-                events.emit(None, "deployment.skipped", {"node": n["id"], "reason": "engine_not_reachable"})
-            continue
+            if _relay_state(n) != "ok":
+                # LiteLLM would call http://<ip>:11434, which a loopback-only engine refuses (and the narrowed ACL
+                # blocks), and the runner relay (11436, docs/SPEC-relay-routing.md) isn't available for this node
+                # (old runner, or no per-node token). Skip with a visible warning.
+                if n["id"] not in _loopback_warned:
+                    _loopback_warned.add(n["id"])
+                    print(f"warning: node {n['name']}: Ollama is loopback-only or its bind is unknown and the runner relay is unavailable, its roles are not routed through LiteLLM")
+                    events.emit(None, "deployment.skipped", {"node": n["id"], "reason": "engine_not_reachable"})
+                continue
+            relay = True
         _loopback_warned.discard(n["id"])  # routed again: warn afresh if it flips back
         host = MASTER_MODEL_HOST if n["id"] == tasks.MASTER_ID else n["ip"]
         assignment_params = json.loads(a["params"] or "{}")
         routed_model = "fleet-" + a["catalog_id"] if a["catalog_id"] and assignment_params else a["model"]
         if n["engine"] != "ollama":
             continue  # vLLM, LM Studio and llama.cpp ports (8000/1234/8080) are no longer probed or routed (spec 12)
+        did = deployment_id(a["role"], a["node"], a["model"])
+        if relay:
+            # Through the runner: only temperature/top_p/seed ride along (num_ctx takes effect via the derived
+            # fleet-* model). The api_key is the relay-scoped token, never the runner token.
+            token = tasks.relay_token(n["runner_token"])
+            params = {"model": f"openai/{routed_model}", "api_base": f"http://{n['ip']}:{tasks.RUNNER_PORT}/v1",
+                      "api_key": token, "timeout": 600}
+            params.update({k: v for k, v in assignment_params.items() if k in RELAY_PARAMS})
+            desired[did] = {"model_name": a["role"], "litellm_params": params,
+                            "model_info": {"id": did, "relay_fp": hashlib.sha256(token.encode()).hexdigest()[:12]}}
+            continue
         params = {"model": f"ollama_chat/{routed_model}", "api_base": f"http://{host}:{n['port']}"}
         params["timeout"] = 600
         params.update(assignment_params)
-        desired[deployment_id(a["role"], a["node"], a["model"])] = {
-            "model_name": a["role"], "litellm_params": params,
-            "model_info": {"id": deployment_id(a["role"], a["node"], a["model"])},
-        }
+        desired[did] = {"model_name": a["role"], "litellm_params": params, "model_info": {"id": did}}
     return desired
+
+
+RELAY_PARAMS = ("temperature", "top_p", "seed")
+
+
+def _relay_state(node) -> str:
+    """For a node whose engine isn't reachable remotely: "ok" when LiteLLM can use the runner relay, "old" for a runner
+    that doesn't advertise relay_chat (an old runner), "no_token" when the node has no token of its own. The global
+    RUNNER_TOKEN fallback never counts."""
+    try:
+        runner = json.loads(node["runner"]) if node["runner"] else {}
+    except (ValueError, TypeError):
+        runner = {}
+    if not isinstance(runner, dict) or runner.get("relay_chat") is not True:
+        return "old"
+    try:
+        token = node["runner_token"]
+    except (KeyError, IndexError):
+        token = None
+    return "ok" if token else "no_token"
+
+
+def _relay_ignored(assignment) -> list[str]:
+    """Assignment params a relay deployment leaves out, as an advisory note. num_ctx with a catalog_id isn't one: it
+    takes effect through the derived fleet-* model."""
+    try:
+        params = json.loads(assignment["params"] or "{}")
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(params, dict):
+        return []
+    has_catalog = bool(assignment["catalog_id"])
+    return sorted(k for k in params if k not in RELAY_PARAMS and not (k == "num_ctx" and has_catalog))
 
 
 def _model_event(type_: str, row: dict, reference: str) -> None:
@@ -436,8 +481,9 @@ async def reconcile() -> dict:
         added, removed = [], []
         for mid, spec in desired.items():
             cur = existing.get(mid)
-            if cur and cur.get("litellm_params", {}).get("api_base") == spec["litellm_params"]["api_base"]:
-                continue
+            if (cur and cur.get("litellm_params", {}).get("api_base") == spec["litellm_params"]["api_base"]
+                    and (cur.get("model_info") or {}).get("relay_fp") == spec["model_info"].get("relay_fp")):
+                continue  # a rotated relay token changes relay_fp: delete and re-create (docs/SPEC-relay-routing.md 1)
             if cur:
                 (await client.post("/model/delete", json={"id": mid})).raise_for_status()
             (await client.post("/model/new", json=spec)).raise_for_status()
@@ -450,9 +496,13 @@ async def reconcile() -> dict:
         for assignment in c.execute("SELECT * FROM assignments").fetchall():
             mid = deployment_id(assignment["role"], assignment["node"], assignment["model"])
             reason = _route_ineligible(assignment, nodes.get(assignment["node"]))
+            routed = int(mid in desired and reason is None)
+            if routed and desired[mid]["litellm_params"].get("api_key"):
+                # Advisory only: routed stays 1, route_reason is a note rather than "why not routed".
+                ignored = _relay_ignored(assignment)
+                reason = "relay: %s ignored" % ", ".join(ignored) if ignored else None
             c.execute("UPDATE assignments SET routed=?,route_reason=? WHERE role=? AND node=? AND model=?",
-                      (int(mid in desired and reason is None), reason, assignment["role"], assignment["node"],
-                       assignment["model"]))
+                      (routed, reason, assignment["role"], assignment["node"], assignment["model"]))
     return {"added": added, "removed": removed}
 
 
@@ -469,7 +519,11 @@ def _route_ineligible(assignment, node) -> str | None:
     except (ValueError, TypeError):
         return "node unhealthy"
     if node["id"] != tasks.MASTER_ID and engine_not_reachable_remotely(node):
-        return "engine loopback-only"
+        state = _relay_state(node)
+        if state == "old":
+            return "engine loopback-only"
+        if state == "no_token":
+            return "no node token"
     return None
 
 

@@ -5,6 +5,7 @@ import http.client
 import importlib.util
 import io
 import json
+import socket
 import sys
 import threading
 import time
@@ -111,6 +112,22 @@ class RelayCase(unittest.TestCase):
         headers = {"Authorization": "Bearer " + token} if token else {}
         return self.post(CHAT, payload, headers, **kw)
 
+    def raw_request(self, length):
+        """A connected socket with the relay request line and headers sent (Content-Length `length`), no body yet."""
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.sendall(("POST %s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n"
+                      "Content-Length: %d\r\n\r\n" % (CHAT, RELAY, length)).encode())
+        return sock
+
+    def read_headers(self, sock):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return data
+
     def audits(self, event="relay_chat"):
         return [d for e, d in self.manager.audits if e == event]
 
@@ -170,8 +187,18 @@ class RunnerValidation(RelayCase):
         self.assertNotIn("VALUE-XYZ", str(audit))
 
     def test_body_over_8_mib_is_413(self):
-        status, _, _ = self.relay(None, raw=b'{"model":"x","messages":[],"pad":"' + b"a" * (8 * 1024 * 1024) + b'"}')
-        self.assertEqual(status, 413)
+        # Raw socket: the runner answers from Content-Length alone and closes, so the body is never sent in full.
+        sock = self.raw_request(8 * 1024 * 1024 + 1)
+        try:
+            try:
+                sock.sendall(b'{"model":"x","messages":[],"pad":"' + b"a" * 4096)  # a partial body, at most
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            status_line = self.read_headers(sock).split(b"\r\n", 1)[0]
+        finally:
+            sock.close()
+        self.assertEqual(status_line.split()[1], b"413")
+        self.assertFalse(self.engine.chat_requests)
 
     def test_non_loopback_ollama_url_is_502(self):
         self.manager.ollama_url = "http://100.101.102.103:11434"
@@ -267,13 +294,17 @@ class RunnerStreaming(RelayCase):
             def close(self):
                 closed.set()
         self.engine.chat = lambda request: Endless()
-        c = self.conn()
-        c.request("POST", CHAT, body=json.dumps(body(stream=True)).encode(),
-                  headers={"Authorization": "Bearer " + RELAY, "Content-Type": "application/json"})
-        r = c.getresponse()
-        r.read(10)
-        c.sock.close()
-        self.assertTrue(closed.wait(10), "upstream was not closed after the client left")
+        data = json.dumps(body(stream=True)).encode()
+        sock = self.raw_request(len(data))
+        sock.sendall(data)
+        head = self.read_headers(sock)
+        self.assertIn(b"text/event-stream", head)
+        sock.recv(1024)  # the first chunk, then leave
+        sock.close()
+        deadline = time.time() + 10
+        while not closed.is_set() and time.time() < deadline:
+            closed.wait(0.05)
+        self.assertTrue(closed.is_set(), "upstream was not closed after the client left")
 
     def test_mid_stream_error_closes_the_connection_with_nothing_appended(self):
         class Breaks:

@@ -657,9 +657,9 @@ def create_enrollment(body: EnrollmentBody) -> dict:
     # The code is shown separately and never put in the command: `--enroll` with no value makes onboard.sh ask
     # for it on the terminal (input hidden), so it stays out of the node's shell history and process list.
     command = f"curl -fsS {base}/enroll/onboard.sh | bash -s -- --enroll --master {base}"
-    # Windows PowerShell command: downloads the script to a temp file and runs it with -EnrollPrompt to prompt
-    # for the code (keeping it out of the command line), and -Master pointing to the enrollment server.
-    windows_command = f'$f="$env:TEMP\\onboard-$(Get-Random).ps1"; (Invoke-WebRequest "{base}/enroll/onboard.ps1" -UseBasicParsing).Content | Out-File -Encoding UTF8 $f; & $f -EnrollPrompt -Master "{base}"'
+    # Windows PowerShell command: downloads the script to a temp file with byte-preserving -OutFile and runs it
+    # with -EnrollPrompt to prompt for the code (keeping it out of the command line), and -Master pointing to the enrollment server.
+    windows_command = f'$f="$env:TEMP\\onboard-$(Get-Random).ps1"; Invoke-WebRequest "{base}/enroll/onboard.ps1" -UseBasicParsing -OutFile $f; & $f -EnrollPrompt -Master "{base}"'
     return {"code": code, "expires_at": expires, "command": command, "windows_command": windows_command}
 
 

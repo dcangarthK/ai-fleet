@@ -4690,12 +4690,48 @@ function Configure-RunnerPolicy($cfg) {
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
 }
 
+function Validate-PythonInterpreter($Path) {
+  if (-not $Path) { return $false }
+  try {
+    $out = & $Path -c "import sys; print('ok')" 2>&1
+    return $LASTEXITCODE -eq 0 -and $out -like "*ok*"
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-PythonInterpreter {
+  $candidates = @()
+
+  $cmdPy = Get-Command python -All -CommandType Application -ErrorAction SilentlyContinue
+  foreach ($cmd in $cmdPy) {
+    if ($cmd.Source) { $candidates += $cmd.Source }
+  }
+
+  $userPath = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+  if ((Test-Path $userPath)) { $candidates += $userPath }
+
+  $machinePath = "$env:ProgramFiles\Python312\python.exe"
+  if ((Test-Path $machinePath)) { $candidates += $machinePath }
+
+  foreach ($candidate in $candidates) {
+    if (Validate-PythonInterpreter $candidate) {
+      return $candidate
+    }
+  }
+  return $null
+}
+
 function Install-Runner($ip) {
-  $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+  $py = Resolve-PythonInterpreter
   if (-not $py) {
     if (-not (Ask "Python is needed for the agent runner. Install it?")) { return }
     winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
-    $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+    $wingetCode = $LASTEXITCODE
+    $py = Resolve-PythonInterpreter
+    if (-not $py) {
+      throw "No usable Python interpreter found after winget install (winget exit code $wingetCode). Install Python 3.12 manually and rerun."
+    }
   }
   $runnerPath = Join-Path $FleetDir "runner.py"
   # Drop build.py's marker lines so the installed file is byte-identical to the master's nodes/runner.py

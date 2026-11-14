@@ -873,6 +873,136 @@ def scoped_var_pitfalls(text: str):
     return found
 
 
+class WindowsPythonInterpreter(unittest.TestCase):
+    """Verify Windows Python interpreter validation in onboard.ps1 production code."""
+
+    def test_validate_function_gates_on_exit_status(self):
+        """Validate-PythonInterpreter must check LASTEXITCODE."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        validate_start = text.index("function Validate-PythonInterpreter")
+        validate_end = text.index("\nfunction", validate_start + 1)
+        validate = text[validate_start:validate_end]
+        self.assertIn("$LASTEXITCODE -eq 0", validate,
+                     "Validate-PythonInterpreter must gate on exit status")
+
+    def test_validate_function_runs_candidate_with_import(self):
+        """Validate-PythonInterpreter must invoke candidate and test import."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        validate_start = text.index("function Validate-PythonInterpreter")
+        validate_end = text.index("\nfunction", validate_start + 1)
+        validate = text[validate_start:validate_end]
+        self.assertIn("& $Path -c", validate,
+                     "Validate-PythonInterpreter must invoke the candidate")
+        self.assertIn("import sys", validate,
+                     "Validate-PythonInterpreter must test import capability")
+
+    def test_resolve_validates_each_candidate(self):
+        """Resolve-PythonInterpreter must call Validate on candidates, not use them directly."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn("Validate-PythonInterpreter", resolve,
+                     "Resolve must validate each candidate")
+        self.assertIn("foreach", resolve,
+                     "Resolve must iterate through candidates")
+
+    def test_install_runner_calls_resolver_first(self):
+        """Install-Runner must use Resolve-PythonInterpreter, not Get-Command."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        self.assertNotIn("$py = (Get-Command python", install_runner,
+                        "Install-Runner must not use bare Get-Command python")
+        self.assertIn("$py = Resolve-PythonInterpreter", install_runner,
+                     "Install-Runner must call Resolve-PythonInterpreter")
+
+    def test_runner_cmd_uses_validated_variable(self):
+        """runner.cmd must be written only from the validated $py variable."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        runner_cmd_section = install_runner[install_runner.index("$cmd = Join-Path"):]
+        self.assertIn("$cmdPython = Escape-CmdValue $py", runner_cmd_section,
+                     "runner.cmd source must use the validated $py variable")
+        self.assertIn('"$cmdPython" "%~dp0runner.py"', runner_cmd_section,
+                     "runner.cmd must invoke Python from the validated path")
+
+    def test_winget_failure_throws_not_returns(self):
+        """Install-Runner must throw on no interpreter (prevents enrollment fallthrough)."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        winget_section = install_runner[install_runner.index("winget install"):]
+        self.assertIn("$wingetCode = $LASTEXITCODE", winget_section,
+                     "Must capture winget exit code")
+        self.assertIn("Resolve-PythonInterpreter", winget_section,
+                     "Must re-resolve after winget (exit code is not an error)")
+        self.assertIn("winget exit code $wingetCode", winget_section,
+                     "Error message must include winget exit code")
+
+    def test_resolves_after_install(self):
+        """Install-Runner must re-resolve after winget install, not blindly use a path."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        after_winget = install_runner[install_runner.index("winget install"):]
+        self.assertIn("Resolve-PythonInterpreter", after_winget,
+                     "After install, must re-resolve in case PATH is stale")
+        self.assertNotIn('$py = "$env:LOCALAPPDATA\\Programs\\Python\\Python312\\python.exe"',
+                        after_winget,
+                        "Must not blindly assume installed path; must resolve and validate")
+
+    def test_no_interpreter_throws_not_returns(self):
+        """Install-Runner must throw when no interpreter found after install."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        after_winget = install_runner[install_runner.index("$wingetCode = $LASTEXITCODE"):]
+        self.assertIn("Resolve-PythonInterpreter", after_winget,
+                     "Must re-resolve after winget")
+        self.assertIn("if (-not $py)", after_winget,
+                     "Must check if resolve returned nothing")
+        self.assertIn("throw", after_winget,
+                     "Must throw when no interpreter found")
+
+    def test_resolve_discovers_all_path_matches(self):
+        """Resolve-PythonInterpreter must use Get-Command -All, not just the first."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn("-All", resolve,
+                     "Must use Get-Command -All to discover all PATH matches")
+        self.assertIn("-CommandType Application", resolve,
+                     "Must filter by Application type")
+
+    def test_resolve_tries_multiple_candidates(self):
+        """Resolve-PythonInterpreter must iterate foreach candidates, not stop at first."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn("foreach ($candidate in $candidates)", resolve,
+                     "Must loop through all candidates")
+
+    def test_resolve_includes_machine_scope_path(self):
+        """Resolve-PythonInterpreter must include machine-scope install path."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        resolve_start = text.index("function Resolve-PythonInterpreter")
+        resolve_end = text.index("\nfunction Install-Runner", resolve_start)
+        resolve = text[resolve_start:resolve_end]
+        self.assertIn(r"$env:ProgramFiles\Python312", resolve,
+                     "Must include machine-scope install path")
+        self.assertIn("(Test-Path $machinePath)", resolve,
+                     "Must test path existence before adding as candidate")
+
+
 class OnboardPs1SyntaxTests(unittest.TestCase):
     def test_windows_onboard_is_loopback_and_retires_11435(self):
         text = (ROOT / "nodes" / "onboard.ps1").read_text()

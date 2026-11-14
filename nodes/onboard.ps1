@@ -4690,12 +4690,47 @@ function Configure-RunnerPolicy($cfg) {
   Write-Utf8File $cfg ($config | ConvertTo-Json -Depth 8)
 }
 
+function Validate-PythonInterpreter($Path) {
+  if (-not $Path) { return $false }
+  try {
+    $out = & $Path -c "import sys; print('ok')" 2>&1
+    return $LASTEXITCODE -eq 0 -and $out -like "*ok*"
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-PythonInterpreter {
+  $candidates = @()
+
+  $cmdPy = (Get-Command python -ErrorAction SilentlyContinue).Source
+  if ($cmdPy) { $candidates += $cmdPy }
+
+  $stablePath = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+  if ((Test-Path $stablePath)) { $candidates += $stablePath }
+
+  foreach ($candidate in $candidates) {
+    if (Validate-PythonInterpreter $candidate) {
+      return $candidate
+    }
+  }
+  return $null
+}
+
 function Install-Runner($ip) {
-  $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+  $py = Resolve-PythonInterpreter
   if (-not $py) {
     if (-not (Ask "Python is needed for the agent runner. Install it?")) { return }
     winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Failed to install Python with winget. Please install Python 3.12 manually and try again."
+      return
+    }
     $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+    if (-not (Validate-PythonInterpreter $py)) {
+      Write-Host "Python installation completed, but the interpreter at $py does not work or was not found."
+      return
+    }
   }
   $runnerPath = Join-Path $FleetDir "runner.py"
   # Drop build.py's marker lines so the installed file is byte-identical to the master's nodes/runner.py

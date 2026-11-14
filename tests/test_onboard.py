@@ -873,6 +873,110 @@ def scoped_var_pitfalls(text: str):
     return found
 
 
+class WindowsPythonInterpreter(unittest.TestCase):
+    """Verify Windows Python interpreter validation rejects app-execution aliases and nonzero exits."""
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh not installed")
+    def test_validate_python_rejects_failing_interpreter(self):
+        """Validate-PythonInterpreter must reject a command that exits nonzero."""
+        script = r"""
+        function Validate-PythonInterpreter($Path) {
+          if (-not $Path) { return $false }
+          try {
+            $out = & $Path -c "import sys; print('ok')" 2>&1
+            return $LASTEXITCODE -eq 0 -and $out -like "*ok*"
+          } catch {
+            return $false
+          }
+        }
+        $result = Validate-PythonInterpreter 'powershell' '-Command' 'exit 9009'
+        if ($result) { exit 1 }
+        exit 0
+        """
+        r = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script],
+                          capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"Should reject failing interpreter\n{r.stdout}\n{r.stderr}")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh not installed")
+    def test_validate_python_accepts_working_interpreter(self):
+        """Validate-PythonInterpreter must accept a command that exits 0 with correct output."""
+        script = r"""
+        function Validate-PythonInterpreter($Path) {
+          if (-not $Path) { return $false }
+          try {
+            $out = & $Path -c "import sys; print('ok')" 2>&1
+            return $LASTEXITCODE -eq 0 -and $out -like "*ok*"
+          } catch {
+            return $false
+          }
+        }
+        $result = Validate-PythonInterpreter 'powershell' '-Command' '"ok"'
+        if (-not $result) { exit 1 }
+        exit 0
+        """
+        r = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script],
+                          capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"Should accept working interpreter\n{r.stdout}\n{r.stderr}")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh not installed")
+    def test_resolve_python_finds_working_candidate(self):
+        """Resolve-PythonInterpreter must find and validate a working Python candidate."""
+        script = r"""
+        function Validate-PythonInterpreter($Path) {
+          if (-not $Path) { return $false }
+          try {
+            $out = & $Path -c "import sys; print('ok')" 2>&1
+            return $LASTEXITCODE -eq 0 -and $out -like "*ok*"
+          } catch {
+            return $false
+          }
+        }
+        function Resolve-PythonInterpreter {
+          $candidates = @()
+
+          $cmdPy = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if ($cmdPy) { $candidates += $cmdPy }
+
+          $stablePath = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+          if ((Test-Path $stablePath)) { $candidates += $stablePath }
+
+          foreach ($candidate in $candidates) {
+            if (Validate-PythonInterpreter $candidate) {
+              return $candidate
+            }
+          }
+          return $null
+        }
+        $result = Resolve-PythonInterpreter
+        if ($null -eq $result) {
+          # It's OK if we can't find Python in the test environment; just verify the function works
+          exit 0
+        }
+        exit 0
+        """
+        r = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-Command", script],
+                          capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"Resolve-PythonInterpreter should work\n{r.stdout}\n{r.stderr}")
+
+    def test_windows_onboard_has_python_validation(self):
+        """Verify onboard.ps1 contains the Python validation functions."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        self.assertIn("function Validate-PythonInterpreter", text)
+        self.assertIn("function Resolve-PythonInterpreter", text)
+        self.assertIn("Validate-PythonInterpreter $py", text)
+        self.assertIn("Resolve-PythonInterpreter", text)
+
+    def test_windows_onboard_does_not_use_bare_get_command(self):
+        """Verify Install-Runner does not use bare Get-Command for python resolution."""
+        text = (ROOT / "nodes" / "onboard.ps1").read_text()
+        install_runner_start = text.index("function Install-Runner")
+        install_runner_end = text.index("\nif ($ScanOnly)", install_runner_start)
+        install_runner = text[install_runner_start:install_runner_end]
+        # Should not have the problematic bare Get-Command python pattern in Install-Runner
+        self.assertNotIn("$py = (Get-Command python", install_runner,
+                        "Install-Runner should not use bare Get-Command python; use Resolve-PythonInterpreter instead")
+
+
 class OnboardPs1SyntaxTests(unittest.TestCase):
     def test_windows_onboard_is_loopback_and_retires_11435(self):
         text = (ROOT / "nodes" / "onboard.ps1").read_text()

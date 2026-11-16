@@ -162,6 +162,11 @@ class Fallbacks(unittest.TestCase):
         self.assertEqual(server.ACTIVE_STATES, set(tasks.ACTIVE))
 
 
+    def test_verdict_closes_severity_section(self):
+        text = "## HIGH\n- real finding\nVerdict: changes\n- plain bullet\n"
+        v = server.trim_task({"id": "t", "state": "review", "result": text})
+        self.assertEqual(len(v["findings"]), 1)
+
 class Docs(unittest.TestCase):
     def test_documented(self):
         for f in ("CLAUDE.md", "docs/MASTER-INSTRUCTIONS.md"):

@@ -5,6 +5,7 @@ import { useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
 import { ago, duration, nodeSignal, SIGNAL_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel, Tags } from "../components/bits";
 import { Button, Card, Empty, Loading, Panel, Select, Table, useConfirm, type Column } from "../components/ui";
+import { describeRequest } from "../lib/request";
 import { Terminal } from "../components/Terminal";
 
 function useNodeActions() {
@@ -12,14 +13,28 @@ function useNodeActions() {
   const confirm = useConfirm();
   return {
     busy, error, clearError,
-    approve: (n: FleetNode) => run(() => post(`/api/nodes/${encodeURIComponent(n.id)}/approve`)),
+    approve: async (n: FleetNode) => {
+      const path = `/api/nodes/${encodeURIComponent(n.id)}/approve`;
+      const ok = await confirm({ title: `Approve ${n.name}?`, message: describeRequest("POST", path), confirmLabel: "Approve node" });
+      if (ok) await run(() => post(path));
+    },
     drain: async (n: FleetNode) => {
       const ok = await confirm({ title: `Drain ${n.name}?`, message: "Its roles stop routing and no new tasks go to it.", confirmLabel: "Drain node", danger: true });
       if (ok) await run(() => post(`/api/nodes/${encodeURIComponent(n.id)}/drain`));
     },
-    ceiling: (n: FleetNode, mode: Mode) => run(() => post(`/api/nodes/${encodeURIComponent(n.id)}/ceiling`, { mode })),
-    refresh: () => run(() => post("/api/refresh")),
-    enroll: async () => (await run(() => post<Enrollment>("/api/enroll", {}))) ?? null,
+    ceiling: async (n: FleetNode, mode: Mode) => {
+      const path = `/api/nodes/${encodeURIComponent(n.id)}/ceiling`;
+      const ok = await confirm({ title: `Set highest mode on ${n.name} to ${mode}?`, message: describeRequest("POST", path, { mode }), confirmLabel: "Set mode" });
+      if (ok) await run(() => post(path, { mode }));
+    },
+    refresh: async () => {
+      const ok = await confirm({ title: "Rescan tailnet?", message: describeRequest("POST", "/api/refresh"), confirmLabel: "Rescan" });
+      if (ok) await run(() => post("/api/refresh"));
+    },
+    enroll: async () => {
+      const ok = await confirm({ title: "Create an enrollment code?", message: describeRequest("POST", "/api/enroll", {}), confirmLabel: "Create" });
+      return ok ? ((await run(() => post<Enrollment>("/api/enroll", {}))) ?? null) : null;
+    },
   };
 }
 

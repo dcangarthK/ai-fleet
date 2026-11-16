@@ -4,6 +4,8 @@ import { get, post, type Task } from "../lib/api";
 import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
+import { Terminal } from "./Terminal";
+import { useConfirm } from "./ui";
 import { displayOf } from "../lib/lineage";
 import { handoffSlotName, plannedText, type HandoffSlot } from "../lib/handoff";
 
@@ -68,10 +70,17 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
             </form>
           )}
           <h3>Agent activity</h3>
-          <pre className="out" aria-live="polite">{log || "No output yet."}</pre>
+          <Terminal title={terminalTitle(task, nodes)} text={log} live={task?.state === "working" || task?.state === "starting"} label="Agent activity" />
         </div>
     </dialog>
   );
+}
+
+/** `node:~/repo (branch)`; the task record carries the repo path and branch, not the worktree path. */
+function terminalTitle(task: Task | undefined, nodes: Parameters<typeof nodeName>[0]): string {
+  if (!task) return "agent";
+  const repo = (task.repo ?? "").split("/").filter(Boolean).pop() ?? "";
+  return `${nodeName(nodes, task.node_id)}:~/${repo}${task.branch ? ` (${task.branch})` : ""}`;
 }
 
 function TaskBody({ task, busy, act, diff, loadDiff }: {
@@ -82,6 +91,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
   loadDiff: () => void;
 }) {
   const scope = useCan();
+  const confirm = useConfirm();
   const all = taskActions(task);
   const can = { ...all, approve: all.approve && scope.admin, reject: all.reject && scope.admin, resolve: all.resolve && scope.admin,
     cancel: all.cancel && scope.operate, complete: all.complete && scope.operate, cleanup: all.cleanup && scope.operate };
@@ -104,7 +114,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
         {can.resolve && <button disabled={busy} onClick={() => act("resolve", { kind: "dismissed" })}>Dismiss</button>}
         {can.diff && <button disabled={busy} onClick={loadDiff}>Show changes</button>}
         {can.cleanup && (
-          <button disabled={busy} onClick={() => confirm("Remove this task's worktree? Its branch is kept.") && act("cleanup")}>
+          <button disabled={busy} onClick={async () => (await confirm({ title: "Remove worktree?", message: "Remove this task's worktree? Its branch is kept.", confirmLabel: "Remove worktree", danger: true })) && act("cleanup")}>
             Remove worktree
           </button>
         )}
@@ -143,7 +153,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
         </details>
       )}
       {task.result && (<><h3>Result</h3><pre className="out">{task.result}</pre></>)}
-      {gate?.output_tail && (<><h3>Gate output</h3><pre className="out">{gate.output_tail}</pre></>)}
+      {gate?.output_tail && (<><h3>Gate output</h3><Terminal title={`gate: ${task.gate ?? "gate"}`} text={gate.output_tail} height={240} idPrefix="gate-" label="Gate output" /></>)}
       {diff && (<><h3>Changes</h3><pre className="out">{diff.stat}</pre><Diff text={diff.diff} /></>)}
     </>
   );
@@ -151,6 +161,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
 
 /** "Hand off now…" (admin only): the eligible slots, then the same handoff sequence as an automatic one. */
 function HandOffNow({ id, busy, act }: { id: string; busy: boolean; act: (a: string, body?: unknown) => void }) {
+  const confirm = useConfirm();
   const [slots, setSlots] = useState<HandoffSlot[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function load() {
@@ -168,7 +179,7 @@ function HandOffNow({ id, busy, act }: { id: string; busy: boolean; act: (a: str
       {slots && slots.length === 0 && <span className="small quiet">No eligible slot right now.</span>}
       {slots?.map((s) => (
         <button key={`${s.node}/${s.agent}/${s.profile}/${s.model}`} disabled={busy}
-                onClick={() => confirm(`Hand this work off to ${handoffSlotName(s)}?`) && act("handoff", { slot: s })}>
+                onClick={async () => (await confirm({ title: "Hand off work?", message: `Hand this work off to ${handoffSlotName(s)}?`, confirmLabel: "Hand off" })) && act("handoff", { slot: s })}>
           {handoffSlotName(s)}
         </button>
       ))}
@@ -191,7 +202,7 @@ function Lineage({ task }: { task: Task }) {
       {r && (
         <p className="small">
           <b>Resolution</b> <span className="quiet">{display.label}</span>
-          {(r.kind === "resolved_by" || r.kind === "handed_off") && r.task_id && <> · <Link to={`/tasks?view=all&tab=all&task=${encodeURIComponent(r.task_id)}`}>open that task</Link></>}
+          {(r.kind === "resolved_by" || r.kind === "handed_off") && r.task_id && <> · <Link to={`/work?task=${encodeURIComponent(r.task_id)}`}>open that task</Link></>}
           {r.note && <span className="quiet"> · {r.note}</span>}
         </p>
       )}

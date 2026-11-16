@@ -1,0 +1,27 @@
+/* Now page (docs/SPEC-ui-revamp.md 6a). Uses the foundation tokens only; no fixed widths on content. */
+.now { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+.now h2.sec { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); margin: 0 0 var(--s2); }
+.now .brief p { font-size: 15px; line-height: 1.65; max-width: 80ch; margin: 0; overflow-wrap: anywhere; }
+.now .brief-foot { display: flex; gap: var(--s4); flex-wrap: wrap; align-items: center; margin-top: var(--s3); color: var(--ink-3); font-size: 12px; }
+.now .intent { display: flex; flex-direction: column; gap: var(--s2); }
+.now .intent-row { display: flex; gap: var(--s2); align-items: stretch; flex-wrap: wrap; }
+.now .intent-row input { flex: 1 1 260px; min-width: 0; }
+.now .intent-row button { white-space: nowrap; }
+.now .intent-preview { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); padding: var(--s3) var(--s4); }
+.now .intent-preview.warn { border-color: var(--warn); }
+.now .kv { display: grid; grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); gap: var(--s1) var(--s4); margin: var(--s2) 0 0; }
+.now .kv dt { color: var(--ink-3); }
+.now .kv dd { margin: 0; overflow-wrap: anywhere; }
+.now .warns { margin: var(--s2) 0 0; padding-left: var(--s4); color: var(--warn); }
+.now pre.req { margin: var(--s2) 0 0; padding: var(--s3); background: var(--sunken); border: 1px solid var(--line); border-radius: var(--r); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.now .cost { display: block; margin-top: var(--s1); color: var(--ink-3); font-size: 12.5px; }
+.now .fc { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s3) var(--s4); display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.now .fc.warn { border-left: 3px solid var(--warn); }
+.now .fc.bad { border-left: 3px solid var(--bad); }
+.now .fc .nm { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); overflow-wrap: anywhere; }
+.now .fc .big { font-size: 18px; font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; }
+.now .fc p { margin: 0; color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
+.now .fc .foot { margin-top: auto; display: flex; gap: var(--s2); justify-content: space-between; flex-wrap: wrap; align-items: center; }
+.now .ops { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); align-items: start; }
+.now .ops > * { min-width: 0; }
+.now .quiet-note { color: var(--ink-3); margin: 0; }

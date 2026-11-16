@@ -972,9 +972,72 @@ async def poll_task(task_id: str) -> None:
     if settled:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
+        task = get_task(task_id)
+        if handoff.limit_failure(task) and _profile_is_pinned(task):
+            await requeue_limit_wait(task_id, "explicit profile is pinned; waiting for its reset")
+            return
         await handoff.after_settled(task_id)
+        task = get_task(task_id)
+        if task.get("failure_reason") == "limit" and task.get("resolution"):
+            resolution = task["resolution"]
+            if isinstance(resolution, dict) and resolution.get("kind") == "handed_off":
+                emit(task_id, "task.rerouted", {"title": task["title"], "to": resolution.get("task_id"),
+                                                  "reason": "usage limit; eligible account selected"})
+        elif handoff.limit_failure(task):
+            await requeue_limit_wait(task_id, "usage limit; no eligible account before the next reset")
     elif get_task(task_id)["state"] == "capped":
         await auto_continue(task_id)  # Part H 3.3: a capped build carries on in a fresh session
+
+
+def _profile_is_pinned(task: dict) -> bool:
+    """Whether the owner explicitly selected this task's paid-account profile."""
+    placement = task.get("placement") or {}
+    return bool(placement.get("profile"))
+
+
+def _earliest_limit_reset(task: dict, now: float) -> float | None:
+    """The earliest known future reset among usable accounts for this paid agent."""
+    accounts = accounts_of(placement(task["agent"], None), task["agent"])
+    if task.get("account"):
+        accounts.insert(0, task["account"])
+    accounts = list(dict.fromkeys(accounts))
+    rules = budget.current_rules()
+    ident = task.get("budget_identity") or budget.identity(task["agent"], task.get("model"))
+    key = task.get("budget_key")
+    ends = []
+    for account in accounts:
+        until, _why = budget.blocked_by(rules, budget.limit_snapshot(rules, now, account), task["agent"], key, ident)
+        if until and until > now:
+            ends.append(until)
+    if task.get("resets_at") and task["resets_at"] > now:
+        ends.append(task["resets_at"])
+    return min(ends) if ends else None
+
+
+async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None) -> bool:
+    """Keep a provider-limited task queued rather than blocked or left failed.
+
+    A profile pin deliberately keeps the task on that account.  Otherwise this only runs after the handoff path
+    found no eligible replacement slot, so the next scheduler pass can retry when the earliest account resets.
+    """
+    now = time.time() if now is None else now
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] != "failed" or task.get("failure_reason") != "limit" or task.get("resolution"):
+            return False
+        reset = _earliest_limit_reset(task, now)
+        if reset is None:
+            reset = task.get("resets_at")
+        if reset is None or reset <= now:
+            return False
+        if not transition(task, {"failed"}, "queued", not_before=reset, budget_wait="limit", error=reason,
+                          resolution=None):
+            return False
+        # The legacy scheduled-resume path is no longer applicable once this task is a normal queued item.
+        with db() as c:
+            c.execute("DELETE FROM resume_schedule WHERE task_id=?", (task_id,))
+    emit(task_id, "task.rerouted", {"title": task["title"], "reason": reason, "not_before": reset})
+    return True
 
 
 # Consecutive GET /jobs/{id} polls per working task that the runner answered with an HTTP error

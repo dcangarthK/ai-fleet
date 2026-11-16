@@ -361,6 +361,14 @@ main hasn't touched them since the branch point, then run nodes/build.py.
 
 ## 6. Where the work stands
 
+**16 Nov late (Part I intelligent controller):** Part I is merged into main and pushed (c1b49e2), together with the
+cleanup-safety fix (t-ad893991: `cleanup` keeps unmerged branches) and the trimmed-findings parser fix
+(t-71338ed3). Two MED review follow-ups are queued because the Claude account is limited until 01:00:
+t-5051ca76 moves the blocking git calls in `async cleanup` off the event loop; t-8a7395c0 makes the verdict line
+reset the findings section in `master/mcp/server.py`. When they finish: delta re-review, merge, gate, and the owner
+pushes. LOW items left open: `_branch_merged` hardcodes `main`; the bare-verdict regex scans the whole text.
+Restart the controller and MCP server to pick up the new code, but only once no UI-revamp tasks are running on the master runner.
+
 **Done and merged (and live):** Phases 4–8; G1 (one reviewer contract), trusted reviews, per-file review of big
 diffs, review reasons/fallback/retry, readable notifications, trusted-agent bypass, approval persistence,
 **G2** (real-diff reviewer benchmark + trusted reviewer models), **G3** (grounding calibration eval),

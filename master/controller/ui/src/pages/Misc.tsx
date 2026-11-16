@@ -4,6 +4,8 @@ import { api, get, post, put, type NotifyRule } from "../lib/api";
 import { Link } from "react-router-dom";
 import { newestFirst, useCan, useEvents, useFleet, useRun } from "../lib/data";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import { Button, Card, Empty, Panel, Select, Table } from "../components/ui";
+import { Terminal } from "../components/Terminal";
 
 function when(ts: number) {
   return new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -95,21 +97,21 @@ export function SettingsPage() {
   return (
     <>
       <PageHead title="Settings" />
-      <dl className="kv">
+      <Card title="Account and appearance"><dl className="kv">
         <dt>Signed in as</dt><dd>{can.me ? `${can.me.label} (${can.me.scope} access)` : "checking…"}</dd>
         <dt>Appearance</dt>
         <dd>
-          <select value={theme} onChange={(e) => apply(e.target.value)} aria-label="Appearance">
+          <Select value={theme} onChange={(e) => apply(e.target.value)} aria-label="Appearance">
             <option value="system">Match the system</option>
             <option value="light">Light</option>
             <option value="dark">Dark</option>
-          </select>
+          </Select>
         </dd>
         <dt>Access</dt>
         <dd>Tokens are managed on the master with <span className="mono">controller.py token create|list|revoke</span>. Open <span className="mono">/login?token=…</span> once on a new device.</dd>
         <dt>Versions</dt>
         <dd>{versions.length ? versions.join(" · ") : "No runners reachable."}</dd>
-      </dl>
+      </dl></Card>
       <Notifications admin={can.admin} />
       {can.admin && <Backup />}
     </>
@@ -124,24 +126,25 @@ function Notifications({ admin }: { admin: boolean }) {
     <Section title="Notifications" aside="Which events reach your notification plugins">
       <ErrorBanner error={error} onDismiss={clearError} />
       {sent && <div className="banner note" role="status">{sent}</div>}
-      <div className="panel">
-        <table>
-          <thead><tr><th>When</th><th>Send through</th><th>On</th><th /></tr></thead>
-          <tbody>
-            {(rules.data ?? []).map((r) => (
-              <tr key={r.id}>
-                <td className="mono small">{r.event_glob}</td><td>{r.plugin}</td>
-                <td><input type="checkbox" aria-label={`Notify on ${r.event_glob}`} checked={r.enabled} disabled={!admin || busy}
-                           onChange={(e) => run(() => put(`/api/notify-rules/${encodeURIComponent(r.id)}`, { enabled: e.target.checked }))} /></td>
-                <td>{admin && <button type="button" className="ghost small" disabled={busy}
-                                      onClick={async () => { const ok = await run(() => post(`/api/notify-rules/${encodeURIComponent(r.id)}/test`)); if (ok) setSent(`Sent a test through ${r.plugin}.`); }}>Send a test</button>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {rules.isError && <div className="empty">This controller doesn't report notification rules yet.</div>}
-        {rules.isSuccess && !rules.data.length && <div className="empty">No rules. Add a plugin in master/plugins to get notifications.</div>}
-      </div>
+      <Panel>
+        <Table
+          caption="Notification rules" rows={rules.data ?? []} rowKey={(r) => r.id}
+          columns={[
+            { key: "when", header: "When", cell: (r) => <span className="mono small">{r.event_glob}</span> },
+            { key: "plugin", header: "Send through", cell: (r) => r.plugin },
+            { key: "on", header: "On", cell: (r) => (
+              <input type="checkbox" aria-label={`Notify on ${r.event_glob}`} checked={r.enabled} disabled={!admin || busy}
+                     onChange={(e) => run(() => put(`/api/notify-rules/${encodeURIComponent(r.id)}`, { enabled: e.target.checked }))} />
+            ) },
+            { key: "act", header: "Actions", label: "", cell: (r) => admin ? (
+              <Button size="sm" variant="ghost" disabled={busy}
+                      onClick={async () => { const ok = await run(() => post(`/api/notify-rules/${encodeURIComponent(r.id)}/test`)); if (ok) setSent(`Sent a test through ${r.plugin}.`); }}>Send a test</Button>
+            ) : null },
+          ]}
+        />
+        {rules.isError && <Empty title="This controller doesn't report notification rules yet" />}
+        {rules.isSuccess && !rules.data.length && <Empty title="No rules">Add a plugin in master/plugins to get notifications.</Empty>}
+      </Panel>
     </Section>
   );
 }
@@ -177,19 +180,18 @@ function Backup() {
       <ErrorBanner error={error} onDismiss={clearError} />
       {done && <div className="banner note" role="status">{done}</div>}
       <div className="row">
-        <button type="button" disabled={busy} onClick={download}>Download configuration</button>
+        <Button disabled={busy} onClick={download}>Download configuration</Button>
         <label className="row" style={{ gap: 8 }}><span className="small">Restore from a file:</span><input type="file" accept="application/json,.json" onChange={choose} /></label>
       </div>
       {plan && (
-        <div className="panel" style={{ padding: 14, marginTop: 12 }}>
-          <b>This is what restoring would change</b>
-          <pre className="out">{JSON.stringify(plan.diff, null, 2)}</pre>
-          <div className="row">
-            <button type="button" className="primary" disabled={busy}
-                    onClick={async () => { const ok = await run(() => api("/api/import", "POST", plan.doc)); if (ok) { setPlan(null); setDone("Restored. Changes were saved as new versions; nothing was deleted."); } }}>Apply these changes</button>
-            <button type="button" className="ghost" onClick={() => setPlan(null)}>Cancel</button>
+        <Card title="This is what restoring would change" className="mt">
+          <Terminal title="restore preview (dry run)" text={JSON.stringify(plan.diff, null, 2)} height={280} label="Restore preview" />
+          <div className="row" style={{ marginTop: "var(--s3)" }}>
+            <Button variant="primary" disabled={busy}
+                    onClick={async () => { const ok = await run(() => api("/api/import", "POST", plan.doc)); if (ok) { setPlan(null); setDone("Restored. Changes were saved as new versions; nothing was deleted."); } }}>Apply these changes</Button>
+            <Button variant="ghost" onClick={() => setPlan(null)}>Cancel</Button>
           </div>
-        </div>
+        </Card>
       )}
     </Section>
   );

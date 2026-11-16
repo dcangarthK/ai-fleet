@@ -4,6 +4,7 @@ import { post, put, type CatalogModel, type FleetNode, type ModelParams, type No
 import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
+import { Button, Empty, Panel, Table, useConfirm, type Column } from "../components/ui";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
 
@@ -13,6 +14,7 @@ export function ModelsPage() {
   const { run, busy, error, clearError } = useRun();
   const [adding, setAdding] = useState(false);
   const can = useCan();
+  const confirm = useConfirm();
   const [installing, setInstalling] = useState<{ model: CatalogModel; node?: string } | null>(null);
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved");
   const catalog = models.data ?? [];
@@ -20,84 +22,80 @@ export function ModelsPage() {
   const inCatalog = new Set(catalog.map((m) => m.reference));
   const uncatalogued = Array.from(new Set(nodes.flatMap((n) => n.models))).filter((m) => !inCatalog.has(m) && !m.startsWith("fleet-")).sort();
 
-  function remove(m: CatalogModel, nodeId: string, state: NodeModelState) {
+  async function remove(m: CatalogModel, nodeId: string, state: NodeModelState) {
     const node = nodes.find((n) => n.id === nodeId)?.name ?? nodeId;
     const roles = assignments.filter((a) => a.node_id === nodeId && a.model === m.reference).map((a) => a.role);
-    const lines = [`Remove ${m.reference} from ${node}?`];
+    const lines = [];
     if (roles.length) lines.push(`Roles that stop routing here: ${roles.join(", ")}.`);
     if (state.ownership === "pre-existing") lines.push("This model was on the node before the fleet managed it.");
-    if (!confirm(lines.join("\n\n"))) return;
-    run(() => put(`/api/nodes/${encodeURIComponent(nodeId)}/models/${encodeURIComponent(m.id)}`,
+    const ok = await confirm({
+      title: `Remove ${m.reference} from ${node}?`,
+      message: lines.length ? <>{lines.map((l) => <p key={l}>{l}</p>)}</> : undefined,
+      confirmLabel: "Remove model", danger: true,
+    });
+    if (!ok) return;
+    await run(() => put(`/api/nodes/${encodeURIComponent(nodeId)}/models/${encodeURIComponent(m.id)}`,
       { desired: "absent", confirm_preexisting: state.ownership === "pre-existing" }));
   }
+
+  const cols: Column<CatalogModel>[] = [
+    { key: "model", header: "Model", cell: (m) => (
+      <>
+        <b>{m.display_name || m.reference}</b>
+        <div className="sub mono wrap-any">{m.reference}</div>
+        {roleTags(assignments.filter((a) => a.model === m.reference).map((a) => a.role))}
+        {m.trusted_reviewer && <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span>}
+        {m.derived_trusted_reviewer && (
+          <span className="tag tone-ok" tabIndex={0}
+                title={`With custom settings this model is served as ${m.derived_model}, which is benchmarked separately. ${TRUSTED_RULE}`}>
+            Trusted with settings
+          </span>
+        )}
+        {m.trusted_reviewer && !m.derived_trusted_reviewer && m.derived_model && (
+          <div className="sub">With custom settings, {m.derived_model} is judged on its own benchmark.</div>
+        )}
+      </>
+    ) },
+    { key: "size", header: "Size", numeric: true, hideStacked: true, cell: (m) => (m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—") },
+    { key: "evals", header: "Eval scores", hideStacked: true, cell: (m) => <span className="small">{scores(m.evals)}</span> },
+    ...nodes.map((n): Column<CatalogModel> => ({
+      key: `node-${n.id}`,
+      header: <span className="row" style={{ gap: "var(--s2)" }}><NodeLight node={n} />{n.name}</span>,
+      label: n.name,
+      cell: (m) => (
+        <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
+          onInstall={() => setInstalling({ model: m, node: n.id })}
+          onRemove={() => remove(m, n.id, m.nodes[n.id])}
+          onRetry={() => run(() => put(`/api/nodes/${encodeURIComponent(n.id)}/models/${encodeURIComponent(m.id)}`,
+            { desired: "present", params: m.nodes[n.id]?.params ?? undefined }))} />
+      ),
+    })),
+  ];
 
   return (
     <>
       <PageHead
         title="Models"
         intro="The models your fleet can run. Add one to the catalog, then install it on a node; the node downloads and tests it in the background, and roles that use it switch on when it's ready."
-        actions={can.admin && <button className="primary" onClick={() => setAdding(true)}>Add model</button>}
+        actions={can.admin && <Button variant="primary" onClick={() => setAdding(true)}>Add model</Button>}
       />
       <LoadError error={models.error ?? fleet.error} />
       <ErrorBanner error={error} onDismiss={clearError} />
 
-      <div className="panel">
-        <table>
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th className="num hide-sm">Size</th>
-              <th className="hide-sm">Eval scores</th>
-              {nodes.map((n) => (
-                <th key={n.id}><span className="row" style={{ gap: 6 }}><NodeLight node={n} />{n.name}</span></th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {catalog.map((m) => (
-              <tr key={m.id}>
-                <td>
-                  <b>{m.display_name || m.reference}</b>
-                  <div className="sub mono">{m.reference}</div>
-                  {roleTags(assignments.filter((a) => a.model === m.reference).map((a) => a.role))}
-                  {m.trusted_reviewer && <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span>}
-                  {m.derived_trusted_reviewer && (
-                    <span className="tag tone-ok" tabIndex={0}
-                          title={`With custom settings this model is served as ${m.derived_model}, which is benchmarked separately. ${TRUSTED_RULE}`}>
-                      Trusted with settings
-                    </span>
-                  )}
-                  {m.trusted_reviewer && !m.derived_trusted_reviewer && m.derived_model && (
-                    <div className="sub">With custom settings, {m.derived_model} is judged on its own benchmark.</div>
-                  )}
-                </td>
-                <td className="num hide-sm">{m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—"}</td>
-                <td className="hide-sm small">{scores(m.evals)}</td>
-                {nodes.map((n) => (
-                  <td key={n.id}>
-                    <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
-                      onInstall={() => setInstalling({ model: m, node: n.id })}
-                      onRemove={() => remove(m, n.id, m.nodes[n.id])}
-                      onRetry={() => run(() => put(`/api/nodes/${encodeURIComponent(n.id)}/models/${encodeURIComponent(m.id)}`,
-                        { desired: "present", params: m.nodes[n.id]?.params ?? undefined }))} />
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <Panel>
+        <Table columns={cols} rows={catalog} rowKey={(m) => m.id} caption="Model catalog" />
         {!models.isLoading && catalog.length === 0 && (
-          <div className="empty">The catalog is empty. Add a model by its Ollama name, for example <span className="mono">qwen3:8b</span>.</div>
+          <Empty title="The catalog is empty">Add a model by its Ollama name, for example <span className="mono">qwen3:8b</span>.</Empty>
         )}
-      </div>
+      </Panel>
 
       {can.admin && uncatalogued.length > 0 && (
         <Section title="On nodes but not in the catalog" aside="Add them to manage and route them from here">
           <div className="row">
             {uncatalogued.map((ref) => (
-              <button key={ref} className="mono" disabled={busy} onClick={() => run(() => post("/api/models", { reference: ref }))}>
+              <Button key={ref} className="mono" size="sm" disabled={busy} onClick={() => run(() => post("/api/models", { reference: ref }))}>
                 Add {ref}
-              </button>
+              </Button>
             ))}
           </div>
         </Section>
@@ -160,7 +158,7 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
       <div className="small">
         <span className={`state tone-${INSTALL_LABEL[s].tone}`}>{INSTALL_LABEL[s].label}</span>
         <div className="sub" style={{ maxWidth: 260 }}>{explainReason(state.reason)}</div>
-        <button className="ghost small" disabled={busy} onClick={onRetry}>Retry</button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onRetry}>Retry</Button>
       </div>
     );
   }
@@ -169,14 +167,14 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
       <div className="small">
         <span className="state tone-ok">Installed</span>
         {state.ownership === "pre-existing" && <div className="sub">was already on the node</div>}
-        <div><button className="ghost small" disabled={busy} onClick={onRemove}>Remove</button></div>
+        <div><Button variant="ghost" size="sm" disabled={busy} onClick={onRemove}>Remove</Button></div>
       </div>
     );
   }
   return (
     <div className="small">
       <span className={`state tone-${fit.tone}`}>{fit.label}</span>
-      <div><button className="small" disabled={busy} onClick={onInstall}>Install</button></div>
+      <div><Button size="sm" disabled={busy} onClick={onInstall}>Install</Button></div>
     </div>
   );
 }
@@ -237,7 +235,7 @@ function AddModelDialog({ open, onClose }: { open: boolean; onClose: () => void 
       <form onSubmit={submit}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 id="add-model-title">Add a model to the catalog</h2>
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
         </div>
         <ErrorBanner error={error} onDismiss={clearError} />
         <div className="grid-form">
@@ -251,7 +249,7 @@ function AddModelDialog({ open, onClose }: { open: boolean; onClose: () => void 
         </div>
         <p className="small quiet" style={{ margin: 0 }}>The name is checked against the Ollama registry, which also gives the download size. Defaults below apply wherever it's installed unless you change them per node.</p>
         <ParamFields value={defaults} onChange={setDefaults} />
-        <div className="row"><button className="primary" disabled={busy || !reference.trim()}>Add to catalog</button></div>
+        <div className="row"><Button type="submit" variant="primary" disabled={busy || !reference.trim()}>Add to catalog</Button></div>
       </form>
     </dialog>
   );
@@ -284,7 +282,7 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
       <form onSubmit={submit}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 id="install-title">Install {model.display_name || model.reference}</h2>
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
         </div>
         <ErrorBanner error={error} onDismiss={clearError} />
         <label className="field">Node
@@ -311,7 +309,7 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
           </label>
         )}
         <div className="row">
-          <button className="primary" disabled={busy || !node || (fit === "wont_fit" && !override) || !canManage(nodes.find((n) => n.id === node)!)}>Install</button>
+          <Button type="submit" variant="primary" disabled={busy || !node || (fit === "wont_fit" && !override) || !canManage(nodes.find((n) => n.id === node)!)}>Install</Button>
           <span className="small quiet">You can keep working; progress shows at the top of every page.</span>
         </div>
         <p className="small quiet" style={{ margin: 0 }}>To use it for a role, assign it on <Link to="/roles">Roles</Link> once it's installed, or assign it now and the role switches on when it's ready.</p>

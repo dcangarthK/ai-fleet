@@ -125,6 +125,32 @@ model is called from page render.
 Additive route for this: `POST /api/ask` in `ui_api.py` (local `fast` role through the existing gateway; refuses
 paid models; uses the existing redaction).
 
+
+## 6b. Terminal frames and responsive rules (owner, 16 Nov)
+
+**Terminal frame.** Every place that shows logs or work done in a shell (task log, gate output, posture check
+output, enroll command, Ask-the-fleet citations, Activity raw events) renders in one shared `<Terminal>`
+component: a window frame with a title bar (three neutral dots, title = `node:~/worktree (branch)`, right side:
+follow toggle, copy, wrap, full-screen), dark surface in both themes, mono font, line numbers that are
+anchors (`#L120`, used by insight evidence links), ANSI colour mapped to the theme's status colours, a blinking
+block cursor on the last line while the task is live, a prompt prefix (`$`) on command lines, search within
+(`/`), and a "jump to latest" pill when scrolled up. No gradients, glows or scanline gimmicks; restrained and
+crisp. `prefers-reduced-motion` stops the cursor blink.
+
+**Responsive, no breakage.** Breakpoints 360 / 640 / 1024 / 1440.
+- Rail: full at >=1024, icon-only collapsed at 640-1023, off-canvas drawer below 640.
+- Two-column layouts (work detail + context panel) stack below 1024; the context panel becomes a tab.
+- Tables: become stacked cards below 640 or scroll inside their own container; the page body never scrolls
+  horizontally. Long ids, branch names and paths truncate with ellipsis plus a title tooltip, or wrap with
+  `overflow-wrap:anywhere` in prose.
+- Controls: one size scale (`sm 28px`, `md 36px`, `lg 44px` min touch target on coarse pointers); buttons,
+  inputs, selects and chips in one row share height; labels never wrap inside buttons (`white-space:nowrap`),
+  action bars wrap as a whole row instead.
+- Cards in a grid use `grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr))`, equal heights per
+  row, no fixed pixel widths on content containers.
+- Acceptance: Playwright-free check in vitest is not possible, so each page is screenshotted at 375, 768 and
+  1440 wide in the review round and any overflow (`scrollWidth > clientWidth` on `body`) is a HIGH finding.
+
 ## 7. Acceptance criteria
 
 1. All pages in section 3 exist; old routes redirect.

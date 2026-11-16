@@ -32,6 +32,11 @@ describe("work", () => {
     expect(parseFindings("High level overview\nHigh-level summary\nLow risk change overall\n# High level")).toHaveLength(0);
     expect(parseFindings("**HIGH** bad\n[MED] other\nLOW - nit\nMEDIUM: x")).toHaveLength(4);
   });
+  it("keeps a bare HIGH: heading with its indented detail", () => {
+    const f = parseFindings("HIGH:\n  token leaks in log [L4]\n  second line");
+    expect(f).toHaveLength(1);
+    expect(f[0]).toMatchObject({ severity: "HIGH", title: "token leaks in log [L4] second line", cites: [4] });
+  });
   it("parses verdict", () => { expect(parseVerdict("Verdict: approved")).toBe("approved"); expect(parseVerdict("none")).toBeNull(); });
   it("splits citations", () => {
     expect(splitCitations("see [L3].")).toEqual([{ kind: "text", text: "see " }, { kind: "cite", line: 3 }, { kind: "text", text: "." }]);

@@ -227,7 +227,8 @@ function isFindingHead(opener: string, delim: string, title: string): boolean {
   const o = opener.trim();
   const closed = /[\]):*]/.test(delim);
   if (o && !o.startsWith("#") && closed) return true;
-  if (!title.trim()) return false;
+  // A bare "HIGH:" heads a finding whose text is on the indented lines below.
+  if (!title.trim()) return /:/.test(delim);
   // A dash counts only when spaced off the word ("LOW - nit"); "High-level" is a hyphenated word.
   return /:/.test(delim) || /^\s+[\-–—]/.test(delim);
 }
@@ -250,6 +251,7 @@ export function parseFindings(text: string | null | undefined): Finding[] {
       open = null;
     }
   }
+  for (const f of out) if (!f.title && f.detail) { f.title = f.detail; f.detail = ""; }
   for (const f of out) f.cites = citesIn(`${f.title} ${f.detail}`);
   return out;
 }

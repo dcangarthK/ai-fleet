@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet console - C Workbench mock</title>
+<style>
+:root{
+  --bg:#fafaf8;--surface:#fff;--sunken:#f2f2ee;--line:#e3e3dc;--line-strong:#c9c9c0;
+  --ink:#1b1d1f;--ink-2:#46494d;--ink-3:#5f6368;
+  --accent:#1459b3;--accent-ink:#fff;--accent-soft:#e6eef9;
+  --ok:#17663a;--ok-soft:#e4f2e9;--warn:#8a5300;--warn-soft:#faf0dc;--bad:#b3261e;--bad-soft:#fbe9e7;
+  --focus:#1459b3;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --r:6px;
+}
+[data-theme=dark]{
+  --bg:#141517;--surface:#1b1d20;--sunken:#101113;--line:#2b2e32;--line-strong:#42464c;
+  --ink:#ececea;--ink-2:#b8bbbf;--ink-3:#9a9ea4;
+  --accent:#6ea8f0;--accent-ink:#0b1626;--accent-soft:#1c2a3f;
+  --ok:#5fcf8b;--ok-soft:#17291f;--warn:#e6b052;--warn-soft:#2e2412;--bad:#ff8a80;--bad-soft:#331a18;
+  --focus:#8dbcf5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--accent)}
+h1,h2,h3,p{margin:0}
+h1{font-size:26px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:650}
+h3{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.sub{color:var(--ink-2)}
+.muted{color:var(--ink-3)}
+
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.rail{border-right:1px solid var(--line);background:var(--surface);padding:var(--s4) var(--s3);display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;padding:0 var(--s2)}
+.brand i{width:12px;height:12px;background:var(--accent);border-radius:3px;display:block}
+.rail h3{padding:0 var(--s2);margin-bottom:var(--s1)}
+.rail button.nav{all:unset;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px var(--s2);border-radius:var(--r);color:var(--ink-2);cursor:pointer}
+.rail button.nav:hover{background:var(--sunken);color:var(--ink)}
+.rail button.nav[aria-current=page]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.rail button.nav:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.badge{font-size:11px;min-width:20px;text-align:center;padding:0 6px;border-radius:10px;background:var(--bad);color:#fff;font-weight:600}
+[data-theme=dark] .badge{color:#2a0b08}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--s2);padding:0 var(--s2)}
+.rail .kbd-row{display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+
+.main{min-width:0}
+.top{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s6);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:2}
+.crumbs{color:var(--ink-3);font-size:13px;flex:1}
+.crumbs b{color:var(--ink);font-weight:600}
+.cmdk{display:flex;align-items:center;gap:var(--s3);min-width:320px;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:var(--r);background:var(--bg);color:var(--ink-3);text-align:left}
+.cmdk span:first-child{flex:1}
+kbd{font:12px var(--mono);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink-2);background:var(--surface)}
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:6px var(--s3);font-weight:550}
+.btn:hover{background:var(--sunken)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:3px var(--s2);font-size:13px}
+.page{padding:var(--s6) var(--s6) var(--s7);max-width:1360px}
+.view{display:none}.view.on{display:block}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s6)}
+.head .sub{margin-top:var(--s1);max-width:62ch}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.card .body{padding:var(--s4) var(--s5)}
+.stack{display:flex;flex-direction:column;gap:var(--s5)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:var(--s5)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-soft)}
+.p-warn{color:var(--warn);background:var(--warn-soft)}
+.p-bad{color:var(--bad);background:var(--bad-soft)}
+.p-run{color:var(--accent);background:var(--accent-soft)}
+.p-idle{color:var(--ink-3);background:var(--sunken)}
+table{width:100%;border-collapse:collapse}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);text-align:left;font-weight:650;padding:var(--s2) var(--s5);border-bottom:1px solid var(--line)}
+td{padding:var(--s3) var(--s5);border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunken)}
+td.n,th.n{text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar.warn i{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--s2) var(--s4)}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0;text-align:right}
+.inbox{list-style:none;margin:0;padding:0}
+.inbox li{display:grid;grid-template-columns:72px 1fr auto;gap:var(--s4);align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.inbox li:last-child{border-bottom:0}
+.inbox .t{font-weight:600}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .v{font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.01em}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--ink-3)}
+.empty b{display:block;color:var(--ink);font-size:15px;margin-bottom:var(--s1)}
+.err{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--bad);background:var(--bad-soft);border-radius:var(--r);color:var(--ink)}
+.err b{color:var(--bad)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--line);padding:0 var(--s5)}
+.tabs button{all:unset;padding:var(--s3) 0;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+
+.chain{display:grid;grid-template-columns:repeat(7,1fr);padding:var(--s5)}
+.stg{position:relative;padding-right:var(--s2)}
+.stg::before{content:"";position:absolute;top:11px;left:28px;right:4px;height:2px;background:var(--line-strong)}
+.stg:last-child::before{display:none}
+.stg.done::before{background:var(--ok)}
+.dot{position:relative;width:24px;height:24px;border-radius:50%;border:2px solid var(--line-strong);background:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink-3)}
+.stg.done .dot{border-color:var(--ok);background:var(--ok);color:#fff}
+[data-theme=dark] .stg.done .dot{color:#0c2015}
+.stg.now .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.stg.bad .dot{border-color:var(--bad);background:var(--bad);color:#fff}
+[data-theme=dark] .stg.bad .dot{color:#2a0b08}
+.stg.plan .dot{border-style:dashed}
+.stg .nm{margin-top:var(--s2);font-weight:650}
+.stg .md{font-size:12px;color:var(--ink-2);line-height:1.4;word-break:break-all}
+.stg .ac{font-size:12px;color:var(--ink-3)}
+.stg .at{font-size:12px;margin-top:2px;color:var(--ink-2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.actions .sp{flex:1}
+.msg{flex:1;min-width:200px;border:1px solid var(--line-strong);border-radius:var(--r);padding:6px var(--s3);background:var(--surface);color:var(--ink);font:inherit}
+.msg::placeholder{color:var(--ink-3)}
+pre.log,pre.diff{margin:0;padding:var(--s3) var(--s5);font:12.5px/1.6 var(--mono);overflow:auto;background:var(--sunken)}
+.log .t{color:var(--ink-3)}.log .w{color:var(--warn)}
+.diff span{display:block}
+.diff .a{color:var(--ok);background:var(--ok-soft)}
+.diff .d{color:var(--bad);background:var(--bad-soft)}
+.diff .h{color:var(--ink-3)}
+.files{list-style:none;margin:0;padding:var(--s2) 0;font:12.5px var(--mono)}
+.files li{display:flex;justify-content:space-between;gap:var(--s2);padding:3px var(--s4)}
+.files li.sel{background:var(--accent-soft);color:var(--accent)}
+.find{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{font:700 11px var(--mono);padding:1px 6px;border-radius:4px;height:fit-content;margin-top:2px;text-align:center}
+.s-h{background:var(--bad);color:#fff}
+[data-theme=dark] .s-h{color:#2a0b08}
+.s-m{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn)}
+.s-l{background:var(--sunken);color:var(--ink-2);border:1px solid var(--line-strong)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s5);align-items:start}
+.ctx{display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:76px}
+.ctx .card .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sw{display:flex;gap:var(--s2);align-items:center;color:var(--ink-2);font-size:13px}
+.sw input{accent-color:var(--accent)}
+.wiz{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);padding:var(--s4) var(--s5)}
+.wiz div{border-top:3px solid var(--line-strong);padding-top:var(--s2);color:var(--ink-3);font-size:13px}
+.wiz div.on{border-color:var(--accent)}
+.wiz b{display:block;color:var(--ink)}
+.cmd{display:block;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px var(--mono);overflow-x:auto;white-space:nowrap}
+@media(max-width:1100px){.split,.grid2{grid-template-columns:1fr}.ctx{position:static}.chain{grid-template-columns:repeat(4,1fr);row-gap:var(--s5)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.rail{position:static;height:auto}.page{padding:var(--s4)}.cmdk{min-width:0}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand"><i></i>Fleet console</div>
+  <div>
+    <h3>Operate</h3>
+    <button class="nav" data-go="now" aria-current="page">Now <span class="badge" aria-label="3 need attention">3</span></button>
+    <button class="nav" data-go="work">Work <span class="muted">14</span></button>
+    <button class="nav" data-go="plan">Plan</button>
+  </div>
+  <div>
+    <h3>Spend</h3>
+    <button class="nav" data-go="budget">Budget</button>
+  </div>
+  <div>
+    <h3>Fleet</h3>
+    <button class="nav" data-go="nodes">Nodes <span class="muted">3</span></button>
+    <button class="nav" data-go="models">Models</button>
+    <button class="nav" data-go="roles">Roles</button>
+  </div>
+  <div>
+    <h3>Configure</h3>
+    <button class="nav" data-go="cfg1">Policies</button>
+    <button class="nav" data-go="cfg2">Skills</button>
+    <button class="nav" data-go="cfg3">Evals runs</button>
+    <button class="nav" data-go="cfg4">Activity</button>
+    <button class="nav" data-go="cfg5">Settings</button>
+  </div>
+  <div class="foot">
+    <div class="kbd-row"><span>Jump</span><span><kbd>g</kbd> <kbd>n</kbd> <kbd>g</kbd> <kbd>w</kbd> <kbd>g</kbd> <kbd>b</kbd></span></div>
+    <div class="kbd-row"><span>Help</span><kbd>?</kbd></div>
+    <button class="btn sm" id="theme" aria-pressed="false">Dark theme</button>
+    <div class="muted" style="font-size:12px">Signed in as owner (operate)</div>
+  </div>
+</nav>
+
+<div class="main">
+<div class="top">
+  <div class="crumbs" id="crumbs"><b>Now</b></div>
+  <button class="cmdk" aria-label="Open command palette"><span>Search pages, tasks, nodes, actions</span><kbd>⌘K</kbd></button>
+  <button class="btn primary">Spawn task</button>
+</div>
+
+<main class="page">
+
+<!-- VIEW 1: NOW -->
+<section class="view on" id="v-now" aria-labelledby="h-now" data-crumb="Now">
+  <div class="head">
+    <div><h1 id="h-now">Now</h1><p class="sub">Monday 16 November, 14:32. 5 tasks running, 3 items need you.</p></div>
+    <div class="stat" style="text-align:right"><span class="muted">Spend today</span><span class="v">$41.20</span></div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <header><h2>Needs you</h2><span class="muted">3 items</span></header>
+      <ul class="inbox">
+        <li><span class="pill p-bad">Blocked</span><div><div class="t">t-3f9a12c0 asks for approval to touch nodes/onboard.sh</div><div class="sub">Fix on claude-sonnet-5-5, fleet account. Waiting 12 min.</div></div><button class="btn sm" data-go="work">Open work item</button></li>
+        <li><span class="pill p-warn">Limit</span><div><div class="t">codex gpt-5.6-terra at 83% of weekly limit</div><div class="sub">Resets Thursday 09:00. Final reviews only until then.</div></div><button class="btn sm" data-go="budget">View budget</button></li>
+        <li><span class="pill p-warn">Node</span><div><div class="t">laptop-0ir6d81o is offline since 11:04</div><div class="sub">2 queued tasks were rerouted to master.</div></div><button class="btn sm" data-go="nodes">Open node</button></li>
+      </ul>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Running work</h2><span class="muted">5 tasks</span></header>
+        <table>
+          <thead><tr><th>Task</th><th>Stage</th><th>Model / account</th><th>Node</th><th class="n">Elapsed</th></tr></thead>
+          <tbody>
+            <tr><td><b>t-3f9a12c0</b><div class="muted">Windows enrollment tags</div></td><td><span class="pill p-warn">fix, blocked</span></td><td class="mono">claude-sonnet-5-5 / fleet</td><td>master</td><td class="n">06:41</td></tr>
+            <tr><td><b>t-8b41d7e2</b><div class="muted">Budget hold toggle</div></td><td><span class="pill p-run">review</span></td><td class="mono">claude-fable-5-2 / spare</td><td>master</td><td class="n">02:10</td></tr>
+            <tr><td><b>t-a07c55f1</b><div class="muted">Plan item editor</div></td><td><span class="pill p-run">build</span></td><td class="mono">claude-opus-5-5 / spare</td><td>master</td><td class="n">00:48</td></tr>
+            <tr><td><b>t-c92e0b64</b><div class="muted">Commit message drafts</div></td><td><span class="pill p-run">draft</span></td><td class="mono">qwen2.5-coder:14b</td><td>duncan's macbook m1 pro</td><td class="n">00:19</td></tr>
+            <tr><td><b>t-5d3318aa</b><div class="muted">Final review, batch 14</div></td><td><span class="pill p-run">final</span></td><td class="mono">codex gpt-5.6-terra / fleet</td><td>master</td><td class="n">11:02</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <header><h2>Accounts</h2></header>
+          <div class="body stack" style="gap:var(--s4)">
+            <div><div class="kv"><dt>fleet</dt><dd>62% of 5h</dd></div><div class="bar" role="img" aria-label="fleet 62 percent"><i style="width:62%"></i></div><div class="muted" style="font-size:12px;margin-top:4px">Resets in 1h 48m</div></div>
+            <div><div class="kv"><dt>spare</dt><dd>88% of 5h</dd></div><div class="bar warn" role="img" aria-label="spare 88 percent"><i style="width:88%"></i></div><div class="muted" style="font-size:12px;margin-top:4px">Resets in 3h 05m</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Machines</h2></header>
+          <table><tbody>
+            <tr><td>master</td><td><span class="pill p-ok">Healthy</span></td><td class="n">4 / 4</td></tr>
+            <tr><td>duncan's macbook m1 pro</td><td><span class="pill p-ok">Healthy</span></td><td class="n">1 / 1</td></tr>
+            <tr><td>laptop-0ir6d81o</td><td><span class="pill p-idle">Offline</span></td><td class="n">0 / 1</td></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Alerts</h2></header>
+        <div class="body">
+          <div class="err" role="alert"><div><b>glm-4.7-flash failed to load on duncan's macbook m1 pro.</b><div class="sub">Not enough free memory (needs 17.2 GB, 9.8 GB free). Role fast falls back to qwen2.5-coder:14b.</div><div style="margin-top:var(--s2)"><button class="btn sm">Retry load</button> <button class="btn sm">Unload other model</button></div></div></div>
+        </div>
+      </div>
+      <div class="card">
+        <header><h2>Awaiting merge</h2></header>
+        <div class="empty"><b>Nothing waiting to merge</b>Passed branches appear here once review is green.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VIEW 2: WORK DETAIL -->
+<section class="view" id="v-work" aria-labelledby="h-work" data-crumb="Work / t-3f9a12c0">
+  <div class="head">
+    <div>
+      <p class="muted" style="margin-bottom:var(--s2)">Work item <span class="mono">t-3f9a12c0</span> &middot; branch <span class="mono">fleet/t-3f9a12c0</span></p>
+      <h1 id="h-work">Windows onboarding: set worker tag via tailscale up</h1>
+      <p class="sub">Fix round 2 of 3. Gate failed on <span class="mono">test_onboard</span>; the builder is re-embedding the runner.</p>
+    </div>
+    <span class="pill p-warn">Blocked, needs you</span>
+  </div>
+
+  <div class="split">
+    <div class="stack">
+      <div class="card">
+        <header><h2>Chain</h2><button class="btn sm">Edit planned stages</button></header>
+        <div class="chain" role="list">
+          <div class="stg done" role="listitem"><div class="dot">1</div><div class="nm">Spec</div><div class="md mono">claude-fable-5-2</div><div class="ac">spare</div><div class="at">1 attempt</div></div>
+          <div class="stg done" role="listitem"><div class="dot">2</div><div class="nm">Build</div><div class="md mono">claude-sonnet-5-5</div><div class="ac">fleet</div><div class="at">1 attempt</div></div>
+          <div class="stg bad" role="listitem"><div class="dot">3</div><div class="nm">Gate</div><div class="md mono">fleet-gate</div><div class="ac">master</div><div class="at">failed, 1 of 3</div></div>
+          <div class="stg now" role="listitem"><div class="dot">4</div><div class="nm">Fix</div><div class="md mono">claude-sonnet-5-5</div><div class="ac">fleet</div><div class="at">attempt 2, running</div></div>
+          <div class="stg plan" role="listitem"><div class="dot">5</div><div class="nm">Review</div><div class="md mono">claude-fable-5-2</div><div class="ac">spare</div><div class="at">planned</div></div>
+          <div class="stg plan" role="listitem"><div class="dot">6</div><div class="nm">Final</div><div class="md mono">codex gpt-5.6-terra</div><div class="ac">fleet</div><div class="at">planned</div></div>
+          <div class="stg plan" role="listitem"><div class="dot">7</div><div class="nm">Merge</div><div class="md mono">claude-haiku-5-5</div><div class="ac">fleet</div><div class="at">planned</div></div>
+        </div>
+        <div class="actions" role="toolbar" aria-label="Work item actions">
+          <input class="msg" aria-label="Message the builder" placeholder="Message the builder (same session)">
+          <button class="btn sm">Send</button>
+          <span class="sp"></span>
+          <button class="btn sm primary">Approve</button>
+          <button class="btn sm">Reject</button>
+          <button class="btn sm">Resolve</button>
+          <button class="btn sm">Spawn follow-up</button>
+          <button class="btn sm">Handoff</button>
+          <button class="btn sm danger">Cancel</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tabs" role="tablist" aria-label="Work item detail">
+          <button role="tab" aria-selected="true" data-p="p-att">Attempts</button>
+          <button role="tab" aria-selected="false" data-p="p-log">Log</button>
+          <button role="tab" aria-selected="false" data-p="p-diff">Diff</button>
+          <button role="tab" aria-selected="false" data-p="p-find">Findings (3)</button>
+        </div>
+
+        <div class="panel on" id="p-att" role="tabpanel">
+          <table>
+            <thead><tr><th>Attempt</th><th>Model / account</th><th>Result</th><th class="n">Tokens in / out</th><th class="n">Cost</th></tr></thead>
+            <tbody>
+              <tr><td><b>a0</b> <span class="muted">spec</span></td><td class="mono">claude-fable-5-2 / spare</td><td><span class="pill p-ok">Approved</span></td><td class="n">41,002 / 6,118</td><td class="n">$0.92</td></tr>
+              <tr><td><b>a1</b> <span class="muted">build</span></td><td class="mono">claude-sonnet-5-5 / fleet</td><td><span class="pill p-bad">Gate failed</span></td><td class="n">184,210 / 22,904</td><td class="n">$1.14</td></tr>
+              <tr><td><b>a2</b> <span class="muted">fix</span></td><td class="mono">claude-sonnet-5-5 / fleet</td><td><span class="pill p-run">Running</span></td><td class="n">96,780 / 9,351</td><td class="n">$0.58</td></tr>
+            </tbody>
+            <tfoot><tr><td colspan="3" class="muted" style="border-top:1px solid var(--line)">Total for work item</td><td class="n" style="border-top:1px solid var(--line)"><b>322,092 / 38,373</b></td><td class="n" style="border-top:1px solid var(--line)"><b>$2.64</b></td></tr></tfoot>
+          </table>
+          <div style="padding:0 var(--s5) var(--s4)"><div class="err" role="alert"><div><b>Gate failed on a1.</b> <span class="mono">test_onboard</span>: embedded runner in onboard.ps1 differs from nodes/runner.py. Run <span class="mono">python3 nodes/build.py</span> and commit both files.</div></div></div>
+        </div>
+
+        <div class="panel" id="p-log" role="tabpanel">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s3) var(--s5)"><span class="muted">a2 &middot; claude-sonnet-5-5 &middot; master</span><label class="sw"><input type="checkbox" checked> Follow</label></div>
+<pre class="log" tabindex="0" aria-label="Live log"><span class="t">14:26:03</span> read nodes/runner.py
+<span class="t">14:26:09</span> edit nodes/runner.py  (+4 -2)
+<span class="t">14:26:31</span> run python3 nodes/build.py
+<span class="t">14:26:33</span> <span class="w">warn</span> onboard.ps1 embedded runner replaced
+<span class="t">14:26:40</span> edit nodes/onboard.sh  (re-embed)
+<span class="t">14:27:02</span> git commit -m "Re-embed runner in onboard scripts"
+<span class="t">14:27:05</span> waiting for gate...</pre>
+        </div>
+
+        <div class="panel" id="p-diff" role="tabpanel">
+          <div style="display:grid;grid-template-columns:220px 1fr">
+            <ul class="files" style="border-right:1px solid var(--line)">
+              <li class="sel"><span>nodes/runner.py</span><span>+4 -2</span></li>
+              <li><span>nodes/onboard.ps1</span><span>+9 -9</span></li>
+              <li><span>nodes/onboard.sh</span><span>+9 -9</span></li>
+            </ul>
+<pre class="diff" tabindex="0" aria-label="Diff of nodes/runner.py"><span class="h">@@ -212,7 +212,9 @@ def ensure_worker_tag():</span><span>     if TAG in current_tags():</span><span>         return</span><span class="d">-    run(["tailscale", "set", "--advertise-tags", TAG])</span><span class="a">+    # `set` rejects tags on Windows; `up` accepts them</span><span class="a">+    run(["tailscale", "up", "--advertise-tags", TAG,</span><span class="a">+         "--reset=false"])</span><span>     log("tag applied")</span></pre>
+          </div>
+        </div>
+
+        <div class="panel" id="p-find" role="tabpanel">
+          <div class="find"><span class="sev s-h">HIGH</span><div><b>Embedded runner out of sync</b><div class="sub">onboard.ps1 still carries the old runner, so Windows nodes would enroll with the old tag logic.</div></div></div>
+          <div class="find"><span class="sev s-m">MED</span><div><b>--reset=false not covered by a test</b><div class="sub">Add a runner test case so a later change cannot drop it silently.</div></div></div>
+          <div class="find"><span class="sev s-l">LOW</span><div><b>Comment wording</b><div class="sub">Name the Tailscale version where <span class="mono">set</span> changed behaviour.</div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="ctx" aria-label="Context">
+      <div class="card"><header><h2>Context</h2></header><div class="body">
+        <dl class="kv" style="margin:0">
+          <dt>Status</dt><dd><span class="pill p-warn">Blocked</span></dd>
+          <dt>Parent</dt><dd class="mono">t-700dbe6f</dd>
+          <dt>Node</dt><dd>master</dd>
+          <dt>Mode</dt><dd>auto-edit</dd>
+          <dt>Effort</dt><dd>medium</dd>
+          <dt>Gate</dt><dd class="mono">scripts/gate.sh</dd>
+          <dt>Started</dt><dd>14:11</dd>
+        </dl>
+      </div></div>
+      <div class="card"><header><h2>Budget rule</h2></header><div class="body">
+        <p class="sub">Fixes on claude-sonnet-5-5 allowed. 2 of 2 Claude jobs in use on fleet.</p>
+        <div class="bar"><i style="width:100%"></i></div>
+        <p class="muted" style="font-size:12px">The next job queues until a slot frees.</p>
+      </div></div>
+      <div class="card"><header><h2>Links</h2></header><div class="body">
+        <a href="#" class="mono">fleet/t-3f9a12c0</a>
+        <a href="#">docs/SPEC-ui-revamp.md</a>
+        <a href="#">Clean up branch after merge</a>
+      </div></div>
+    </aside>
+  </div>
+</section>
+
+<!-- VIEW 3: NODES -->
+<section class="view" id="v-nodes" aria-labelledby="h-nodes" data-crumb="Fleet / Nodes">
+  <div class="head">
+    <div><h1 id="h-nodes">Nodes</h1><p class="sub">Three machines enrolled. One is offline and has not reported posture since 11:04.</p></div>
+    <button class="btn primary">Add node</button>
+  </div>
+  <div class="stack">
+    <div class="card">
+      <table>
+        <thead><tr><th>Node</th><th>Health</th><th>Posture</th><th>Capacity</th><th class="n">Jobs</th><th>Models</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><b>master</b><div class="muted">darwin &middot; 64 GB</div></td><td><span class="pill p-ok">Healthy</span></td><td><span class="pill p-ok">All checks pass</span></td>
+            <td style="width:150px"><div class="bar" role="img" aria-label="memory 71 percent"><i style="width:71%"></i></div><div class="muted" style="font-size:12px">45 / 64 GB</div></td><td class="n">4 / 4</td>
+            <td class="mono">qwen2.5-coder:14b<br>glm-4.7-flash</td><td><button class="btn sm">Drain</button></td></tr>
+          <tr><td><b>duncan's macbook m1 pro</b><div class="muted">macOS &middot; 16 GB</div></td><td><span class="pill p-ok">Healthy</span></td><td><span class="pill p-warn">Disk encryption off</span></td>
+            <td><div class="bar warn" role="img" aria-label="memory 94 percent"><i style="width:94%"></i></div><div class="muted" style="font-size:12px">15 / 16 GB</div></td><td class="n">1 / 1</td>
+            <td class="mono">qwen2.5-coder:14b</td><td><button class="btn sm">Drain</button></td></tr>
+          <tr><td><b>laptop-0ir6d81o</b><div class="muted">windows &middot; 32 GB</div></td><td><span class="pill p-idle">Offline</span></td><td><span class="pill p-idle">Unknown</span></td>
+            <td><div class="bar" role="img" aria-label="no data"><i style="width:0"></i></div><div class="muted" style="font-size:12px">no data</div></td><td class="n">0 / 1</td>
+            <td class="muted">none loaded</td><td><button class="btn sm">Details</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Onboard a node</h2><span class="muted">Step 2 of 4</span></header>
+        <div class="wiz" aria-label="Onboarding steps">
+          <div><b>1. Enroll</b>Pick OS</div>
+          <div class="on"><b>2. Command</b>Run on the machine</div>
+          <div><b>3. Waiting</b>Node calls home</div>
+          <div><b>4. Approve</b>Owner only</div>
+        </div>
+        <div class="body stack" style="gap:var(--s3);padding-top:0">
+          <span class="muted">Windows (PowerShell)</span>
+          <code class="cmd">powershell -ExecutionPolicy Bypass -File .\onboard.ps1 -Controller https://master.tailnet.example</code>
+          <p class="muted">The policy bypass applies to that process only. The node then appears here and waits for approval.</p>
+        </div>
+      </div>
+      <div class="card">
+        <header><h2>Pending approval</h2></header>
+        <div class="empty"><b>No nodes waiting</b>New nodes appear here after they run the enrollment command.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-other" aria-labelledby="h-other" data-crumb="Not mocked">
+  <div class="head"><div><h1 id="h-other">Not part of this mock</h1><p class="sub">Plan, Budget, Models, Roles and Configure pages reuse the same primitives: header, card, table, pill, bar.</p></div></div>
+  <div class="card"><div class="empty"><b>Open Now, Work or Nodes</b>These three views carry the Workbench direction.</div></div>
+</section>
+
+</main>
+</div>
+</div>
+
+<script>
+(function(){
+  var views={now:'v-now',work:'v-work',nodes:'v-nodes'};
+  function show(k){
+    var id=views[k]||'v-other';
+    document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('on',v.id===id)});
+    document.querySelectorAll('.rail .nav').forEach(function(b){
+      if(b.dataset.go===k){b.setAttribute('aria-current','page')}else{b.removeAttribute('aria-current')}
+    });
+    document.getElementById('crumbs').innerHTML='<b>'+document.getElementById(id).dataset.crumb+'</b>';
+    window.scrollTo(0,0);
+  }
+  document.querySelectorAll('[data-go]').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.go)})});
+  document.querySelectorAll('.tabs button').forEach(function(t){t.addEventListener('click',function(){
+    var bar=t.parentNode;
+    bar.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-selected',x===t)});
+    bar.parentNode.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('on',p.id===t.dataset.p)});
+  })});
+  var tb=document.getElementById('theme'),root=document.documentElement;
+  tb.addEventListener('click',function(){
+    var d=root.dataset.theme!=='dark';
+    root.dataset.theme=d?'dark':'light';
+    tb.setAttribute('aria-pressed',d);
+    tb.textContent=d?'Light theme':'Dark theme';
+  });
+})();
+</script>
+</body>
+</html>

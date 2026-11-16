@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Fleet - Direction A: Ledger (mock)</title>
+<style>
+:root{
+  --bg:#f6f2ea; --panel:#fbf8f2; --ink:#1c1a17; --mute:#5c564c; --rule:#cfc7b8; --rule2:#e2dccf;
+  --acc:#1f3a5f; --acc-bg:#e6ebf2; --err:#9b2c1f; --err-bg:#f3e2de; --focus:#1f3a5f;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --t-xs:11px; --t-sm:12px; --t-md:13px; --t-lg:16px; --t-xl:22px;
+}
+[data-theme=dark]{
+  --bg:#141311; --panel:#1b1a17; --ink:#ece6da; --mute:#a39b8c; --rule:#3d3a33; --rule2:#2a2824;
+  --acc:#9dbbe6; --acc-bg:#222b38; --err:#f09b8d; --err-bg:#3a211d; --focus:#9dbbe6;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:var(--t-md)/1.4 var(--sans);font-variant-numeric:tabular-nums}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.n,th.n{font-family:var(--mono);font-variant-numeric:tabular-nums}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+button,input{font:inherit;color:inherit}
+.app{display:grid;grid-template-columns:208px 1fr;min-height:100vh}
+nav.rail{border-right:1px solid var(--rule);padding:12px 0;position:sticky;top:0;height:100vh;overflow:auto;background:var(--panel)}
+.brand{padding:0 16px 12px;font-weight:700;font-size:var(--t-lg);letter-spacing:.02em;border-bottom:1px solid var(--rule)}
+.brand small{display:block;font:var(--t-xs) var(--mono);color:var(--mute);font-weight:400;letter-spacing:0}
+.grp{padding:12px 16px 4px;font-size:var(--t-xs);text-transform:uppercase;letter-spacing:.1em;color:var(--mute)}
+.rail button.nav{display:flex;justify-content:space-between;width:100%;text-align:left;background:none;border:0;border-left:3px solid transparent;padding:4px 16px 4px 13px;cursor:pointer;color:var(--ink)}
+.rail button.nav:hover{background:var(--acc-bg)}
+.rail button.nav[aria-current=page]{border-left-color:var(--acc);background:var(--acc-bg);font-weight:600;color:var(--acc)}
+.rail .cnt{font:var(--t-xs) var(--mono);color:var(--mute)}
+.rail .cfg{padding:2px 16px;color:var(--mute);font-size:var(--t-sm)}
+header.top{display:flex;gap:12px;align-items:center;padding:8px 24px;border-bottom:1px solid var(--rule);position:sticky;top:0;background:var(--bg);z-index:2}
+.crumb{color:var(--mute);font-size:var(--t-sm)}
+.grow{flex:1}
+.k{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--rule);background:var(--panel);padding:3px 10px;cursor:pointer;min-width:240px;color:var(--mute);border-radius:2px}
+kbd{font:var(--t-xs) var(--mono);border:1px solid var(--rule);padding:0 5px;border-radius:2px;color:var(--ink);background:var(--bg)}
+.btn{border:1px solid var(--ink);background:transparent;padding:3px 10px;cursor:pointer;border-radius:2px}
+.btn:hover{background:var(--ink);color:var(--bg)}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:var(--bg)}
+.btn.pri:hover{background:var(--ink);border-color:var(--ink)}
+.btn.sm{padding:1px 8px;font-size:var(--t-sm)}
+.btn.dng{border-color:var(--err);color:var(--err)}
+.btn.dng:hover{background:var(--err);color:var(--bg)}
+main{padding:16px 24px 48px;max-width:1280px}
+.view{display:none}.view.on{display:block}
+h1{font-size:var(--t-xl);margin:4px 0 2px;font-weight:700;letter-spacing:-.01em}
+h2{font-size:var(--t-xs);text-transform:uppercase;letter-spacing:.1em;margin:24px 0 6px;padding-bottom:4px;border-bottom:2px solid var(--ink);display:flex;justify-content:space-between;color:var(--ink)}
+h2 span{font-weight:400;color:var(--mute);letter-spacing:0;text-transform:none}
+.sub{color:var(--mute);margin:0 0 8px}
+table{width:100%;border-collapse:collapse}
+th{font-size:var(--t-xs);text-transform:uppercase;letter-spacing:.06em;color:var(--mute);text-align:left;font-weight:600;padding:4px 8px;border-bottom:1px solid var(--rule)}
+td{padding:4px 8px;border-bottom:1px solid var(--rule2);vertical-align:top}
+th.n,td.n{text-align:right}
+tr.row:hover td{background:var(--acc-bg)}
+tr.sel td{background:var(--acc-bg)}
+a,.lnk{color:var(--acc);text-decoration:underline;text-underline-offset:2px;cursor:pointer;background:none;border:0;padding:0}
+.id{font-family:var(--mono);font-size:var(--t-sm)}
+.tag{font:var(--t-xs) var(--mono);border:1px solid var(--rule);padding:0 5px;border-radius:2px;white-space:nowrap}
+.tag.a{border-color:var(--acc);color:var(--acc)}
+.tag.e{border-color:var(--err);color:var(--err);background:var(--err-bg)}
+.mut{color:var(--mute)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--rule);background:var(--panel)}
+.stats div{padding:8px 12px;border-right:1px solid var(--rule)}.stats div:last-child{border:0}
+.stats b{display:block;font:700 var(--t-xl) var(--mono)}
+.stats span{font-size:var(--t-xs);text-transform:uppercase;letter-spacing:.08em;color:var(--mute)}
+.bar{height:6px;background:var(--rule2);border:1px solid var(--rule);width:100%;min-width:80px}
+.bar i{display:block;height:100%;background:var(--acc)}
+.bar.hi i{background:var(--err)}
+.alert{border:1px solid var(--err);border-left:4px solid var(--err);background:var(--err-bg);padding:8px 12px;margin:8px 0}
+.alert b{color:var(--err)}
+.empty{border:1px dashed var(--rule);padding:20px;text-align:center;color:var(--mute);background:var(--panel)}
+.empty b{display:block;color:var(--ink);font-size:var(--t-lg);margin-bottom:2px}
+.chain{display:grid;grid-template-columns:repeat(7,1fr);border:1px solid var(--ink);background:var(--panel);margin:8px 0}
+.st{padding:8px 10px;border-right:1px solid var(--rule);min-width:0}
+.st:last-child{border-right:0}
+.st .nm{font-size:var(--t-xs);text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+.st .md{font:var(--t-sm) var(--mono);overflow-wrap:anywhere}
+.st .ac{font-size:var(--t-xs);color:var(--mute)}
+.st .stt{font-size:var(--t-xs);margin-top:4px}
+.st.done{border-top:4px solid var(--ink)}
+.st.run{border-top:4px solid var(--acc);background:var(--acc-bg)}
+.st.fail{border-top:4px solid var(--err);background:var(--err-bg)}
+.st.plan{border-top:4px dotted var(--mute);color:var(--mute)}
+.st.run .nm{color:var(--acc)}.st.fail .nm{color:var(--err)}
+pre{margin:0;font:var(--t-sm)/1.45 var(--mono);background:var(--panel);border:1px solid var(--rule);padding:8px 12px;overflow:auto;max-height:260px}
+pre span{display:block}
+.add{background:var(--acc-bg)}.del{color:var(--err);background:var(--err-bg)}.hk{color:var(--mute)}
+.find{border:1px solid var(--rule);border-left-width:4px;padding:6px 10px;margin:6px 0;background:var(--panel)}
+.find.H{border-left-color:var(--err)}.find.M{border-left-color:var(--ink)}.find.L{border-left-color:var(--mute)}
+.find .sv{font:700 var(--t-xs) var(--mono);margin-right:8px}.find.H .sv{color:var(--err)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--ink);border-bottom:1px solid var(--rule);margin:12px 0;align-items:center}
+.actions input{border:1px solid var(--rule);background:var(--panel);padding:3px 8px;flex:1;min-width:200px;border-radius:2px}
+.actions .sep{width:1px;height:20px;background:var(--rule)}
+.wiz{display:flex;border:1px solid var(--rule);background:var(--panel)}
+.wiz div{flex:1;padding:6px 10px;border-right:1px solid var(--rule);font-size:var(--t-sm)}
+.wiz div:last-child{border-right:0}.wiz .cur{background:var(--acc-bg);color:var(--acc);font-weight:700}
+@media(max-width:900px){.app{grid-template-columns:1fr}nav.rail{position:static;height:auto}.two{grid-template-columns:1fr}.chain{grid-template-columns:repeat(2,1fr)}.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand">AI Fleet<small>ledger / master @ darwin</small></div>
+  <div class="grp">Operate</div>
+  <button class="nav" data-v="now" aria-current="page"><span>Now</span><span class="cnt">2</span></button>
+  <button class="nav" data-v="work"><span>Work</span><span class="cnt">12</span></button>
+  <button class="nav" data-v="none"><span>Plan</span><span class="cnt">7</span></button>
+  <div class="grp">Spend</div>
+  <button class="nav" data-v="none"><span>Budget</span><span class="cnt">41%</span></button>
+  <div class="grp">Fleet</div>
+  <button class="nav" data-v="nodes"><span>Nodes</span><span class="cnt">3</span></button>
+  <button class="nav" data-v="none"><span>Models</span><span class="cnt">7</span></button>
+  <button class="nav" data-v="none"><span>Roles</span><span class="cnt">5</span></button>
+  <div class="grp">Configure</div>
+  <div class="cfg">Policies</div><div class="cfg">Skills</div><div class="cfg">Evals runs</div><div class="cfg">Activity</div><div class="cfg">Settings</div>
+</nav>
+<div>
+<header class="top">
+  <span class="crumb" id="crumb">Operate / Now</span>
+  <span class="grow"></span>
+  <button class="k" aria-label="Open command palette"><span>Search tasks, nodes, actions</span><span class="grow"></span><kbd>⌘K</kbd></button>
+  <span class="crumb">admin</span>
+  <button class="btn sm" id="theme" aria-pressed="false">Dark</button>
+</header>
+<main>
+
+<!-- NOW -->
+<section class="view on" id="v-now" aria-label="Now">
+  <h1>Now</h1>
+  <p class="sub">Mon 16 Nov 2026, 14:07 SAST. <span class="num">5</span> tasks running, <span class="num">2</span> need you.</p>
+  <div class="stats">
+    <div><b>5</b><span>Running</span></div>
+    <div><b>2</b><span>Need you</span></div>
+    <div><b>2/3</b><span>Nodes online</span></div>
+    <div><b>41%</b><span>Budget today</span></div>
+  </div>
+
+  <div class="alert" role="alert"><b>ERROR</b> Codex limit hit on task <span class="id">t-9d04be71</span>: 5-hour window 100% used, resets 16:42. Work re-routed to claude-sonnet-5-5. <button class="lnk">Open task</button></div>
+
+  <h2>Needs you <span class="num">2</span></h2>
+  <table>
+    <thead><tr><th>Task</th><th>Why</th><th>Model / account</th><th class="n">Waiting</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr class="row"><td class="id">t-7b1c20e4</td><td>Awaiting approval: full-mode spawn on duncan's macbook m1 pro</td><td><span class="tag">codex gpt-5.6-terra</span> <span class="tag">fleet</span></td><td class="n">00:12:40</td><td><button class="btn sm pri">Approve</button> <button class="btn sm">Reject</button></td></tr>
+      <tr class="row"><td class="id">t-3f9a12c0</td><td>Gate failed 2 of 3 rounds; one left before escalation</td><td><span class="tag">claude-sonnet-5-5</span> <span class="tag">fleet</span></td><td class="n">00:41:02</td><td><button class="btn sm" data-go="work">Open</button></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Running <span class="num">5</span></h2>
+  <table>
+    <thead><tr><th>Task</th><th>Kind</th><th>Stage</th><th>Model</th><th>Acct</th><th>Node</th><th class="n">Elapsed</th><th class="n">Tokens</th></tr></thead>
+    <tbody>
+      <tr class="row"><td class="id"><a href="#" data-go="work">t-3f9a12c0</a></td><td>fix</td><td>fix</td><td class="id">claude-sonnet-5-5</td><td>fleet</td><td>master</td><td class="n">00:18:22</td><td class="n">212,480</td></tr>
+      <tr class="row"><td class="id">t-85c00e13</td><td>draft</td><td>spec</td><td class="id">claude-sonnet-5-5</td><td>fleet</td><td>master</td><td class="n">00:04:10</td><td class="n">38,902</td></tr>
+      <tr class="row"><td class="id">t-c2e4770a</td><td>review</td><td>review</td><td class="id">claude-fable-5-2</td><td>spare</td><td>master</td><td class="n">00:06:51</td><td class="n">71,330</td></tr>
+      <tr class="row"><td class="id">t-1a88f3d6</td><td>build</td><td>build</td><td class="id">qwen2.5-coder:14b</td><td>local</td><td>duncan's macbook m1 pro</td><td class="n">00:22:09</td><td class="n">9,114</td></tr>
+      <tr class="row"><td class="id">t-6e50bb12</td><td>check</td><td>gate</td><td class="id">glm-4.7-flash</td><td>local</td><td>master</td><td class="n">00:01:33</td><td class="n">2,408</td></tr>
+    </tbody>
+  </table>
+
+  <div class="two">
+  <div>
+    <h2>Machines <span><a href="#" data-go="nodes">all nodes</a></span></h2>
+    <table>
+      <thead><tr><th>Node</th><th>OS</th><th class="n">Jobs</th><th>Load</th></tr></thead>
+      <tbody>
+        <tr class="row"><td>master</td><td>darwin</td><td class="n">4/4</td><td><div class="bar hi" role="img" aria-label="100%"><i style="width:100%"></i></div></td></tr>
+        <tr class="row"><td>duncan's macbook m1 pro</td><td>macOS</td><td class="n">1/2</td><td><div class="bar" role="img" aria-label="50%"><i style="width:50%"></i></div></td></tr>
+        <tr class="row"><td>laptop-0ir6d81o</td><td>windows</td><td class="n">0/2</td><td><span class="tag e">offline</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div>
+    <h2>Accounts <span>5h / week</span></h2>
+    <table>
+      <thead><tr><th>Account</th><th>5h</th><th>Week</th><th class="n">Resets</th></tr></thead>
+      <tbody>
+        <tr><td>fleet</td><td><div class="bar" role="img" aria-label="58%"><i style="width:58%"></i></div></td><td><div class="bar" role="img" aria-label="31%"><i style="width:31%"></i></div></td><td class="n">17:20</td></tr>
+        <tr><td>spare</td><td><div class="bar" role="img" aria-label="12%"><i style="width:12%"></i></div></td><td><div class="bar" role="img" aria-label="9%"><i style="width:9%"></i></div></td><td class="n">18:05</td></tr>
+        <tr><td>codex</td><td><div class="bar hi" role="img" aria-label="100%"><i style="width:100%"></i></div></td><td><div class="bar" role="img" aria-label="64%"><i style="width:64%"></i></div></td><td class="n">16:42</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </div>
+
+  <h2>Alerts <span>last 24 h</span></h2>
+  <div class="empty"><b>No other alerts</b>Policy, budget and node checks are clean. Limit events show above while active.</div>
+</section>
+
+<!-- WORK DETAIL -->
+<section class="view" id="v-work" aria-label="Work item detail">
+  <div class="crumb">Work / <span class="id">t-3f9a12c0</span></div>
+  <h1>Re-embed runner in onboard scripts <span class="tag a">running</span></h1>
+  <p class="sub">Root <span class="id">t-3f9a12c0</span> · branch <span class="id">fleet/t-3f9a12c0</span> · node master · opened 13:41 · attempt <span class="num">3</span> of 3</p>
+
+  <div class="chain" role="list" aria-label="Chain">
+    <div class="st done" role="listitem"><div class="nm">Spec</div><div class="md">claude-fable-5-2</div><div class="ac">acct spare</div><div class="stt">done 00:06</div></div>
+    <div class="st done" role="listitem"><div class="nm">Build</div><div class="md">claude-sonnet-5-5</div><div class="ac">acct fleet</div><div class="stt">done 00:31</div></div>
+    <div class="st fail" role="listitem"><div class="nm">Gate</div><div class="md">fleet-gate</div><div class="ac">node master</div><div class="stt">FAILED x2</div></div>
+    <div class="st done" role="listitem"><div class="nm">Review</div><div class="md">claude-fable-5-2</div><div class="ac">acct spare</div><div class="stt">2 HIGH 1 MED</div></div>
+    <div class="st run" role="listitem"><div class="nm">Fix</div><div class="md">claude-sonnet-5-5</div><div class="ac">acct fleet</div><div class="stt">running 00:18</div></div>
+    <div class="st plan" role="listitem"><div class="nm">Final</div><div class="md">codex gpt-5.6-terra</div><div class="ac">high effort</div><div class="stt">planned</div></div>
+    <div class="st plan" role="listitem"><div class="nm">Merge</div><div class="md">claude-haiku-5-5</div><div class="ac">acct fleet</div><div class="stt">planned</div></div>
+  </div>
+
+  <div class="actions" role="toolbar" aria-label="Actions">
+    <input aria-label="Message to task" placeholder="Message task (same session)">
+    <button class="btn pri">Send</button><span class="sep"></span>
+    <button class="btn">Approve</button><button class="btn">Reject</button>
+    <button class="btn">Spawn follow-up</button><button class="btn">Handoff</button>
+    <button class="btn">Resolve</button><button class="btn dng">Cancel</button>
+  </div>
+
+  <div class="two">
+  <div>
+    <h2>Attempts <span>tokens per attempt</span></h2>
+    <table>
+      <thead><tr><th class="n">#</th><th>Task</th><th>Model</th><th>Result</th><th class="n">In</th><th class="n">Out</th><th class="n">Cost</th></tr></thead>
+      <tbody>
+        <tr class="row"><td class="n">1</td><td class="id">t-3f9a12c0</td><td class="id">sonnet-5-5</td><td><span class="tag e">gate fail</span></td><td class="n">148,210</td><td class="n">22,904</td><td class="n">$0.79</td></tr>
+        <tr class="row"><td class="n">2</td><td class="id">t-5d71e0b8</td><td class="id">sonnet-5-5</td><td><span class="tag e">gate fail</span></td><td class="n">171,660</td><td class="n">18,332</td><td class="n">$0.79</td></tr>
+        <tr class="row sel"><td class="n">3</td><td class="id">t-a40c93f2</td><td class="id">sonnet-5-5</td><td><span class="tag a">running</span></td><td class="n">190,114</td><td class="n">22,366</td><td class="n">$0.91</td></tr>
+        <tr><td></td><td colspan="3"><b>Total</b></td><td class="n"><b>509,984</b></td><td class="n"><b>63,602</b></td><td class="n"><b>$2.49</b></td></tr>
+      </tbody>
+    </table>
+
+    <h2>Gate <span>attempt 2</span></h2>
+<pre><span>Ran 41 tests in 12.8s</span><span class="del">FAILED (failures=1)</span><span class="del">FAIL: test_onboard.test_embedded_runner_matches</span><span class="hk">  runner.py hash 9c1e... != onboard.sh hash 4ab7...</span></pre>
+  </div>
+
+  <div>
+    <h2>Findings <span><span class="num">2</span> HIGH · <span class="num">1</span> MED · <span class="num">1</span> LOW</span></h2>
+    <div class="find H"><span class="sv">HIGH</span><b>onboard.ps1 not rebuilt.</b> <span class="mut">nodes/onboard.ps1:212</span><br>Runner changed but build.py output not committed for the PowerShell copy.</div>
+    <div class="find H"><span class="sv">HIGH</span><b>Stale embed in onboard.sh.</b> <span class="mut">nodes/onboard.sh:340</span><br>Hash differs from nodes/runner.py.</div>
+    <div class="find M"><span class="sv">MED</span><b>Retry swallows exit code.</b> <span class="mut">nodes/runner.py:118</span></div>
+    <div class="find L"><span class="sv">LOW</span><b>Unused import.</b> <span class="mut">nodes/runner.py:9</span></div>
+  </div>
+  </div>
+
+  <div class="two">
+  <div>
+    <h2>Log <span>following · <button class="lnk">pause</button></span></h2>
+<pre><span class="hk">14:03:11 task started on master</span><span>14:03:14 read nodes/runner.py</span><span>14:04:02 edit nodes/runner.py (+6 -2)</span><span>14:04:40 run python3 nodes/build.py</span><span>14:04:41 wrote nodes/onboard.sh nodes/onboard.ps1</span><span>14:05:09 git commit -m "Re-embed runner"</span><span class="hk">14:05:10 waiting for gate...</span></pre>
+  </div>
+  <div>
+    <h2>Diff <span class="num">3 files · +14 -4</span></h2>
+<pre><span class="hk">nodes/runner.py</span><span class="hk">@@ -116,4 +116,8 @@</span><span class="del">-    return proc.returncode or 0</span><span class="add">+    if proc.returncode:</span><span class="add">+        log.error("exit %s", proc.returncode)</span><span class="add">+    return proc.returncode</span><span class="hk">nodes/onboard.sh  (+5 -1)   nodes/onboard.ps1  (+5 -1)</span></pre>
+  </div>
+  </div>
+</section>
+
+<!-- NODES -->
+<section class="view" id="v-nodes" aria-label="Nodes">
+  <h1>Nodes</h1>
+  <p class="sub"><span class="num">3</span> enrolled · <span class="num">2</span> online · <span class="num">1</span> offline · <span class="num">1</span> posture warning</p>
+  <table>
+    <thead><tr><th>Node</th><th>OS</th><th>Posture</th><th>Health</th><th>Capacity</th><th class="n">Jobs</th><th>Models</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr class="row"><td><b>master</b></td><td>darwin</td><td><span class="tag">pass 6/6</span></td><td><span class="tag a">online</span> <span class="mut num">12s ago</span></td><td><div class="bar hi" role="img" aria-label="Capacity 100%"><i style="width:100%"></i></div></td><td class="n">4/4</td><td class="id">qwen2.5-coder:14b, glm-4.7-flash</td><td><button class="btn sm">Drain</button></td></tr>
+      <tr class="row"><td><b>duncan's macbook m1 pro</b></td><td>macOS</td><td><span class="tag e">warn 5/6</span> <span class="mut">disk encryption off</span></td><td><span class="tag a">online</span> <span class="mut num">4s ago</span></td><td><div class="bar" role="img" aria-label="Capacity 50%"><i style="width:50%"></i></div></td><td class="n">1/2</td><td class="id">qwen2.5-coder:14b</td><td><button class="btn sm">Drain</button></td></tr>
+      <tr class="row"><td><b>laptop-0ir6d81o</b></td><td>windows</td><td><span class="tag">pass 6/6</span></td><td><span class="tag e">offline</span> <span class="mut num">since 11:52</span></td><td class="mut">n/a</td><td class="n">0/2</td><td class="mut">none reachable</td><td><button class="btn sm">Details</button></td></tr>
+    </tbody>
+  </table>
+  <div class="alert" role="alert"><b>ERROR</b> laptop-0ir6d81o: heartbeat lost for <span class="num">2h 15m</span>. Tailscale reports node offline. 0 tasks lost. <button class="lnk">Re-check</button></div>
+
+  <h2>Add a node <span>onboarding wizard</span></h2>
+  <div class="wiz" aria-label="Onboarding steps">
+    <div>1 Enroll</div><div class="cur" aria-current="step">2 Run command</div><div>3 Waiting for node</div><div>4 Approve</div>
+  </div>
+  <p class="sub" style="margin-top:8px">Run on the new machine (Windows, PowerShell):</p>
+<pre>powershell -NoProfile -ExecutionPolicy Bypass -Command "irm http://master:8080/onboard.ps1 | iex"</pre>
+  <div class="actions"><button class="btn pri">Copy command</button><button class="btn">macOS / Linux</button><span class="mut">Approval is admin-only.</span></div>
+  <div class="empty"><b>No nodes waiting for approval</b>A node appears here once it runs the command and reports in.</div>
+</section>
+
+</main>
+</div>
+</div>
+<script>
+(function(){
+  var names={now:"Operate / Now",work:"Operate / Work / t-3f9a12c0",nodes:"Fleet / Nodes"};
+  function show(v){
+    if(!names[v])return;
+    document.querySelectorAll('.view').forEach(function(s){s.classList.toggle('on',s.id==='v-'+v);});
+    document.querySelectorAll('button.nav').forEach(function(b){
+      if(b.dataset.v===v)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');
+    });
+    document.getElementById('crumb').textContent=names[v];
+  }
+  document.querySelectorAll('[data-v]').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.v);});});
+  document.querySelectorAll('[data-go]').forEach(function(b){b.addEventListener('click',function(e){e.preventDefault();show(b.dataset.go);});});
+  var t=document.getElementById('theme'),r=document.documentElement;
+  t.addEventListener('click',function(){
+    var d=r.getAttribute('data-theme')==='dark';
+    r.setAttribute('data-theme',d?'light':'dark');
+    t.textContent=d?'Dark':'Light';t.setAttribute('aria-pressed',String(!d));
+  });
+})();
+</script>
+</body>
+</html>

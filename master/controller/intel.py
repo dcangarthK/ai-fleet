@@ -30,7 +30,7 @@ KIND_PREFERENCE = {
 }
 PREF_POINTS = (40, 30, 20, 10)
 FABLE_NEVER = {"build", "fix", "test", "merge", "benchmark", "draft", "check"}
-CODEX_NEVER = {"merge", "benchmark", "check", "draft", "re_review", "test"}
+CODEX_KINDS = {"final_review", "security_review", "build", "lead"}  # allowlist: Codex does nothing else
 LOCAL_KINDS = {"draft", "check", "review"}
 TIER_COST = {"cheap": 0, "standard": -5, "premium": -15, "scarce": -10}
 DEFAULT_ESTIMATE = {"build": 400_000, "fix": 250_000, "test": 150_000, "review": 150_000, "re_review": 60_000,
@@ -76,7 +76,9 @@ def _kind_ok(entry: dict, kind: str) -> bool:
 # ---------- R1 ranking ----------
 
 def rank(kind: str, *, rules: dict, stats: dict, headroom: dict, load: dict, prompt_bytes: int = 0,
-         exclude=(), history=()) -> list[dict]:
+         exclude=(), history=(), allowed=None) -> list[dict]:
+    """`allowed(key, kind)` decides rules eligibility for a candidate; callers pass one that tests the concrete
+    identity the task will be spawned as (budget.match_key/kind_allowed), so ranking equals admission."""
     near = (rules.get("limits") or {}).get("near_limit_percent", 85)
     prefs = KIND_PREFERENCE.get(kind, [])
     now = time.time()
@@ -87,12 +89,13 @@ def rank(kind: str, *, rules: dict, stats: dict, headroom: dict, load: dict, pro
         used = head.get("used_percent")
         entry = _rule_for(rules, key)
         no, why, score = [], [], 0.0
-        if entry is not None and not _kind_ok(entry, kind):
+        ok_by_rules = allowed(key, kind) if allowed else (entry is None or _kind_ok(entry, kind))
+        if not ok_by_rules:
             no.append(f"{kind} not allowed for {key} by rules")
         if agent == "claude" and "fable" in (model or "") and kind in FABLE_NEVER:
             no.append(f"rule 0: Fable never does {kind}")
-        if agent == "codex" and kind in CODEX_NEVER:
-            no.append(f"Codex never does {kind}")
+        if agent == "codex" and kind not in CODEX_KINDS:
+            no.append(f"Codex only does {', '.join(sorted(CODEX_KINDS))}, not {kind}")
         if agent == "local":
             if kind not in LOCAL_KINDS:
                 no.append(f"local roles only do draft, check, first-pass review, not {kind}")
@@ -212,10 +215,10 @@ def _entry(c: dict, kind: str) -> dict:
 
 
 def suggest(kind: str, refused_key: str, rules: dict, headroom: dict, load: dict, security: bool = False,
-            round_reviewer: str | None = None) -> list[dict]:
+            round_reviewer: str | None = None, allowed=None) -> list[dict]:
     """R5. A refused Codex re_review: the round reviewer's model if eligible, else the top re_review candidate;
     plus codex security_review only when security=True."""
-    ranked = rank(kind, rules=rules, stats={}, headroom=headroom, load=load, exclude=(refused_key,))
+    ranked = rank(kind, rules=rules, stats={}, headroom=headroom, load=load, exclude=(refused_key,), allowed=allowed)
     cands = [c for c in ranked if c["eligible"]]
     special = kind == "re_review" and split_key(refused_key)[0] == "codex"
     if special and round_reviewer:
@@ -226,7 +229,7 @@ def suggest(kind: str, refused_key: str, rules: dict, headroom: dict, load: dict
     picks = [_entry(c, kind) for c in cands]
     picks = picks[:2] if special else picks[:3]
     if special and security:
-        sec = [c for c in rank("security_review", rules=rules, stats={}, headroom=headroom, load=load)
+        sec = [c for c in rank("security_review", rules=rules, stats={}, headroom=headroom, load=load, allowed=allowed)
                if c["key"] == "codex" and c["eligible"]]
         if sec:
             picks.append(_entry(sec[0], "security_review"))

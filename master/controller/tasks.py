@@ -1486,13 +1486,15 @@ def auto_pick(t: "TaskIn") -> int | None:
         import intel
         import intel_routes
         rules = budget.current_rules()
+        allowed = intel_routes.admission_allowed(rules)
         headroom, load = _intel_view(rules)
         with db() as c:
             exclude = intel_routes.exclusion(c, kind, t.parent_id or t.review_of)
             stats = intel_routes.build_stats(c)
         cands = intel.rank(kind, rules=rules, stats=stats, headroom=headroom, load=load,
-                           prompt_bytes=len(t.prompt.encode()), exclude=exclude)
-        ok = [x for x in cands if x["eligible"]]
+                           prompt_bytes=len(t.prompt.encode()), exclude=exclude,
+                           allowed=allowed)
+        ok = [x for x in cands if x["eligible"] and allowed(x["key"], kind)]
         pick = next((x for x in ok if not x["key"].startswith("local:")), None)
         if pick and ok[0] is not pick:
             pick["reasons"] = [*pick["reasons"], f"top candidate {ok[0]['key']} is local; agent tasks need a paid model"]
@@ -1519,6 +1521,7 @@ def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: di
         return refusal.detail
     try:
         import intel
+        import intel_routes
         headroom, load = _intel_view(rules)
         security = any(g in t.prompt for g in (rules.get("reviews") or {}).get("security_paths") or [])
         round_reviewer = None
@@ -1528,7 +1531,8 @@ def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: di
             if p and p["kind"] == "review":
                 round_reviewer = intel.key_of(p["agent"], p["model"])
         suggest = intel.suggest(kind, intel.key_of(t.agent, t.model), rules, headroom, load, security=security,
-                                round_reviewer=round_reviewer)
+                                round_reviewer=round_reviewer,
+                                allowed=intel_routes.admission_allowed(rules))
         if suggest:
             return {"error": refusal.detail, "suggest": suggest}
     except Exception:

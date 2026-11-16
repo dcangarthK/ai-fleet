@@ -20,6 +20,21 @@ router = APIRouter()
 REVIEW_KINDS = ("review", "re_review", "final_review", "security_review")
 
 
+CONCRETE_MODEL = {"codex": "gpt-5.6-terra"}  # the model auto_pick assigns when a candidate names none
+
+
+def admission_allowed(rules: dict):
+    """allowed(key, kind) for intel.rank: judged on the concrete identity the task is spawned as, with the same
+    budget.match_key / budget.kind_allowed that budget.admit uses."""
+    def allowed(key: str, kind: str) -> bool:
+        agent, model = intel.split_key(key)
+        model = model or CONCRETE_MODEL.get(agent)
+        rkey = budget.match_key(rules, agent, model)
+        entry = budget.entry_for(rules, rkey, agent) if rkey else {}
+        return budget.kind_allowed(entry, kind) if entry else True  # no rule: admit() has nothing to refuse on
+    return allowed
+
+
 def _ready(c):
     intel.ensure_schema(c)
     return c
@@ -83,7 +98,7 @@ def context(c, kind: str, parent_id: str | None = None) -> dict:
         for key in intel.CANDIDATES:
             if intel.split_key(key)[0] == agent:
                 headroom[key] = dict(entry)
-    return {"rules": rules, "stats": stats, "headroom": headroom, "load": load,
+    return {"rules": rules, "allowed": admission_allowed(rules), "stats": stats, "headroom": headroom, "load": load,
             "exclude": exclusion(c, kind, parent_id), "history": intel.history(c, now - 30 * 86400)}
 
 
@@ -154,9 +169,35 @@ def _is_merged(repo: str | None, branch: str) -> bool:
 
 def _cleanable(c) -> list[dict]:
     rows = [dict(r) for r in c.execute(
-        "SELECT id, state, branch, repo, node_id, worktree FROM tasks WHERE state IN ('done','failed','cancelled') "
+        "SELECT id, state, branch, repo, node_id, worktree, cwd FROM tasks WHERE state IN ('done','failed','cancelled') "
         "AND worktree IS NOT NULL ORDER BY created_at DESC LIMIT 300")]
     return intel.cleanup_candidates(rows, _is_merged)
+
+
+def _recheck(task_id: str) -> str | None:
+    """Fresh check right before a removal. None = safe; else the reason to skip. Failed/cancelled tasks pass only
+    when the branch has commits beyond main and is an ancestor of main (_is_merged); a worktree that exists on this
+    machine must have a clean `git status`; a non-local one is only removable when the task is done."""
+    import os
+    with db() as c:
+        r = c.execute("SELECT state, branch, repo, cwd FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not r:
+        return "task gone"
+    if r["state"] not in intel.TERMINAL:
+        return f"state {r['state']}"
+    if not _is_merged(r["repo"], r["branch"]):
+        return "unmerged"
+    cwd = r["cwd"]
+    if cwd and os.path.isdir(cwd):
+        try:
+            st = subprocess.run(["git", "-C", cwd, "status", "--porcelain"], capture_output=True, text=True, timeout=20)
+        except Exception:  # noqa: BLE001 - cannot prove it is clean
+            return "dirty"
+        if st.returncode != 0 or st.stdout.strip():
+            return "dirty"
+    elif r["state"] != "done":
+        return f"worktree not local and state is {r['state']}"
+    return None
 
 
 @router.get("/api/intel/cleanup")
@@ -173,8 +214,15 @@ async def cleanup_run() -> dict:
         with db() as c:
             return _cleanable(_ready(c))
     found = await asyncio.to_thread(find)
-    done, failed = [], []
+    done, failed, skipped = [], [], []
     for t in found:
+        why = await asyncio.to_thread(_recheck, t["id"])
+        if why:
+            skipped.append({"id": t["id"], "reason": why})
+            with db() as c:
+                intel.record(_ready(c), task_id=t["id"], kind="cleanup", action="cleanup_skip", chosen=t.get("branch"),
+                             candidates=[], reasons=[why])
+            continue
         try:
             await tasks.cleanup(t["id"])
             with db() as c:
@@ -185,7 +233,7 @@ async def cleanup_run() -> dict:
             failed.append({"id": t["id"], "error": e.detail})
         except Exception as e:  # noqa: BLE001 - one bad item never stops the rest
             failed.append({"id": t["id"], "error": f"{e.__class__.__name__}: {e}"})
-    return {"cleaned": done, "failed": failed}
+    return {"cleaned": done, "failed": failed, "skipped": skipped}
 
 
 @router.get("/api/intel/savings")

@@ -303,10 +303,6 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 400, r.text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewFixTests(unittest.TestCase):
     def test_h1_codex_builder_with_model_excluded_from_review_pick(self):
         import intel_routes
@@ -377,8 +373,9 @@ class ReviewFixTests(unittest.TestCase):
         import intel_routes
         import tasks
         calls = []
-        orig_c, orig_f = intel_routes._cleanable, tasks.cleanup
+        orig_c, orig_f, orig_r = intel_routes._cleanable, tasks.cleanup, intel_routes._recheck
         intel_routes._cleanable = lambda c: [dict(id="a", branch="b1"), dict(id="b", branch="b2")]
+        intel_routes._recheck = lambda tid: None
 
         async def fake(tid):
             calls.append(tid)
@@ -388,7 +385,68 @@ class ReviewFixTests(unittest.TestCase):
         try:
             out = asyncio.run(intel_routes.cleanup_run())
         finally:
-            intel_routes._cleanable, tasks.cleanup = orig_c, orig_f
+            intel_routes._cleanable, tasks.cleanup, intel_routes._recheck = orig_c, orig_f, orig_r
         self.assertEqual(calls, ["a", "b"])
         self.assertEqual(out["cleaned"], ["b"])
         self.assertEqual(out["failed"][0]["id"], "a")
+
+
+class FinalReviewFixTests(unittest.TestCase):
+    def test_h1_model_specific_rule_refuses_concrete_identity(self):
+        import intel_routes
+        rules = dict(RULES, models=dict(RULES["models"], **{
+            "codex:gpt-5.6-terra": dict(tier="scarce", max_concurrent=1, kinds=["review"])}))
+        allowed = intel_routes.admission_allowed(rules)
+        self.assertFalse(allowed("codex", "build"))
+        out = rank("build", rules=rules, allowed=allowed)
+        self.assertFalse(pick(out, "codex")["eligible"])
+        self.assertNotEqual(next(c for c in out if c["eligible"])["key"], "codex")
+
+    def test_h2_codex_allowlist(self):
+        for kind in ("fix", "review", "re_review", "test", "merge", "draft", "check", "benchmark"):
+            self.assertFalse(pick(rank(kind), "codex")["eligible"], kind)
+            self.assertFalse(any(x["agent"] == "codex" for x in intel.suggest(kind, SONNET, RULES, local_up(), {})), kind)
+        for kind in ("final_review", "security_review", "build", "lead"):
+            self.assertTrue(pick(rank(kind), "codex")["eligible"], kind)
+        self.assertFalse(pick(rank("fix", rules=dict(models={}, limits={})), "codex")["eligible"])
+
+    def test_h3_dirty_worktree_skipped(self):
+        import asyncio
+        import subprocess
+        import intel_routes
+        import tasks
+        from store import db, init_db
+        init_db()
+        repo = str(TMP / "h3clean")
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        run = lambda *a: subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True)  # noqa: E731
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        run(*ident, "commit", "--allow-empty", "-m", "i")
+        run(*ident, "commit", "--allow-empty", "-m", "m2")
+        run("branch", "fleet/merged", "HEAD~1")
+        (Path(repo) / "scratch.txt").write_text("x")  # untracked file: dirty
+        with db() as c:
+            for tid, state, cwd in (("h3dirty", "done", repo), ("h3remote_failed", "failed", str(TMP / "nowhere")),
+                                    ("h3remote_done", "done", str(TMP / "nowhere"))):
+                c.execute("INSERT INTO tasks (id, agent, state, branch, repo, node_id, worktree, cwd, created_at) "
+                          "VALUES (?,'claude',?,'fleet/merged',?,'master','w',?,?)", (tid, state, repo, cwd, time.time()))
+        self.assertEqual(intel_routes._recheck("h3dirty"), "dirty")
+        self.assertIn("not local", intel_routes._recheck("h3remote_failed"))
+        self.assertIsNone(intel_routes._recheck("h3remote_done"))
+        calls = []
+
+        async def fake(tid):
+            calls.append(tid)
+        orig_c, orig_f = intel_routes._cleanable, tasks.cleanup
+        intel_routes._cleanable = lambda c: [dict(id="h3dirty", branch="fleet/merged")]
+        tasks.cleanup = fake
+        try:
+            out = asyncio.run(intel_routes.cleanup_run())
+        finally:
+            intel_routes._cleanable, tasks.cleanup = orig_c, orig_f
+        self.assertEqual(calls, [])
+        self.assertEqual(out["skipped"], [{"id": "h3dirty", "reason": "dirty"}])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -414,6 +414,8 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
     """Delegate work to an agent on the fleet and return immediately with the task.
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
+    model: optional; 'auto' lets the controller pick the best eligible model for `kind` (kind required; the choice
+          is recorded, admission still runs). Returns a trimmed view; FLEET_MCP_TRIM=0 returns the whole row.
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
     mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
           | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
@@ -437,7 +439,47 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                  "independence": independence, "independence_reason": independence_reason}.items():
         if v:
             body[k] = v
-    return _controller("POST", "/api/tasks", body, scope="operate")
+    out = _controller("POST", "/api/tasks", body, scope="operate")
+    if not _trim_on(False):
+        return out
+    try:
+        row = json.loads(out)
+        keys = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
+        return json.dumps({k: row[k] for k in keys if k in row}, indent=2)
+    except (ValueError, TypeError):
+        return out  # an error string
+
+
+@mcp.tool()
+def estimate_task(kind: str, model: str = "", prompt_bytes: int = 0) -> str:
+    """Before spawning: ranked candidates and a cost estimate for a kind (top 3, one line each).
+    model: optional, 'agent:model' (e.g. 'claude:claude-sonnet-5-5') or 'codex'."""
+    body: dict = {"kind": kind, "prompt_bytes": prompt_bytes}
+    if model:
+        agent, _, name = model.partition(":")
+        body.update({"agent": agent, "model": name} if name else {"agent": agent})
+    out = _controller("POST", "/api/intel/estimate", body, scope="operate")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return out
+    lines = [f"{c.get('key')} {'ok' if c.get('eligible') else 'no'} score={c.get('score')} "
+             f"~{c.get('est_tokens')} tok usd={c.get('est_usd')} - {'; '.join(c.get('reasons') or [])[:120]}"
+             for c in (data.get("candidates") or [])[:3]]
+    est = data.get("chosen_estimate") or {}
+    lines.append(f"estimate: {est.get('tokens')} tok, usd {est.get('usd')} ({est.get('basis')}, n={est.get('samples')})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def intel_savings() -> str:
+    """Current vs baseline paid-token use: one line per delta."""
+    out = _controller("GET", "/api/intel/savings", scope="operate")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return out
+    return "\n".join(f"{k}: {v}" for k, v in (data.get("delta") or {}).items()) or out
 
 
 @mcp.tool()

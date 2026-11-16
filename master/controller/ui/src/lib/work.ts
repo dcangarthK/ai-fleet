@@ -228,7 +228,8 @@ function isFindingHead(opener: string, delim: string, title: string): boolean {
   const closed = /[\]):*]/.test(delim);
   if (o && !o.startsWith("#") && closed) return true;
   if (!title.trim()) return false;
-  return /:/.test(delim) || /[\-–—]\s$/.test(delim) || /[\-–—]\s/.test(delim);
+  // A dash counts only when spaced off the word ("LOW - nit"); "High-level" is a hyphenated word.
+  return /:/.test(delim) || /^\s+[\-–—]/.test(delim);
 }
 
 /** HIGH/MED/LOW blocks from review output: "HIGH: title", an indented line or two of detail. */

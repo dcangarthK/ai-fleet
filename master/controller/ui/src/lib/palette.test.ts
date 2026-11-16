@@ -39,7 +39,7 @@ describe("palette", () => {
 
   it("pages provider lists every page and filters by query", async () => {
     const all = await pagesProvider.items("");
-    expect(all).toHaveLength(12);
+    expect(all).toHaveLength(13);
     expect(all.find((i) => i.id === "page:work")?.to).toBe("/work");
     expect((await pagesProvider.items("bud")).map((i) => i.id)).toEqual(["page:budget"]);
   });

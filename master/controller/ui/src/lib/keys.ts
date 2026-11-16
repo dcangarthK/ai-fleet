@@ -51,6 +51,7 @@ export const SHORTCUTS: { keys: string[]; label: string }[] = [
   { keys: ["⌘K", "Ctrl K"], label: "Open the command palette" },
   { keys: ["g n"], label: "Go to Now" },
   { keys: ["g w"], label: "Go to Work" },
+  { keys: ["g l"], label: "Go to Lineage" },
   { keys: ["g p"], label: "Go to Plan" },
   { keys: ["g b"], label: "Go to Budget" },
   { keys: ["/"], label: "Search inside a focused terminal" },

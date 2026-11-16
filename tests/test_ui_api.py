@@ -72,6 +72,58 @@ class UiApiTests(LiveBase):
         self.assertIn("chain", body)
         self.assertIn("tokens", body)
 
+    def test_lineage_shape_edges_lanes_events(self):
+        now = time.time()
+        put_task(ROOT, title="Greeting revamp", created=now - 100, started_at=now - 90, ended_at=now - 50)
+        put_task(CHILD, parent=ROOT, title="Fix attempt", state="failed", kind="fix", stage="fix-1", link="fix",
+                 created=now - 49, started_at=now - 40, ended_at=now - 5,
+                 gate_result='{"passed": false, "output": "boom password=hunter2"}')
+        r = self.c.get("/api/lineage", params={"since": now - 500, "until": now + 1})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        by_id = {n["id"]: n for n in body["nodes"]}
+        for key in ("root_id", "parent_id", "link", "kind", "stage", "agent", "model", "account", "node", "state",
+                    "created_at", "started_at", "ended_at", "tokens", "lane"):
+            self.assertIn(key, by_id[CHILD])
+        self.assertEqual(by_id[CHILD]["root_id"], ROOT)
+        self.assertTrue(by_id[CHILD]["gate_failed"])
+        self.assertEqual([(e["from"], e["to"], e["link"]) for e in body["edges"] if e["to"] == CHILD],
+                         [(ROOT, CHILD, "fix")])
+        self.assertIn(by_id[CHILD]["lane"], [lane["id"] for lane in body["lanes"]])
+        marks = [e for e in body["events"] if e["task_id"] == CHILD and e.get("mark") == "gate"]
+        self.assertEqual(len(marks), 1)
+        stamps = [e["ts"] for e in body["events"]]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertNotIn("hunter2", r.text)
+
+    def test_lineage_window_and_root(self):
+        now = time.time()
+        put_task(ROOT, created=now - 5000, ended_at=now - 4000)
+        put_task(CHILD, parent=ROOT, created=now - 10, link="fix")
+        recent = {n["id"] for n in self.c.get("/api/lineage", params={"since": now - 60}).json()["nodes"]}
+        self.assertIn(CHILD, recent)
+        self.assertNotIn(ROOT, recent)
+        whole = self.c.get("/api/lineage", params={"root": ROOT, "since": now - 60}).json()
+        self.assertEqual({n["id"] for n in whole["nodes"]}, {ROOT, CHILD})
+        self.assertEqual(self.c.get("/api/lineage", params={"root": "t-00000000"}).status_code, 404)
+
+    def test_lineage_handoff_link_and_state_events(self):
+        now = time.time()
+        put_task(ROOT, state="failed", created=now - 100, started_at=now - 90, ended_at=now - 60, error="limit")
+        put_task(CHILD, parent=ROOT, link="retry", created=now - 59)
+        with db() as c:
+            c.execute("INSERT INTO events (ts,task_id,type,data) VALUES (?,?,?,?)",
+                      (now - 80, ROOT, "task.working", '{"from": "starting"}'))
+            c.execute("INSERT INTO events (ts,task_id,type,data) VALUES (?,?,?,?)",
+                      (now - 70, ROOT, "budget.limit", '{"account": "a"}'))
+            c.execute("INSERT INTO events (ts,task_id,type,data) VALUES (?,?,?,?)",
+                      (now - 69, ROOT, "task.title_changed", '{"title": "x"}'))
+        body = self.c.get("/api/lineage", params={"root": ROOT}).json()
+        rooted = [e for e in body["events"] if e["task_id"] == ROOT]
+        self.assertIn(("starting", "working"), [(e.get("from"), e.get("to")) for e in rooted])
+        self.assertIn("limit", [e.get("mark") for e in rooted])
+        self.assertNotIn("task.title_changed", [e["type"] for e in rooted])
+
     def test_work_404(self):
         self.assertEqual(self.c.get("/api/work/t-00000000").status_code, 404)
         self.assertEqual(self.c.get(f"/api/work/{CHILD}").status_code, 404)  # a child is not a work item root
@@ -158,6 +210,7 @@ class UiApiTests(LiveBase):
         hv, ho = W | {"Authorization": f"Bearer {view}"}, W | {"Authorization": f"Bearer {operate}"}
         self.assertEqual(remote.get(f"/api/work/{ROOT}", headers=hv).status_code, 200)
         self.assertEqual(remote.get("/api/search?q=a", headers=hv).status_code, 200)
+        self.assertEqual(remote.get("/api/lineage", headers=hv).status_code, 200)
         body = {"root_id": ROOT, "question": "q"}
         self.assertEqual(remote.post("/api/ask", json=body, headers=hv).status_code, 403)
 

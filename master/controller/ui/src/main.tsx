@@ -9,6 +9,7 @@ import { NowPage } from "./pages/Now";
 import { WorkPage } from "./pages/Work";
 import { WorkDetailPage } from "./pages/WorkDetail";
 import { PlanPage } from "./pages/Plan";
+import { LineagePage } from "./pages/Lineage";
 import { LegacyRedirect } from "./components/LegacyRedirect";
 import { ConfirmProvider } from "./components/ui";
 import { NodeDetailPage, NodesPage } from "./pages/Nodes";
@@ -36,6 +37,8 @@ const router = createBrowserRouter(
         { index: true, element: <NowPage /> },
         { path: "work", element: <WorkPage /> },
         { path: "work/:root", element: <WorkDetailPage /> },
+        { path: "lineage", element: <LineagePage /> },
+        { path: "lineage/:root", element: <LineagePage /> },
         { path: "plan", element: <PlanPage /> },
         { path: "live", element: <LegacyRedirect /> },
         { path: "overview", element: <LegacyRedirect /> },

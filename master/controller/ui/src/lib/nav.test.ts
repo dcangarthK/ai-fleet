@@ -4,13 +4,13 @@ import { breadcrumbs, GO_TARGETS, NAV_GROUPS, NAV_PAGES, pageForPath, resolveLeg
 describe("nav", () => {
   it("matches the groups and pages in the spec", () => {
     expect(NAV_GROUPS.map((g) => [g.label, g.pages.map((p) => p.label)])).toEqual([
-      ["Operate", ["Now", "Work", "Plan"]],
+      ["Operate", ["Now", "Work", "Lineage", "Plan"]],
       ["Spend", ["Budget"]],
       ["Fleet", ["Nodes", "Models", "Roles"]],
       ["Configure", ["Policies", "Skills", "Evals", "Activity", "Settings"]],
     ]);
     expect(NAV_PAGES.map((p) => p.to)).toEqual([
-      "/", "/work", "/plan", "/budget", "/nodes", "/models", "/roles", "/policies", "/skills", "/evals", "/activity", "/settings",
+      "/", "/work", "/lineage", "/plan", "/budget", "/nodes", "/models", "/roles", "/policies", "/skills", "/evals", "/activity", "/settings",
     ]);
   });
 
@@ -18,7 +18,7 @@ describe("nav", () => {
     expect(new Set(NAV_PAGES.map((p) => p.id)).size).toBe(NAV_PAGES.length);
     const keys = NAV_PAGES.map((p) => p.go).filter(Boolean);
     expect(new Set(keys).size).toBe(keys.length);
-    expect(GO_TARGETS).toMatchObject({ n: "/", w: "/work", b: "/budget" });
+    expect(GO_TARGETS).toMatchObject({ n: "/", w: "/work", l: "/lineage", b: "/budget" });
   });
 
   it("redirects legacy routes", () => {

@@ -1,14 +1,17 @@
 """Small additive routes for the console revamp (docs/SPEC-ui-revamp.md sections 5 and 6a).
 
-GET /api/work/{root_id}, GET /api/search, POST /api/ask. The ask route only ever uses the local `fast` role.
+GET /api/work/{root_id}, GET /api/search, GET /api/lineage, POST /api/ask. The ask route only ever uses the local `fast` role.
 """
+import json
 import os
 import re
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+import budget
 import tasks
 import tokens
 from redaction import redact
@@ -49,8 +52,11 @@ def _token_totals(task_id: str) -> dict | None:
 def _gate_summary(gate_result) -> dict | None:
     if not isinstance(gate_result, dict):
         return None
-    return {"passed": gate_result.get("passed", gate_result.get("ok")),
-            "tail": redact(str(gate_result.get("output") or gate_result.get("tail") or ""))[-500:]}
+    passed = gate_result.get("passed", gate_result.get("ok"))
+    if passed is None and gate_result.get("state") in ("passed", "failed"):  # the runner's own shape
+        passed = gate_result["state"] == "passed"
+    tail = gate_result.get("output") or gate_result.get("tail") or gate_result.get("output_tail") or ""
+    return {"passed": passed, "tail": redact(str(tail))[-500:]}
 
 
 def _attempt(t: dict) -> dict:
@@ -105,6 +111,106 @@ def search(q: str = "", limit: int = Query(default=20, ge=1, le=50)) -> list[dic
             if has(r["name"]):
                 out.append({"type": "role", "id": r["name"], "label": r["name"], "href": "/roles"})
     return out[:limit]
+
+
+LINEAGE_DEFAULT_WINDOW = 24 * 3600
+LINEAGE_MAX_TASKS = 400
+LINEAGE_MAX_EVENTS = 3000
+LINEAGE_TOKEN_TASKS = 150  # token files are read per task: skip them for a very wide window
+# Events that mark something worth a diamond or a replay step, beyond the plain task.<state> transitions.
+LINEAGE_MARK_TYPES = {"budget.limit": "limit", "task.stall_left": "stall", "task.unreachable": "stall",
+                      "task.loop_cut": "stall", "gate.bounced": "gate"}
+
+
+def _lineage_node(t: dict, parent: dict | None) -> dict:
+    link = t.get("link")
+    if link in ("retry", "resume") and parent and parent.get("failure_reason") == "limit":
+        link = "handoff"
+    gate = _gate_summary(t.get("gate_result"))
+    gate_failed = bool(gate) and gate["passed"] is False
+    return {
+        "id": t["id"], "root_id": t.get("root_id"), "parent_id": t.get("parent_id"), "link": link,
+        "title": t.get("title"), "kind": t.get("kind"), "stage": t.get("stage"), "agent": t.get("agent"),
+        "model": t.get("model"), "account": budget.task_account(t), "node": t.get("node_id") or "master",
+        "state": t.get("state"), "created_at": t.get("created_at"), "started_at": t.get("started_at"),
+        "ended_at": t.get("ended_at"), "failure_reason": t.get("failure_reason"), "gate_failed": gate_failed,
+        "gate": gate, "branch": t.get("branch"), "budget_wait": t.get("budget_wait"),
+        "resets_at": t.get("resets_at"), "tokens": None,
+    }
+
+
+@router.get("/api/lineage")
+def lineage(since: float | None = None, until: float | None = None, root: str | None = None) -> dict:
+    """Attempts, lineage edges, lanes and state-transition events for the Lineage page (docs/SPEC-ui-revamp.md 6c).
+    With `root` the window is ignored and only that work item is returned."""
+    now = time.time()
+    end = until if until is not None else now
+    start = since if since is not None else end - LINEAGE_DEFAULT_WINDOW
+    if root is not None:
+        members = _work_members(root)
+        truncated = False
+    else:
+        with db() as c:
+            rows = c.execute(
+                "SELECT * FROM tasks WHERE created_at<=? AND (ended_at IS NULL OR ended_at>=?) "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?", (end, start, LINEAGE_MAX_TASKS + 1)).fetchall()
+        truncated = len(rows) > LINEAGE_MAX_TASKS
+        members = [tasks.task_view(r) for r in reversed(rows[:LINEAGE_MAX_TASKS])]
+    ids = {t["id"] for t in members}
+    with db() as c:
+        roots = {t["id"]: task_root(c, t["id"]) for t in members}
+    for t in members:
+        t["root_id"] = roots[t["id"]]
+    by_id = {t["id"]: t for t in members}
+    nodes = [_lineage_node(t, by_id.get(t.get("parent_id"))) for t in members]
+    if len(nodes) <= LINEAGE_TOKEN_TASKS:
+        for n in nodes:
+            n["tokens"] = _token_totals(n["id"])
+    edges = [{"from": n["parent_id"], "to": n["id"], "link": n["link"],
+              "reason": (by_id[n["parent_id"]].get("failure_reason") or n["link"])}
+             for n in nodes if n["parent_id"] in ids and n["link"]]
+    lanes: dict[str, dict] = {}
+    for n in nodes:
+        lane = f"{n['node']}/{n['account']}"
+        lanes.setdefault(lane, {"id": lane, "node": n["node"], "account": n["account"], "agent": n["agent"]})
+        n["lane"] = lane
+    events: list[dict] = []
+    for n in nodes:
+        events.append({"ts": n["created_at"], "task_id": n["id"], "type": "created", "to": "queued"})
+        if n["started_at"]:
+            events.append({"ts": n["started_at"], "task_id": n["id"], "type": "started", "to": "working"})
+    if ids:
+        marks = ",".join("?" * len(ids))
+        with db() as c:
+            ev_rows = c.execute(
+                f"SELECT id,ts,task_id,type,data FROM events WHERE task_id IN ({marks}) AND "
+                "(type LIKE 'task.%' OR type='budget.limit' OR type='gate.bounced') ORDER BY id LIMIT ?",
+                [*ids, LINEAGE_MAX_EVENTS]).fetchall()
+        for r in ev_rows:
+            kind = r["type"]
+            try:
+                data = json.loads(r["data"] or "{}")
+            except ValueError:
+                data = {}
+            ev = {"ts": r["ts"], "task_id": r["task_id"], "type": kind, "event_id": r["id"]}
+            if kind in LINEAGE_MARK_TYPES:
+                ev["mark"] = LINEAGE_MARK_TYPES[kind]
+            elif kind.count(".") == 1 and isinstance(data.get("from"), str):
+                ev["to"] = kind.split(".", 1)[1]
+                ev["from"] = data["from"]
+            else:
+                continue  # chatter that isn't a state change or a mark
+            events.append(ev)
+    for n in nodes:
+        mine = [e for e in events if e["task_id"] == n["id"]]
+        if n["gate_failed"] and n["ended_at"] and not any(e.get("mark") == "gate" for e in mine):
+            events.append({"ts": n["ended_at"], "task_id": n["id"], "type": "gate.failed", "mark": "gate"})
+        if n["ended_at"] and not any(e.get("to") == n["state"] for e in mine):
+            events.append({"ts": n["ended_at"], "task_id": n["id"], "type": "ended", "to": n["state"]})
+    events.sort(key=lambda e: (e["ts"] or 0, e["task_id"]))
+    return {"now": now, "since": start, "until": end, "root": root, "truncated": truncated,
+            "nodes": nodes, "edges": edges,
+            "lanes": sorted(lanes.values(), key=lambda x: (x["node"], x["account"])), "events": events}
 
 
 class AskBody(BaseModel):

@@ -3,6 +3,7 @@ import type { NavIcon } from "../lib/nav";
 const PATHS: Record<NavIcon | "menu" | "search" | "plus", string> = {
   now: "M3 12h4l3-8 4 16 3-8h4",
   work: "M4 6h16M4 12h16M4 18h10",
+  lineage: "M4 6h7a3 3 0 013 3v0a3 3 0 003 3h3M4 18h6a3 3 0 003-3M17 9l3 3-3 3",
   plan: "M5 4h14v16H5zM9 9h6M9 13h6M9 17h3",
   budget: "M4 20V10M10 20V4M16 20v-7M22 20H2",
   nodes: "M4 5h16v6H4zM4 13h16v6H4zM8 8h.01M8 16h.01",

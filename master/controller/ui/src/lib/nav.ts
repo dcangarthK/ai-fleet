@@ -1,7 +1,7 @@
 /** Navigation model (docs/SPEC-ui-revamp.md section 3): groups, pages and the legacy redirect map. */
 
 export type NavIcon =
-  | "now" | "work" | "plan" | "budget" | "nodes" | "models" | "roles"
+  | "now" | "work" | "lineage" | "plan" | "budget" | "nodes" | "models" | "roles"
   | "policies" | "skills" | "evals" | "activity" | "settings";
 
 export interface NavPage {
@@ -27,6 +27,7 @@ export const NAV_GROUPS: NavGroup[] = [
     pages: [
       { id: "now", to: "/", label: "Now", icon: "now", go: "n", end: true },
       { id: "work", to: "/work", label: "Work", icon: "work", go: "w" },
+      { id: "lineage", to: "/lineage", label: "Lineage", icon: "lineage", go: "l" },
       { id: "plan", to: "/plan", label: "Plan", icon: "plan", go: "p" },
     ],
   },

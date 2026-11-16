@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet console - C2 Spend and Plan mock</title>
+<style>
+:root{
+  --bg:#fafaf8;--surface:#fff;--sunken:#f2f2ee;--line:#e3e3dc;--line-strong:#c9c9c0;
+  --ink:#1b1d1f;--ink-2:#46494d;--ink-3:#5f6368;
+  --accent:#1459b3;--accent-ink:#fff;--accent-soft:#e6eef9;
+  --ok:#17663a;--ok-soft:#e4f2e9;--warn:#8a5300;--warn-soft:#faf0dc;--bad:#b3261e;--bad-soft:#fbe9e7;
+  --focus:#1459b3;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --r:6px;
+}
+[data-theme=dark]{
+  --bg:#141517;--surface:#1b1d20;--sunken:#101113;--line:#2b2e32;--line-strong:#42464c;
+  --ink:#ececea;--ink-2:#b8bbbf;--ink-3:#9a9ea4;
+  --accent:#6ea8f0;--accent-ink:#0b1626;--accent-soft:#1c2a3f;
+  --ok:#5fcf8b;--ok-soft:#17291f;--warn:#e6b052;--warn-soft:#2e2412;--bad:#ff8a80;--bad-soft:#331a18;
+  --focus:#8dbcf5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--accent)}
+h1,h2,h3,p{margin:0}
+h1{font-size:26px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:650}
+h3{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.sub{color:var(--ink-2)}
+.muted{color:var(--ink-3)}
+
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.rail{border-right:1px solid var(--line);background:var(--surface);padding:var(--s4) var(--s3);display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;padding:0 var(--s2)}
+.brand i{width:12px;height:12px;background:var(--accent);border-radius:3px;display:block}
+.rail h3{padding:0 var(--s2);margin-bottom:var(--s1)}
+.rail button.nav{all:unset;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px var(--s2);border-radius:var(--r);color:var(--ink-2);cursor:pointer}
+.rail button.nav:hover{background:var(--sunken);color:var(--ink)}
+.rail button.nav[aria-current=page]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.rail button.nav:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.badge{font-size:11px;min-width:20px;text-align:center;padding:0 6px;border-radius:10px;background:var(--bad);color:#fff;font-weight:600}
+[data-theme=dark] .badge{color:#2a0b08}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--s2);padding:0 var(--s2)}
+.rail .kbd-row{display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+
+.main{min-width:0}
+.top{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s6);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:2}
+.crumbs{color:var(--ink-3);font-size:13px;flex:1}
+.crumbs b{color:var(--ink);font-weight:600}
+.cmdk{display:flex;align-items:center;gap:var(--s3);min-width:320px;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:var(--r);background:var(--bg);color:var(--ink-3);text-align:left}
+.cmdk span:first-child{flex:1}
+kbd{font:12px var(--mono);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink-2);background:var(--surface)}
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:6px var(--s3);font-weight:550}
+.btn:hover{background:var(--sunken)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:3px var(--s2);font-size:13px}
+.page{padding:var(--s6) var(--s6) var(--s7);max-width:1360px}
+.view{display:none}.view.on{display:block}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s6)}
+.head .sub{margin-top:var(--s1);max-width:62ch}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.card .body{padding:var(--s4) var(--s5)}
+.stack{display:flex;flex-direction:column;gap:var(--s5)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:var(--s5)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-soft)}
+.p-warn{color:var(--warn);background:var(--warn-soft)}
+.p-bad{color:var(--bad);background:var(--bad-soft)}
+.p-run{color:var(--accent);background:var(--accent-soft)}
+.p-idle{color:var(--ink-3);background:var(--sunken)}
+table{width:100%;border-collapse:collapse}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);text-align:left;font-weight:650;padding:var(--s2) var(--s5);border-bottom:1px solid var(--line)}
+td{padding:var(--s3) var(--s5);border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunken)}
+td.n,th.n{text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar.warn i{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--s2) var(--s4)}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0;text-align:right}
+.inbox{list-style:none;margin:0;padding:0}
+.inbox li{display:grid;grid-template-columns:72px 1fr auto;gap:var(--s4);align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.inbox li:last-child{border-bottom:0}
+.inbox .t{font-weight:600}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .v{font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.01em}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--ink-3)}
+.empty b{display:block;color:var(--ink);font-size:15px;margin-bottom:var(--s1)}
+.err{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--bad);background:var(--bad-soft);border-radius:var(--r);color:var(--ink)}
+.err b{color:var(--bad)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--line);padding:0 var(--s5)}
+.tabs button{all:unset;padding:var(--s3) 0;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+
+.chain{display:grid;grid-template-columns:repeat(7,1fr);padding:var(--s5)}
+.stg{position:relative;padding-right:var(--s2)}
+.stg::before{content:"";position:absolute;top:11px;left:28px;right:4px;height:2px;background:var(--line-strong)}
+.stg:last-child::before{display:none}
+.stg.done::before{background:var(--ok)}
+.dot{position:relative;width:24px;height:24px;border-radius:50%;border:2px solid var(--line-strong);background:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink-3)}
+.stg.done .dot{border-color:var(--ok);background:var(--ok);color:#fff}
+[data-theme=dark] .stg.done .dot{color:#0c2015}
+.stg.now .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.stg.bad .dot{border-color:var(--bad);background:var(--bad);color:#fff}
+[data-theme=dark] .stg.bad .dot{color:#2a0b08}
+.stg.plan .dot{border-style:dashed}
+.stg .nm{margin-top:var(--s2);font-weight:650}
+.stg .md{font-size:12px;color:var(--ink-2);line-height:1.4;word-break:break-all}
+.stg .ac{font-size:12px;color:var(--ink-3)}
+.stg .at{font-size:12px;margin-top:2px;color:var(--ink-2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.actions .sp{flex:1}
+.msg{flex:1;min-width:200px;border:1px solid var(--line-strong);border-radius:var(--r);padding:6px var(--s3);background:var(--surface);color:var(--ink);font:inherit}
+.msg::placeholder{color:var(--ink-3)}
+pre.log,pre.diff{margin:0;padding:var(--s3) var(--s5);font:12.5px/1.6 var(--mono);overflow:auto;background:var(--sunken)}
+.log .t{color:var(--ink-3)}.log .w{color:var(--warn)}
+.diff span{display:block}
+.diff .a{color:var(--ok);background:var(--ok-soft)}
+.diff .d{color:var(--bad);background:var(--bad-soft)}
+.diff .h{color:var(--ink-3)}
+.files{list-style:none;margin:0;padding:var(--s2) 0;font:12.5px var(--mono)}
+.files li{display:flex;justify-content:space-between;gap:var(--s2);padding:3px var(--s4)}
+.files li.sel{background:var(--accent-soft);color:var(--accent)}
+.find{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{font:700 11px var(--mono);padding:1px 6px;border-radius:4px;height:fit-content;margin-top:2px;text-align:center}
+.s-h{background:var(--bad);color:#fff}
+[data-theme=dark] .s-h{color:#2a0b08}
+.s-m{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn)}
+.s-l{background:var(--sunken);color:var(--ink-2);border:1px solid var(--line-strong)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s5);align-items:start}
+.ctx{display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:76px}
+.ctx .card .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sw{display:flex;gap:var(--s2);align-items:center;color:var(--ink-2);font-size:13px}
+.sw input{accent-color:var(--accent)}
+.wiz{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);padding:var(--s4) var(--s5)}
+.wiz div{border-top:3px solid var(--line-strong);padding-top:var(--s2);color:var(--ink-3);font-size:13px}
+.wiz div.on{border-color:var(--accent)}
+.wiz b{display:block;color:var(--ink)}
+.cmd{display:block;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px var(--mono);overflow-x:auto;white-space:nowrap}
+@media(max-width:1100px){.split,.grid2{grid-template-columns:1fr}.ctx{position:static}.chain{grid-template-columns:repeat(4,1fr);row-gap:var(--s5)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.rail{position:static;height:auto}.page{padding:var(--s4)}.cmdk{min-width:0}}
+
+/* c2 extensions: intelligence layer */
+.ins{display:grid;grid-template-columns:4px 1fr;background:var(--surface);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.ins>i{background:var(--accent)}
+.ins.warn>i{background:var(--warn)}
+.ins.bad>i{background:var(--bad)}
+.ins .in{padding:var(--s4) var(--s5);display:flex;flex-direction:column;gap:var(--s3)}
+.ins .kick{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap}
+.ins .kick h3{flex:1}
+.ins .ttl{font-size:15px;font-weight:650;line-height:1.35}
+.ins .row{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap}
+.conf{display:inline-flex;align-items:center;gap:var(--s2);font-size:12px;color:var(--ink-2)}
+.conf .bar{width:56px;height:5px}
+.ev{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;font-size:12px;color:var(--ink-3)}
+.ev a{font:12px var(--mono)}
+.why{border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);padding:var(--s2) var(--s3);font-size:13px;color:var(--ink-2)}
+.why summary{cursor:pointer;font-weight:600;color:var(--ink)}
+.why p{margin-top:var(--s2)}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:var(--s5)}
+.sw-btn{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;gap:var(--s2);cursor:pointer}
+.sw-btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:12px}
+.sw-btn .tr{width:36px;height:20px;border-radius:10px;border:1px solid var(--line-strong);background:var(--sunken);position:relative}
+.sw-btn .tr::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink-3)}
+.sw-btn[aria-checked=true] .tr{background:var(--accent-soft);border-color:var(--accent)}
+.sw-btn[aria-checked=true] .tr::after{left:18px;background:var(--accent)}
+.skel{display:flex;flex-direction:column;gap:var(--s3);padding:var(--s4) var(--s5)}
+.skel i{display:block;height:14px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);animation:pl 1.2s ease-in-out infinite}
+@keyframes pl{50%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){.skel i{animation:none}}
+[hidden]{display:none!important}
+dialog{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);padding:0;width:min(520px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog .dh{padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+dialog .db{padding:var(--s4) var(--s5);display:flex;flex-direction:column;gap:var(--s3)}
+dialog .df{padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);display:flex;gap:var(--s2);justify-content:flex-end;align-items:center}
+dialog .df .sp{flex:1;color:var(--ink-3);font-size:12px}
+.note{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--ok);background:var(--ok-soft);border-radius:var(--r);margin-bottom:var(--s5)}
+.note b{color:var(--ok)}
+.chart{width:100%;height:auto;display:block}
+.chart text{font:11px var(--sans);fill:var(--ink-3)}
+.chart .ax{stroke:var(--line-strong);stroke-width:1}
+.chart .gr{stroke:var(--line);stroke-width:1}
+.chart .hist{stroke:var(--accent);stroke-width:2;fill:none}
+.chart .proj{stroke:var(--warn);stroke-width:2;fill:none;stroke-dasharray:6 4}
+.chart .alt{stroke:var(--ok);stroke-width:2;fill:none;stroke-dasharray:2 3}
+.chart .lim{stroke:var(--bad);stroke-width:1;stroke-dasharray:4 3}
+.chart .pt{fill:var(--surface);stroke:var(--accent);stroke-width:2}
+.chart .ptw{fill:var(--warn);stroke:var(--warn)}
+.leg{display:flex;gap:var(--s4);flex-wrap:wrap;font-size:12px;color:var(--ink-2)}
+.leg span::before{content:"";display:inline-block;width:16px;border-top:2px solid var(--accent);vertical-align:middle;margin-right:6px}
+.leg .l2::before{border-color:var(--warn);border-top-style:dashed}
+.leg .l3::before{border-color:var(--ok);border-top-style:dotted}
+.diff-t{font:12.5px/1.6 var(--mono)}
+.inl{display:grid;grid-template-columns:1fr 160px 120px auto;gap:var(--s2);align-items:center;padding:var(--s3) var(--s5);background:var(--accent-soft);border-bottom:1px solid var(--line)}
+.inl input,.inl select,.sel{border:1px solid var(--line-strong);border-radius:var(--r);padding:5px var(--s2);background:var(--surface);color:var(--ink);font:inherit}
+tr.stale td:last-child{color:var(--warn);font-weight:600}
+@media(max-width:1100px){.cols2{grid-template-columns:1fr}.inl{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand"><i></i>Fleet console</div>
+  <div>
+    <h3>Operate</h3>
+    <button class="nav" data-go="now">Now <span class="badge" aria-label="3 need attention">3</span></button>
+    <button class="nav" data-go="work">Work <span class="muted">14</span></button>
+    <button class="nav" data-go="plan">Plan</button>
+  </div>
+  <div>
+    <h3>Spend</h3>
+    <button class="nav" data-go="budget" aria-current="page">Budget</button>
+  </div>
+  <div>
+    <h3>Fleet</h3>
+    <button class="nav" data-go="nodes">Nodes <span class="muted">3</span></button>
+    <button class="nav" data-go="models">Models</button>
+    <button class="nav" data-go="roles">Roles</button>
+  </div>
+  <div>
+    <h3>Configure</h3>
+    <button class="nav" data-go="cfg1">Policies</button>
+    <button class="nav" data-go="cfg2">Skills</button>
+    <button class="nav" data-go="cfg3">Evals runs</button>
+    <button class="nav" data-go="cfg4">Activity</button>
+    <button class="nav" data-go="cfg5">Settings</button>
+  </div>
+  <div class="foot">
+    <div class="kbd-row"><span>Jump</span><span><kbd>g</kbd> <kbd>n</kbd> <kbd>g</kbd> <kbd>w</kbd> <kbd>g</kbd> <kbd>b</kbd></span></div>
+    <div class="kbd-row"><span>Help</span><kbd>?</kbd></div>
+    <button class="btn sm" id="theme" aria-pressed="false">Dark theme</button>
+    <div class="muted" style="font-size:12px">Signed in as owner (operate)</div>
+  </div>
+</nav>
+
+<div class="main">
+<div class="top">
+  <div class="crumbs" id="crumbs"><b>Spend / Budget</b></div>
+  <button class="cmdk" aria-label="Open command palette"><span>Search pages, tasks, nodes, actions</span><kbd>⌘K</kbd></button>
+  <button class="btn primary">Spawn task</button>
+</div>
+
+<main class="page">
+<div id="note" role="status" aria-live="polite"></div>
+
+<!-- VIEW 1: BUDGET -->
+<section class="view on" id="v-budget" aria-labelledby="h-budget" data-crumb="Spend / Budget">
+  <div class="head">
+    <div><h1 id="h-budget">Budget</h1><p class="sub">Monday 16 November, 14:32. Spend today $41.20 across 5 paid models. Codex is the tight one: 83% of its weekly limit, projected to run out before it resets.</p></div>
+    <div class="card" style="min-width:300px"><div class="body">
+      <div class="row" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <button class="sw-btn" id="hold" role="switch" aria-checked="false" aria-describedby="hold-d"><span class="tr"></span><b>Budget hold</b></button>
+        <span class="pill p-idle" id="hold-s">Off</span>
+      </div>
+      <p class="muted" id="hold-d" style="font-size:12px;margin-top:6px">On: paid models accept only final and security reviews. Running tasks finish; local roles unaffected.</p>
+    </div></div>
+  </div>
+
+  <div class="stack">
+    <div class="cols2">
+      <article class="ins" aria-labelledby="i1"><i></i><div class="in">
+        <div class="kick"><h3>Insight, usage balance</h3><span class="conf" title="Confidence in this reading"><span>Confidence 78%</span><span class="bar" role="img" aria-label="78 percent"><i style="width:78%"></i></span></span></div>
+        <div class="ttl" id="i1">Opus idle all day: 0 tasks finished. Sonnet carries 81% of tokens (9.7M of 12.0M).</div>
+        <p class="sub">Sonnet on fleet is at 62% of its 5h window while Opus on spare is at 0% and Fable at 18%. Rule v3 allows Opus for build and fix, so capacity is going unused.</p>
+        <div class="ev"><span>Evidence:</span><a href="#" class="evl">tokens/summary 16 Nov</a><a href="#" class="evl">rate_limits 14:30</a><a href="#" class="evl">rule v3 opus.kinds</a></div>
+        <details class="why"><summary>Why do you say this?</summary><p>Computed from today's token totals per model (12.0M total) and the latest rate_limits snapshot. Confidence is below 80% because only 7 hours of today's data exist and an Opus build (t-a07c55f1) started 48 min ago, so "idle" is true for finished work only.</p></details>
+        <div class="row"><button class="btn primary sm act" data-title="Route next 3 fix rounds to Opus"
+          data-req="spawn_task(agent=&quot;claude&quot;, model=&quot;claude-opus-5-5&quot;, profile=&quot;spare&quot;, kind=&quot;fix&quot;) x3, for work items on the Sonnet/fleet queue"
+          data-rule="v3 'opus.kinds = build, fix' (allowed). Concurrency: 1 Claude job at a time on spare is free."
+          data-effect="Sonnet/fleet 5h used drops about 12 points over the next 5h; Opus/spare rises about 9 points. Expected cost +$3.10 vs Sonnet.">Route next 3 fix rounds to Opus</button>
+          <span class="muted" style="font-size:12px">Proposed, not run. You confirm first.</span></div>
+      </div></article>
+
+      <article class="ins warn" aria-labelledby="i2"><i></i><div class="in">
+        <div class="kick"><h3>Forecast, rate limit</h3><span class="conf"><span>Confidence 71%</span><span class="bar warn" role="img" aria-label="71 percent"><i style="width:71%"></i></span></span></div>
+        <div class="ttl" id="i2">At this rate Codex hits its weekly limit Wed 11:00. Final reviews only until Thu 09:00.</div>
+        <p class="sub">Used 83% since Thu 09:00. Burn over the last 24h is 0.38 points/hour. 3 final reviews are queued. With a hold the projection ends near 91% at reset.</p>
+        <div class="ev"><span>Evidence:</span><a href="#" class="evl">codex rate_limits 14:30</a><a href="#" class="evl">3 queued final_review</a><a href="#" class="evl">forecast chart below</a></div>
+        <details class="why"><summary>Why do you say this?</summary><p>Straight-line extrapolation of the last 24h burn: (100 - 83) / 0.38 = 44.7h from now, which is Wed 11:00. A heavy review day moves it earlier by up to 9h; confidence is 71% because burn is bursty.</p></details>
+        <div class="row"><button class="btn primary sm act" data-title="Hold Codex: final and security reviews only"
+          data-req="PUT /api/budget/rules/hold { model: &quot;gpt-5.6-terra&quot;, allow_kinds: [&quot;final_review&quot;,&quot;security_review&quot;], until: &quot;Thu 09:00&quot; }"
+          data-rule="v3 'codex.kinds' already limits Codex to reviews; this narrows it for the rest of the week and expires on reset."
+          data-effect="Queued build, fix and re_review on Codex wait or reroute to Sonnet. Projected weekly use at reset: about 91%.">Hold Codex until Thu 09:00</button>
+          <button class="btn sm" data-go="plan">See queued reviews in Plan</button></div>
+      </div></article>
+    </div>
+
+    <div class="card">
+      <header><h2>Limits per model</h2><span class="muted">Snapshot 14:30</span></header>
+      <table>
+        <thead><tr><th>Model</th><th>Account</th><th>5h used</th><th>Weekly used</th><th>Resets in (5h / weekly)</th><th class="n">Tokens today</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">claude-sonnet-5-5</td><td>fleet</td><td><div class="kv"><dt></dt><dd>62%</dd></div><div class="bar" role="img" aria-label="5 hour 62 percent"><i style="width:62%"></i></div></td><td><div class="kv"><dt></dt><dd>41%</dd></div><div class="bar" role="img" aria-label="weekly 41 percent"><i style="width:41%"></i></div></td><td>1h 48m / 2d 18h</td><td class="n">9.7M</td></tr>
+          <tr><td class="mono">codex gpt-5.6-terra</td><td>fleet</td><td><div class="kv"><dt></dt><dd>71%</dd></div><div class="bar" role="img" aria-label="5 hour 71 percent"><i style="width:71%"></i></div></td><td><div class="kv"><dt></dt><dd><b>83%</b></dd></div><div class="bar warn" role="img" aria-label="weekly 83 percent"><i style="width:83%"></i></div></td><td>2h 10m / 2d 18h</td><td class="n">1.1M</td></tr>
+          <tr><td class="mono">claude-fable-5-2</td><td>spare</td><td><div class="kv"><dt></dt><dd>18%</dd></div><div class="bar" role="img" aria-label="5 hour 18 percent"><i style="width:18%"></i></div></td><td><div class="kv"><dt></dt><dd>22%</dd></div><div class="bar" role="img" aria-label="weekly 22 percent"><i style="width:22%"></i></div></td><td>3h 12m / 3d 15h</td><td class="n">0.8M</td></tr>
+          <tr><td class="mono">claude-opus-5-5</td><td>spare</td><td><div class="kv"><dt></dt><dd>0%</dd></div><div class="bar" role="img" aria-label="5 hour 0 percent"><i style="width:0%"></i></div></td><td><div class="kv"><dt></dt><dd>6%</dd></div><div class="bar" role="img" aria-label="weekly 6 percent"><i style="width:6%"></i></div></td><td>3h 12m / 3d 15h</td><td class="n">0</td></tr>
+          <tr><td class="mono">claude-haiku-5-5</td><td>fleet</td><td><div class="kv"><dt></dt><dd>4%</dd></div><div class="bar" role="img" aria-label="5 hour 4 percent"><i style="width:4%"></i></div></td><td><div class="kv"><dt></dt><dd>9%</dd></div><div class="bar" role="img" aria-label="weekly 9 percent"><i style="width:9%"></i></div></td><td>1h 48m / 2d 18h</td><td class="n">0.4M</td></tr>
+        </tbody>
+      </table>
+      <div class="body" style="border-top:1px solid var(--line)"><h3 style="margin-bottom:8px">Per account (all models)</h3>
+        <div class="cols2">
+          <div><div class="kv"><dt>fleet, 5h</dt><dd>62%, resets 1h 48m</dd></div><div class="bar" role="img" aria-label="fleet 5 hour 62 percent"><i style="width:62%"></i></div><div class="kv" style="margin-top:8px"><dt>fleet, weekly</dt><dd>57%, resets Thu 09:00</dd></div><div class="bar" role="img" aria-label="fleet weekly 57 percent"><i style="width:57%"></i></div></div>
+          <div><div class="kv"><dt>spare, 5h</dt><dd>14%, resets 3h 12m</dd></div><div class="bar" role="img" aria-label="spare 5 hour 14 percent"><i style="width:14%"></i></div><div class="kv" style="margin-top:8px"><dt>spare, weekly</dt><dd>19%, resets Fri 06:00</dd></div><div class="bar" role="img" aria-label="spare weekly 19 percent"><i style="width:19%"></i></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card" id="fc">
+        <header><h2>Codex weekly burn forecast</h2><button class="btn sm" id="recalc">Recompute</button></header>
+        <div id="fc-body">
+          <div class="body stack" style="gap:12px">
+            <svg class="chart" viewBox="0 0 620 230" role="img" aria-labelledby="ct cd">
+              <title id="ct">Codex weekly limit used, Monday to Thursday</title>
+              <desc id="cd">Used 76% at Monday 00:00 and 83% now, Monday 14:32. At the current burn the line reaches 100% on Wednesday 11:00. With a hold it reaches about 91% at the Thursday 09:00 reset.</desc>
+              <line class="gr" x1="50" y1="20" x2="590" y2="20"/><line class="gr" x1="50" y1="100" x2="590" y2="100"/>
+              <line class="ax" x1="50" y1="180" x2="590" y2="180"/><line class="ax" x1="50" y1="20" x2="50" y2="180"/>
+              <text x="44" y="24" text-anchor="end">100%</text><text x="44" y="104" text-anchor="end">50%</text><text x="44" y="184" text-anchor="end">0%</text>
+              <text x="50" y="198" text-anchor="middle">Mon 00:00</text><text x="210" y="198" text-anchor="middle">Tue 00:00</text><text x="370" y="198" text-anchor="middle">Wed 00:00</text><text x="530" y="198" text-anchor="middle">Thu 00:00</text>
+              <text x="320" y="218" text-anchor="middle">Time (local), weekly window resets Thu 09:00</text>
+              <text x="14" y="100" transform="rotate(-90 14 100)" text-anchor="middle">Weekly limit used</text>
+              <line class="lim" x1="50" y1="20" x2="590" y2="20"/>
+              <polyline class="hist" points="50,58 100,55 146.7,47"/>
+              <polyline class="proj" points="146.7,47 443,20 590,20"/>
+              <polyline class="alt" points="146.7,47 590,34"/>
+              <circle class="pt" cx="146.7" cy="47" r="4"/><text x="152" y="42">Now 83%</text>
+              <circle class="ptw" cx="443" cy="20" r="4"/><text x="437" y="14" text-anchor="end">Hits 100% Wed 11:00</text>
+              <text x="586" y="48" text-anchor="end">With hold: about 91% at reset</text>
+              <line class="ax" x1="590" y1="176" x2="590" y2="184"/>
+            </svg>
+            <div class="leg"><span>Used so far</span><span class="l2">Projected, current burn 0.38 pts/h</span><span class="l3">Projected with Codex hold, 0.12 pts/h</span></div>
+            <p class="muted" style="font-size:12px">Straight-line projection from the last 24h. Not a guarantee. Data: /api/tokens/summary and rate_limits.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header><h2>Savings from local routing</h2><span class="pill p-ok">Estimate</span></header>
+        <div class="body stack" style="gap:12px">
+          <div class="stat"><span class="v">$18.40</span><span class="muted">avoided today by 23 local tasks</span></div>
+          <dl class="kv">
+            <dt>qwen2.5-coder:14b (coder, fast)</dt><dd>17 tasks, 1.3M tokens</dd>
+            <dt>glm-4.7-flash (reviewer)</dt><dd>6 tasks, 0.5M tokens</dd>
+            <dt>7 day total</dt><dd>$96.70</dd>
+          </dl>
+          <details class="why"><summary>How is this estimated?</summary><p>Local tokens priced at claude-haiku-5-5 list rates, the cheapest paid model that could have taken the task. Assumed rates, UNVERIFIED against the invoice. Confidence 60%.</p></details>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="tabs" role="tablist" style="padding-top:4px">
+        <button role="tab" aria-selected="true" data-p="p-rules">Rules <span class="pill p-run" style="margin-left:4px">v3 current</span></button>
+        <button role="tab" aria-selected="false" data-p="p-dec">Decisions log</button>
+      </div>
+
+      <div class="panel on" id="p-rules">
+        <div class="body" style="display:flex;gap:12px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)">
+          <div class="sub">Rule set v3, saved Mon 09:40 by owner. Compare with:</div>
+          <label class="sw"><span>Version</span><select class="sel" id="rv" aria-label="Compare against version"><option value="2">v2 (Fri 17:05)</option><option value="1">v1 (Mon 2 Nov)</option></select></label>
+        </div>
+        <div id="rules-err" class="body" hidden>
+          <div class="err" role="alert"><div><b>Could not load v1.</b> GET /api/budget/rules?version=1 returned 404: version pruned, only the last 2 are kept.<div style="margin-top:8px"><button class="btn sm" id="rv-retry">Show v2 instead</button></div></div></div>
+        </div>
+        <div id="rules-ok">
+        <pre class="diff" aria-label="Diff of rules v2 to v3"><span class="h">rules v2 -> v3</span>
+<span class="h">codex.kinds</span>
+<span class="d">- build, fix, final_review, security_review</span>
+<span class="a">+ final_review, security_review</span>
+<span class="h">codex.max_concurrency_per_account</span>
+<span class="d">- 2</span>
+<span class="a">+ 1</span>
+<span class="h">prompt.max_kb</span>
+<span class="d">- 80</span>
+<span class="a">+ 60</span>
+<span class="h">claude-opus-5-5.kinds</span>
+<span class="a">+ build, fix   (new: hard or owner-named builds)</span>
+<span class="h">routing.builds</span>
+<span class="d">- codex</span>
+<span class="a">+ claude-sonnet-5-5</span></pre>
+        <div class="body"><div class="row sub">Effect of v3 so far today: 2 reroutes, 1 refusal, 1 queue wait. See the Decisions log.</div></div>
+        </div>
+      </div>
+
+      <div class="panel" id="p-dec">
+        <div class="body" style="display:flex;gap:12px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)">
+          <div class="sub">Every refusal, reroute and wait, with the controller's reason.</div>
+          <label class="sw"><span>Show</span><select class="sel" id="df" aria-label="Filter decisions"><option value="all">All today (6)</option><option value="spare">Refusals on spare account</option></select></label>
+        </div>
+        <div id="dec-empty" hidden><div class="empty"><b>No decisions match</b>Nothing was refused or rerouted on the spare account today. That filter is clear.</div></div>
+        <table id="dec-t">
+          <thead><tr><th>Time</th><th>Task</th><th>Decision</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">14:21</td><td><b>t-9c1e07b2</b></td><td><span class="pill p-run">Rerouted</span><div class="muted mono">codex -> claude-sonnet-5-5</div></td><td><details class="why"><summary>Why?</summary><p>kind=build is not allowed on codex. Rule v3 'routing.builds = claude-sonnet-5-5'. Placement: master, 4 jobs, lowest queue.</p></details></td></tr>
+            <tr><td class="mono">13:58</td><td><b>t-4e77b0d3</b></td><td><span class="pill p-bad">Refused</span><div class="muted">re_review on codex</div></td><td><details class="why"><summary>Why?</summary><p>Rule v3 'no routine re-reviews on Codex'. Suggested: same reviewer on claude-fable-5-2, delta only. Confidence 90%.</p></details></td></tr>
+            <tr><td class="mono">13:40</td><td><b>t-b2a6c915</b></td><td><span class="pill p-warn">Waiting</span><div class="muted">final_review, codex</div></td><td><details class="why"><summary>Why?</summary><p>budget_wait: codex concurrency is 1 per account (rule v3) and t-5d3318aa is running. Starts when it ends, ETA about 15:10.</p></details></td></tr>
+            <tr><td class="mono">12:15</td><td><b>t-c92e0b64</b></td><td><span class="pill p-run">Placed</span><div class="muted mono">qwen2.5-coder:14b on duncan's macbook m1 pro</div></td><td><details class="why"><summary>Why?</summary><p>role=fast draft. master holds 4 jobs, the macbook (macOS, 1 job) has the model loaded, laptop-0ir6d81o was offline.</p></details></td></tr>
+            <tr><td class="mono">11:04</td><td><b>2 tasks</b></td><td><span class="pill p-run">Rerouted</span><div class="muted mono">laptop-0ir6d81o -> master</div></td><td><details class="why"><summary>Why?</summary><p>Node heartbeat lost 11:04 (offline 3h). Queued tasks are moved after 5 min; running work, if any, is not touched.</p></details></td></tr>
+            <tr><td class="mono">10:32</td><td><b>t-71d0a3e8</b></td><td><span class="pill p-bad">Refused</span><div class="muted">review, claude-sonnet-5-5</div></td><td><details class="why"><summary>Why?</summary><p>Independence: the same model built this work. A waiver needs an owner reason. Not applied automatically.</p></details></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VIEW 2: PLAN -->
+<section class="view" id="v-plan" aria-labelledby="h-plan" data-crumb="Operate / Plan">
+  <div class="head">
+    <div><h1 id="h-plan">Plan</h1><p class="sub">Batch 14 plan, revision r17. 7 items, ordered. The leader edits it as work lands; your edits are checked against the revision you loaded.</p></div>
+    <button class="btn" id="reload">Reload plan</button>
+  </div>
+
+  <div class="stack">
+    <article class="ins warn" aria-labelledby="ph"><i></i><div class="in">
+      <div class="kick"><h3>Insight, plan health</h3><span class="conf"><span>Confidence 95%</span><span class="bar" role="img" aria-label="95 percent"><i style="width:95%"></i></span></span></div>
+      <div class="ttl" id="ph">1 blocked item, 2 items with no work item, 2 items stale for more than 2h.</div>
+      <p class="sub">Counted directly from the plan and task state, so confidence is high. Items 5 and 6 have no work item, so nothing will run them. Items 3 and 5 have not changed for over 2h.</p>
+      <div class="ev"><span>Evidence:</span><a href="#" class="evl">item 1, t-3f9a12c0 blocked 12 min</a><a href="#" class="evl">items 5, 6 work_item = null</a><a href="#" class="evl">items 3, 5 updated 2h 10m, 3h 05m ago</a></div>
+      <details class="why"><summary>Why do you say this?</summary><p>Rules: status = blocked; work item link empty; last revision older than 2h while status is not done. No model was used.</p></details>
+      <div class="row"><button class="btn primary sm act" data-title="Create work items for plan items 5 and 6"
+        data-req="spawn_task(agent=&quot;claude&quot;, model=&quot;claude-sonnet-5-5&quot;, kind=&quot;build&quot;, stage=&quot;build&quot;, parent_id=null) for item 5; spawn_task(agent=&quot;claude&quot;, model=&quot;claude-haiku-5-5&quot;, kind=&quot;benchmark&quot;) for item 6; PUT /api/plan/5, /api/plan/6 with the new links"
+        data-rule="v3 'builds -> claude-sonnet-5-5'; benchmarks on Sonnet or Haiku, never Codex."
+        data-effect="Two tasks queue on master (4 jobs now). Plan moves to r18. Estimated cost $1.40.">Create work items for 5 and 6</button>
+        <button class="btn sm act" data-title="Ask owner to review blocked t-3f9a12c0"
+          data-req="Open t-3f9a12c0 in Work with the approval request for nodes/onboard.sh. You approve there; this button only navigates."
+          data-rule="Approvals are the owner's job and are never done from the plan."
+          data-effect="No state changes.">Go to blocked item</button></div>
+    </div></article>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Plan items</h2><span class="muted">r17, loaded 14:31</span></header>
+        <div id="inl" class="inl" hidden>
+          <input aria-label="Item 5 title" id="inl-t" value="Re-embed runner in onboard.sh and onboard.ps1">
+          <select aria-label="Owner model"><option>claude-sonnet-5-5</option><option>claude-haiku-5-5</option><option>qwen2.5-coder:14b</option></select>
+          <select aria-label="Status"><option>queued</option><option>running</option><option>blocked</option><option>done</option></select>
+          <span><button class="btn primary sm" id="inl-save">Save</button> <button class="btn sm" id="inl-x">Cancel</button></span>
+        </div>
+        <div id="inl-err" hidden style="padding:12px 24px;border-bottom:1px solid var(--line)">
+          <div class="err" role="alert"><div><b>Save rejected: revision conflict.</b> You edited item 5 on plan r17. The plan is now r18 (changed by leader s-41c8 at 14:29: item 5 status queued -> blocked-on-build). PUT /api/plan/5 returned 409.
+            <pre class="diff" style="margin:8px 0;padding:8px 12px;border-radius:4px" aria-label="Conflicting edit"><span class="h">item 5 title</span>
+<span class="d">- Re-embed runner in onboard.sh and onboard.ps1       (yours)</span>
+<span class="a">+ Re-embed runner via nodes/build.py, commit both    (r18)</span></pre>
+            <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn sm primary" id="inl-rl">Reload r18 and re-apply my edit</button><button class="btn sm" id="inl-dis">Discard my edit</button></div>
+            <p class="muted" style="font-size:12px;margin-top:6px">Overwrite is not offered: it would drop the leader's change without you seeing it.</p>
+          </div></div>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Item</th><th>Status</th><th>Owner model</th><th>Work item</th><th class="n">Rev</th><th>Updated</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>Merge Windows enrollment tag fix</td><td><span class="pill p-bad">Blocked</span></td><td class="mono">claude-sonnet-5-5</td><td><a href="#" class="evl mono">t-3f9a12c0</a></td><td class="n">r4</td><td>12m ago</td></tr>
+            <tr><td>2</td><td>Final review, batch 14</td><td><span class="pill p-run">Running</span></td><td class="mono">codex gpt-5.6-terra</td><td><a href="#" class="evl mono">t-5d3318aa</a></td><td class="n">r2</td><td>11m ago</td></tr>
+            <tr class="stale"><td>3</td><td>Review budget hold toggle</td><td><span class="pill p-run">Running</span></td><td class="mono">claude-fable-5-2</td><td><a href="#" class="evl mono">t-8b41d7e2</a></td><td class="n">r3</td><td>2h 10m ago</td></tr>
+            <tr><td>4</td><td>Build plan item editor</td><td><span class="pill p-run">Running</span></td><td class="mono">claude-opus-5-5</td><td><a href="#" class="evl mono">t-a07c55f1</a></td><td class="n">r5</td><td>48m ago</td></tr>
+            <tr class="stale" id="row5"><td>5</td><td id="t5">Re-embed runner in onboard.sh and onboard.ps1</td><td><span class="pill p-idle">Queued</span></td><td class="mono">claude-sonnet-5-5</td><td><span class="pill p-warn">No work item</span></td><td class="n">r1</td><td>3h 05m ago <button class="btn sm" id="edit5" style="margin-left:8px">Edit</button></td></tr>
+            <tr><td>6</td><td>Benchmark glm-4.7-flash as reviewer</td><td><span class="pill p-idle">Queued</span></td><td class="mono">claude-haiku-5-5</td><td><span class="pill p-warn">No work item</span></td><td class="n">r1</td><td>26m ago</td></tr>
+            <tr><td>7</td><td>Draft UI revamp mocks</td><td><span class="pill p-ok">Done</span></td><td class="mono">claude-sonnet-5-5</td><td><a href="#" class="evl mono">t-700dbe6f</a></td><td class="n">r6</td><td>1h 20m ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="stack">
+        <div class="card">
+          <header><h2>Leader</h2><span class="pill p-ok">Active</span></header>
+          <div class="body stack" style="gap:12px">
+            <dl class="kv">
+              <dt>Leads</dt><dd class="mono">claude-sonnet-5-5 / fleet</dd>
+              <dt>Session</dt><dd class="mono">s-41c8</dd>
+              <dt>Since</dt><dd>09:12 (5h 20m)</dd>
+              <dt>Last plan edit</dt><dd>14:29, r18</dd>
+              <dt>Handover target</dt><dd class="mono">fresh session, batch 15</dd>
+            </dl>
+            <article class="ins" style="grid-template-columns:4px 1fr"><i></i><div class="in" style="padding:12px 16px">
+              <div class="kick"><h3>Suggestion</h3><span class="conf"><span>Confidence 82%</span></span></div>
+              <div><b>Hand over at the end of batch 14.</b> One chat per batch keeps context cost down; this session has run 5h 20m.</div>
+              <details class="why"><summary>Why?</summary><p>Master instructions: one chat per batch, start the next from the stored plan. Batch 14 has 1 item left to finish after item 7.</p></details>
+              <div><button class="btn sm act" data-title="Schedule handover after batch 14"
+                data-req="PUT /api/plan { leader_handover: { target: &quot;new session&quot;, when: &quot;batch 14 complete&quot; } } and put_plan summary stored for batch 15"
+                data-rule="Handover is queued; the current leader keeps control until batch 14 closes."
+                data-effect="Nothing stops now. No task is cancelled.">Schedule handover</button></div>
+            </div></article>
+          </div>
+        </div>
+        <div class="card">
+          <header><h2>Plan states</h2></header>
+          <div id="pl-load" class="skel" aria-busy="true" aria-label="Loading plan history" hidden><i style="width:80%"></i><i style="width:60%"></i><i style="width:70%"></i></div>
+          <div id="pl-empty"><div class="empty"><b>No earlier batches</b>Batch 13 and older are archived. Load them from Activity.</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-other" aria-labelledby="h-other" data-crumb="Not mocked">
+  <div class="head"><div><h1 id="h-other">Not part of this mock</h1><p class="sub">This mock covers Budget and Plan. Other pages are in c-workbench.html.</p></div></div>
+  <div class="card"><div class="empty"><b>Open Budget or Plan</b>These two views carry the intelligence layer.</div></div>
+</section>
+
+</main>
+</div>
+</div>
+
+<dialog id="dlg" aria-labelledby="dlg-t">
+  <div class="dh"><h2 id="dlg-t">Confirm</h2><p class="muted" style="font-size:12px">Nothing runs until you confirm.</p></div>
+  <div class="db">
+    <div><h3>Exact request</h3><code class="cmd" id="dlg-r" style="white-space:normal"></code></div>
+    <div><h3>Rule that applies</h3><p id="dlg-u" class="sub"></p></div>
+    <div><h3>Expected effect</h3><p id="dlg-e" class="sub"></p></div>
+  </div>
+  <div class="df"><span class="sp">Logged to Activity with your name.</span><button class="btn" id="dlg-n">Cancel</button><button class="btn primary" id="dlg-y">Confirm</button></div>
+</dialog>
+
+<script>
+(function(){
+  var views={budget:'v-budget',plan:'v-plan'};
+  function $(i){return document.getElementById(i)}
+  function show(k){
+    var id=views[k]||'v-other';
+    document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('on',v.id===id)});
+    document.querySelectorAll('.rail .nav').forEach(function(b){
+      if(b.dataset.go===k){b.setAttribute('aria-current','page')}else{b.removeAttribute('aria-current')}
+    });
+    $('crumbs').innerHTML='<b>'+$(id).dataset.crumb+'</b>';
+    window.scrollTo(0,0);
+  }
+  document.querySelectorAll('[data-go]').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.go)})});
+  document.querySelectorAll('.tabs button').forEach(function(t){t.addEventListener('click',function(){
+    var bar=t.parentNode;
+    bar.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-selected',x===t)});
+    bar.parentNode.querySelectorAll('.panel').forEach(function(p){p.classList.toggle('on',p.id===t.dataset.p)});
+  })});
+  document.querySelectorAll('.evl').forEach(function(a){a.addEventListener('click',function(e){e.preventDefault()})});
+  var tb=$('theme'),root=document.documentElement;
+  tb.addEventListener('click',function(){
+    var d=root.dataset.theme!=='dark';
+    root.dataset.theme=d?'dark':'light';
+    tb.setAttribute('aria-pressed',d);
+    tb.textContent=d?'Light theme':'Dark theme';
+  });
+
+  /* confirm step: every proposed action goes through the dialog */
+  var dlg=$('dlg'),pending=null;
+  function ask(o){
+    pending=o;
+    $('dlg-t').textContent=o.title;$('dlg-r').textContent=o.req;$('dlg-u').textContent=o.rule;$('dlg-e').textContent=o.effect;
+    dlg.showModal();
+  }
+  function note(t){$('note').innerHTML='<div class="note"><div><b>Recorded.</b> '+t+' Mock only: nothing was sent.</div></div>'}
+  document.querySelectorAll('.act').forEach(function(b){b.addEventListener('click',function(){
+    ask({title:b.dataset.title,req:b.dataset.req,rule:b.dataset.rule,effect:b.dataset.effect,done:function(){note(b.dataset.title+'.')}});
+  })});
+  $('dlg-n').addEventListener('click',function(){pending=null;dlg.close()});
+  $('dlg-y').addEventListener('click',function(){var p=pending;pending=null;dlg.close();if(p&&p.done)p.done()});
+
+  /* budget hold: switch asks first, state changes only on confirm */
+  var hold=$('hold');
+  hold.addEventListener('click',function(){
+    var on=hold.getAttribute('aria-checked')==='true';
+    ask({title:on?'Turn budget hold off':'Turn budget hold on',
+      req:'PUT /api/budget/rules/hold { enabled: '+(!on)+' }',
+      rule:on?'Rules v3 apply again.':'Hold overrides v3 for paid models: only final_review and security_review are accepted.',
+      effect:on?'Queued builds and fixes can start again.':'4 queued paid tasks would wait. Running tasks finish. Local roles unaffected. Toggle again to undo.',
+      done:function(){hold.setAttribute('aria-checked',!on);$('hold-s').textContent=on?'Off':'On';$('hold-s').className='pill '+(on?'p-idle':'p-warn');note('Budget hold '+(on?'off':'on')+'.')}});
+  });
+
+  /* loading state */
+  var fb=$('fc-body'),keep=fb.innerHTML;
+  $('recalc').addEventListener('click',function(){
+    fb.innerHTML='<div class="skel" aria-busy="true" aria-label="Recomputing forecast"><i style="width:90%"></i><i style="width:100%"></i><i style="width:100%"></i><i style="width:60%"></i><span class="muted" style="font-size:12px">Recomputing from /api/tokens/summary...</span></div>';
+    setTimeout(function(){fb.innerHTML=keep},1400);
+  });
+  /* error state: rules diff */
+  $('rv').addEventListener('change',function(){
+    var bad=this.value==='1';
+    $('rules-err').hidden=!bad;$('rules-ok').hidden=bad;
+  });
+  $('rv-retry').addEventListener('click',function(){$('rv').value='2';$('rules-err').hidden=true;$('rules-ok').hidden=false});
+  /* empty state: decisions filter */
+  $('df').addEventListener('change',function(){
+    var e=this.value==='spare';$('dec-empty').hidden=!e;$('dec-t').hidden=e;
+  });
+  /* plan inline edit with revision conflict */
+  $('edit5').addEventListener('click',function(){$('inl').hidden=false;$('inl-err').hidden=true;$('inl-t').focus()});
+  $('inl-x').addEventListener('click',function(){$('inl').hidden=true});
+  $('inl-save').addEventListener('click',function(){$('inl').hidden=true;$('inl-err').hidden=false});
+  $('inl-dis').addEventListener('click',function(){$('inl-err').hidden=true});
+  $('inl-rl').addEventListener('click',function(){
+    $('t5').textContent='Re-embed runner via nodes/build.py, commit both';$('inl-err').hidden=true;$('inl').hidden=false;
+  });
+  $('reload').addEventListener('click',function(){
+    $('pl-empty').hidden=true;$('pl-load').hidden=false;
+    setTimeout(function(){$('pl-load').hidden=true;$('pl-empty').hidden=false},1400);
+  });
+})();
+</script>
+</body>
+</html>

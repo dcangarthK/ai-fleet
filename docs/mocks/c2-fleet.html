@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet console - C2 Fleet intelligence mock</title>
+<style>
+:root{
+  --bg:#fafaf8;--surface:#fff;--sunken:#f2f2ee;--line:#e3e3dc;--line-strong:#c9c9c0;
+  --ink:#1b1d1f;--ink-2:#46494d;--ink-3:#5f6368;
+  --accent:#1459b3;--accent-ink:#fff;--accent-soft:#e6eef9;
+  --ok:#17663a;--ok-soft:#e4f2e9;--warn:#8a5300;--warn-soft:#faf0dc;--bad:#b3261e;--bad-soft:#fbe9e7;
+  --focus:#1459b3;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --r:6px;
+}
+[data-theme=dark]{
+  --bg:#141517;--surface:#1b1d20;--sunken:#101113;--line:#2b2e32;--line-strong:#42464c;
+  --ink:#ececea;--ink-2:#b8bbbf;--ink-3:#9a9ea4;
+  --accent:#6ea8f0;--accent-ink:#0b1626;--accent-soft:#1c2a3f;
+  --ok:#5fcf8b;--ok-soft:#17291f;--warn:#e6b052;--warn-soft:#2e2412;--bad:#ff8a80;--bad-soft:#331a18;
+  --focus:#8dbcf5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--accent)}
+h1,h2,h3,p{margin:0}
+h1{font-size:26px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:650}
+h3{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.sub{color:var(--ink-2)}
+.muted{color:var(--ink-3)}
+
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.rail{border-right:1px solid var(--line);background:var(--surface);padding:var(--s4) var(--s3);display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;padding:0 var(--s2)}
+.brand i{width:12px;height:12px;background:var(--accent);border-radius:3px;display:block}
+.rail h3{padding:0 var(--s2);margin-bottom:var(--s1)}
+.rail button.nav{all:unset;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px var(--s2);border-radius:var(--r);color:var(--ink-2);cursor:pointer}
+.rail button.nav:hover{background:var(--sunken);color:var(--ink)}
+.rail button.nav[aria-current=page]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.rail button.nav:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.badge{font-size:11px;min-width:20px;text-align:center;padding:0 6px;border-radius:10px;background:var(--bad);color:#fff;font-weight:600}
+[data-theme=dark] .badge{color:#2a0b08}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--s2);padding:0 var(--s2)}
+.rail .kbd-row{display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+
+.main{min-width:0}
+.top{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s6);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:2}
+.crumbs{color:var(--ink-3);font-size:13px;flex:1}
+.crumbs b{color:var(--ink);font-weight:600}
+.cmdk{display:flex;align-items:center;gap:var(--s3);min-width:320px;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:var(--r);background:var(--bg);color:var(--ink-3);text-align:left}
+.cmdk span:first-child{flex:1}
+kbd{font:12px var(--mono);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink-2);background:var(--surface)}
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:6px var(--s3);font-weight:550}
+.btn:hover{background:var(--sunken)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:3px var(--s2);font-size:13px}
+.page{padding:var(--s6) var(--s6) var(--s7);max-width:1360px}
+.view{display:none}.view.on{display:block}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s6)}
+.head .sub{margin-top:var(--s1);max-width:62ch}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.card .body{padding:var(--s4) var(--s5)}
+.stack{display:flex;flex-direction:column;gap:var(--s5)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:var(--s5)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-soft)}
+.p-warn{color:var(--warn);background:var(--warn-soft)}
+.p-bad{color:var(--bad);background:var(--bad-soft)}
+.p-run{color:var(--accent);background:var(--accent-soft)}
+.p-idle{color:var(--ink-3);background:var(--sunken)}
+table{width:100%;border-collapse:collapse}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);text-align:left;font-weight:650;padding:var(--s2) var(--s5);border-bottom:1px solid var(--line)}
+td{padding:var(--s3) var(--s5);border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunken)}
+td.n,th.n{text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar.warn i{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--s2) var(--s4)}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0;text-align:right}
+.inbox{list-style:none;margin:0;padding:0}
+.inbox li{display:grid;grid-template-columns:72px 1fr auto;gap:var(--s4);align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.inbox li:last-child{border-bottom:0}
+.inbox .t{font-weight:600}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .v{font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.01em}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--ink-3)}
+.empty b{display:block;color:var(--ink);font-size:15px;margin-bottom:var(--s1)}
+.err{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--bad);background:var(--bad-soft);border-radius:var(--r);color:var(--ink)}
+.err b{color:var(--bad)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--line);padding:0 var(--s5)}
+.tabs button{all:unset;padding:var(--s3) 0;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+
+.chain{display:grid;grid-template-columns:repeat(7,1fr);padding:var(--s5)}
+.stg{position:relative;padding-right:var(--s2)}
+.stg::before{content:"";position:absolute;top:11px;left:28px;right:4px;height:2px;background:var(--line-strong)}
+.stg:last-child::before{display:none}
+.stg.done::before{background:var(--ok)}
+.dot{position:relative;width:24px;height:24px;border-radius:50%;border:2px solid var(--line-strong);background:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink-3)}
+.stg.done .dot{border-color:var(--ok);background:var(--ok);color:#fff}
+[data-theme=dark] .stg.done .dot{color:#0c2015}
+.stg.now .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.stg.bad .dot{border-color:var(--bad);background:var(--bad);color:#fff}
+[data-theme=dark] .stg.bad .dot{color:#2a0b08}
+.stg.plan .dot{border-style:dashed}
+.stg .nm{margin-top:var(--s2);font-weight:650}
+.stg .md{font-size:12px;color:var(--ink-2);line-height:1.4;word-break:break-all}
+.stg .ac{font-size:12px;color:var(--ink-3)}
+.stg .at{font-size:12px;margin-top:2px;color:var(--ink-2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.actions .sp{flex:1}
+.msg{flex:1;min-width:200px;border:1px solid var(--line-strong);border-radius:var(--r);padding:6px var(--s3);background:var(--surface);color:var(--ink);font:inherit}
+.msg::placeholder{color:var(--ink-3)}
+pre.log,pre.diff{margin:0;padding:var(--s3) var(--s5);font:12.5px/1.6 var(--mono);overflow:auto;background:var(--sunken)}
+.log .t{color:var(--ink-3)}.log .w{color:var(--warn)}
+.diff span{display:block}
+.diff .a{color:var(--ok);background:var(--ok-soft)}
+.diff .d{color:var(--bad);background:var(--bad-soft)}
+.diff .h{color:var(--ink-3)}
+.files{list-style:none;margin:0;padding:var(--s2) 0;font:12.5px var(--mono)}
+.files li{display:flex;justify-content:space-between;gap:var(--s2);padding:3px var(--s4)}
+.files li.sel{background:var(--accent-soft);color:var(--accent)}
+.find{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{font:700 11px var(--mono);padding:1px 6px;border-radius:4px;height:fit-content;margin-top:2px;text-align:center}
+.s-h{background:var(--bad);color:#fff}
+[data-theme=dark] .s-h{color:#2a0b08}
+.s-m{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn)}
+.s-l{background:var(--sunken);color:var(--ink-2);border:1px solid var(--line-strong)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s5);align-items:start}
+.ctx{display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:76px}
+.ctx .card .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sw{display:flex;gap:var(--s2);align-items:center;color:var(--ink-2);font-size:13px}
+.sw input{accent-color:var(--accent)}
+.wiz{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);padding:var(--s4) var(--s5)}
+.wiz div{border-top:3px solid var(--line-strong);padding-top:var(--s2);color:var(--ink-3);font-size:13px}
+.wiz div.on{border-color:var(--accent)}
+.wiz b{display:block;color:var(--ink)}
+.cmd{display:block;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px var(--mono);overflow-x:auto;white-space:nowrap}
+@media(max-width:1100px){.split,.grid2{grid-template-columns:1fr}.ctx{position:static}.chain{grid-template-columns:repeat(4,1fr);row-gap:var(--s5)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.rail{position:static;height:auto}.page{padding:var(--s4)}.cmdk{min-width:0}}
+
+/* ---- c2 extensions ---- */
+.ins{border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;background:var(--surface)}
+.ins.warn{border-left-color:var(--warn)}.ins.bad{border-left-color:var(--bad)}
+.ins .hd{display:flex;justify-content:space-between;gap:var(--s4);align-items:flex-start;padding:var(--s4) var(--s5) var(--s2)}
+.ins .bd{padding:0 var(--s5) var(--s4);display:flex;flex-direction:column;gap:var(--s3)}
+.ins .ft{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.ins .ft .sp{flex:1}
+.tag{font:650 11px var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.conf{display:inline-flex;align-items:center;gap:var(--s2);font-size:12.5px;color:var(--ink-2);white-space:nowrap}
+.conf .bar{width:56px}
+.ev{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);font:12.5px var(--mono)}
+.ev a{white-space:nowrap}
+details.why{border:1px solid var(--line);border-radius:var(--r);background:var(--bg)}
+details.why summary{cursor:pointer;padding:4px var(--s3);font-weight:600;color:var(--ink-2)}
+details.why>div{padding:var(--s2) var(--s3) var(--s3);color:var(--ink-2)}
+details.why ul{margin:var(--s1) 0 0;padding-left:var(--s5)}
+.why-i{font-size:12.5px;font-weight:600;color:var(--accent);background:none;border:0;padding:0;text-decoration:underline;text-underline-offset:2px}
+.steps{margin:0;padding-left:var(--s5);display:flex;flex-direction:column;gap:var(--s2)}
+.fc{display:grid;grid-template-columns:auto 1fr;gap:var(--s1) var(--s4);font-size:13px;margin:0}
+.fc dt{color:var(--ink-3)}.fc dd{margin:0}
+.skel{display:block;height:12px;border-radius:4px;background:var(--line);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.4}}
+.spin{width:18px;height:18px;border:2px solid var(--line-strong);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.skel,.spin{animation:none}}
+.row{display:flex;gap:var(--s3);align-items:center}
+.tl{width:100%;height:auto;display:block}
+.tl .ok{fill:var(--ok)}.tl .wn{fill:var(--warn)}.tl .of{fill:var(--bad)}.tl text{fill:var(--ink-3);font:11px var(--mono)}
+.tl .ax{stroke:var(--line-strong)}
+.legend{display:flex;gap:var(--s4);color:var(--ink-3);font-size:12px;flex-wrap:wrap}
+.mx td,.mx th{padding:var(--s3) var(--s4)}
+.mx td.c,.mx th.c{text-align:center}
+.mx small{display:block;color:var(--ink-3);font-size:12px;font-weight:400;text-transform:none;letter-spacing:0}
+.opts{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--s3)}
+.opt{display:flex;gap:var(--s2);align-items:flex-start;border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--s3);cursor:pointer;background:var(--surface)}
+.opt:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.opt input{accent-color:var(--accent);margin-top:3px}
+.opt span{display:block;color:var(--ink-3);font-size:12px}
+.step{display:none}.step.on{display:block}
+.chk{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s2)}
+.chk li{display:flex;gap:var(--s2);align-items:center}
+select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:5px var(--s2)}
+dialog{border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);padding:0;width:min(540px,calc(100% - 32px))}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog .db{padding:var(--s5);display:flex;flex-direction:column;gap:var(--s3)}
+dialog .df{display:flex;justify-content:flex-end;gap:var(--s2);padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken)}
+dialog ol{margin:0;padding-left:var(--s5)}
+.toast{position:fixed;right:var(--s5);bottom:var(--s5);max-width:380px;border:1px solid var(--ok);background:var(--ok-soft);border-radius:var(--r);padding:var(--s3) var(--s4);display:none;z-index:5}
+.toast.on{display:block}
+.note{color:var(--ink-3);font-size:12px}
+@media(max-width:760px){.opts{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand"><i></i>Fleet console</div>
+  <div>
+    <h3>Operate</h3>
+    <button class="nav" data-go="now">Now <span class="badge" aria-label="3 need attention">3</span></button>
+    <button class="nav" data-go="work">Work <span class="muted">14</span></button>
+    <button class="nav" data-go="plan">Plan</button>
+  </div>
+  <div>
+    <h3>Spend</h3>
+    <button class="nav" data-go="budget">Budget</button>
+  </div>
+  <div>
+    <h3>Fleet</h3>
+    <button class="nav" data-go="nodes" aria-current="page">Nodes <span class="muted">3</span></button>
+    <button class="nav" data-go="models">Models</button>
+    <button class="nav" data-go="roles">Roles</button>
+  </div>
+  <div>
+    <h3>Configure</h3>
+    <button class="nav" data-go="cfg1">Policies</button>
+    <button class="nav" data-go="cfg2">Skills</button>
+    <button class="nav" data-go="cfg3">Evals runs</button>
+    <button class="nav" data-go="cfg4">Activity</button>
+    <button class="nav" data-go="cfg5">Settings</button>
+  </div>
+  <div class="foot">
+    <div class="kbd-row"><span>Jump</span><span><kbd>g</kbd> <kbd>n</kbd> <kbd>g</kbd> <kbd>w</kbd> <kbd>g</kbd> <kbd>b</kbd></span></div>
+    <div class="kbd-row"><span>Help</span><kbd>?</kbd></div>
+    <button class="btn sm" id="theme" aria-pressed="false">Dark theme</button>
+    <div class="muted" style="font-size:12px">Signed in as owner (operate)</div>
+  </div>
+</nav>
+
+<div class="main">
+<div class="top">
+  <div class="crumbs" id="crumbs"><b>Nodes / laptop-0ir6d81o</b></div>
+  <button class="cmdk" aria-label="Open command palette"><span>Search pages, tasks, nodes, actions</span><kbd>⌘K</kbd></button>
+  <button class="btn primary">Spawn task</button>
+</div>
+
+<main class="page">
+
+<!-- VIEW 1: NODE DETAIL -->
+<section class="view on" id="v-node" aria-labelledby="h-node" data-crumb="Nodes / laptop-0ir6d81o">
+  <div class="head">
+    <div>
+      <p class="muted" style="margin-bottom:var(--s2)">Node &middot; windows &middot; 32 GB &middot; enrolled 9 Nov</p>
+      <h1 id="h-node">laptop-0ir6d81o</h1>
+      <p class="sub">Offline since 11:04 (3h 28m). Its 1 queued job moved to master.</p>
+    </div>
+    <div class="row"><span class="pill p-idle">Offline</span><button class="btn" data-go="onboard">Onboard a node</button></div>
+  </div>
+
+  <div class="stack">
+    <div class="err" role="alert"><div><b>No heartbeat for 3h 28m.</b> Posture and capacity below are the last values reported at 11:03 and may be stale.</div></div>
+
+    <article class="ins warn" aria-labelledby="i1">
+      <div class="hd">
+        <div><span class="tag">Diagnosis</span><h2 id="i1">Likely a reboot: WSL did not come back and Tailscale is signed out</h2></div>
+        <span class="conf"><span>Confidence</span><span class="bar" role="img" aria-label="78 percent"><i style="width:78%"></i></span><b>78%</b></span>
+      </div>
+      <div class="bd">
+        <p>Offline since 11:04; WSL service missing; tailscale offline &rarr; likely reboot. The runner needs both, so it cannot send heartbeats until they return.</p>
+        <ul class="ev" aria-label="Evidence">
+          <li><a href="#">evt-48121 last heartbeat 11:03</a></li>
+          <li><a href="#">posture snapshot 11:03</a></li>
+          <li><a href="#">tailscale status: NeedsLogin 11:04</a></li>
+          <li><a href="#">evt-48130 drain + reroute 11:09</a></li>
+        </ul>
+        <details class="why"><summary>Why this diagnosis?</summary><div>Rule <span class="mono">node-offline-reboot</span> matched 3 of 4 signals:
+          <ul><li>Heartbeat stopped at 11:03 with no shutdown event (a clean stop sends one).</li><li>Last posture shows the WSL service absent and tailscale not connected.</li><li>The same pattern preceded the 2 Nov outage, which ended after a reboot.</li></ul>
+          Not matched: pending Windows Update flag (none reported). Confidence is below 90% because the machine could also be asleep or switched off.</div></details>
+        <div><h3 style="margin-bottom:var(--s2)">Suggested fix steps (for you, on the machine)</h3>
+          <ol class="steps">
+            <li>Check it is powered on and awake; sign in to Windows.</li>
+            <li>Open Tailscale and sign in; confirm the node shows as connected.</li>
+            <li>In PowerShell run <span class="mono">wsl --status</span>. If WSL is missing, run <span class="mono">wsl --install</span> and reboot.</li>
+            <li>Re-run <span class="mono">onboard.ps1</span> to restart the runner. It should reappear here within about 90 s.</li>
+          </ol></div>
+        <dl class="fc"><dt>Forecast</dt><dd>If still offline at 18:00, the next queued job (a gate run) waits about 6 min longer on master. No cost impact.</dd></dl>
+      </div>
+      <div class="ft"><span class="muted">Nothing runs until you confirm.</span><span class="sp"></span>
+        <button class="btn sm" data-confirm data-title="Drain laptop-0ir6d81o" data-req="Mark node laptop-0ir6d81o as draining|Keep its queue routed to master|Reversible from this page" data-ok="Drain node">Drain node</button>
+        <button class="btn sm primary" data-confirm data-title="Create a checklist task for this fix" data-req="Create a draft task, kind check, for laptop-0ir6d81o|Body: the 4 steps above|Assigned to you; no agent runs it" data-ok="Create task">Create checklist task</button></div>
+    </article>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Health, last 24 hours</h2><div class="legend"><span>Green online</span><span>Amber degraded</span><span>Red offline</span></div></header>
+        <div class="body">
+          <svg class="tl" id="tl" viewBox="0 0 720 84" role="img" aria-label="24 hour health timeline: online until 11:04 today, one degraded period about 15 hours ago, offline for the last 3 hours 28 minutes"></svg>
+          <p class="note" style="margin-top:var(--s2)">One bar per 30 minutes. Degraded at 23:30: heartbeat latency above 5 s for 30 min (<a href="#">evt-47790</a>).</p>
+        </div>
+      </div>
+      <div class="card">
+        <header><h2>Runner</h2></header>
+        <div class="body stack" style="gap:var(--s4)">
+          <dl class="kv" style="margin:0"><dt>Version</dt><dd class="mono">0.14.2</dd><dt>Available</dt><dd class="mono">0.15.0</dd><dt>Ceiling</dt><dd>1 job, models up to 20 GB</dd><dt>Jobs</dt><dd>0 running, 1 rerouted</dd></dl>
+          <div class="ins"><div class="bd" style="padding-top:var(--s3)"><span class="tag">Suggestion &middot; 91%</span><p>Update the runner to 0.15.0 once the node is back. It cannot update while offline.</p><details class="why"><summary>Why?</summary><div>Policy: update within 7 days of release. 0.15.0 is 5 days old; 2 of 3 nodes already run it (<a href="#">release notes</a>).</div></details>
+          <div><button class="btn sm" data-confirm data-title="Queue runner update 0.15.0" data-req="Queue update 0.15.0 for laptop-0ir6d81o|Applies on its next heartbeat|No running jobs are interrupted (none running)" data-ok="Queue update">Queue update</button></div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Posture checks</h2><span class="muted">last reported 11:03</span></header>
+        <table>
+          <thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead>
+          <tbody>
+            <tr><td>Tailscale</td><td><span class="pill p-bad">Offline</span></td><td class="muted">NeedsLogin; tag:worker not confirmed</td></tr>
+            <tr><td>WSL service</td><td><span class="pill p-bad">Missing</span></td><td class="muted">LxssManager not found</td></tr>
+            <tr><td>Runner service</td><td><span class="pill p-bad">Stopped</span></td><td class="muted">no heartbeat since 11:03</td></tr>
+            <tr><td>Windows Firewall rules</td><td><span class="pill p-warn">Review</span></td><td>Docker Desktop Backend allows 11434/11435/12434 inbound<div class="muted" style="font-size:12px">11434 is the model server port. <a href="#">evidence: firewall rule dump 11:03</a></div></td></tr>
+            <tr><td>Disk encryption</td><td><span class="pill p-ok">BitLocker on</span></td><td class="muted">C: protected</td></tr>
+          </tbody>
+        </table>
+        <div class="ins warn" style="margin:var(--s3) var(--s5) var(--s4)"><div class="bd" style="padding-top:var(--s3)"><span class="tag">Insight &middot; confidence 64%</span><p>The inbound rule may expose the model server beyond the tailnet. Restrict it to Tailscale's range (100.64.0.0/10).</p><details class="why"><summary>Why?</summary><div>Rule <span class="mono">fw-model-ports</span>: inbound allow on 11434 with scope "Any". Confidence is lower because the network profile that applies (Private or Public) was not reported.</div></details><div><button class="btn sm" data-confirm data-title="Create task: restrict firewall rule" data-req="Create a draft task, kind check, for laptop-0ir6d81o|Suggested rule scope: 100.64.0.0/10|You apply it on the machine; nothing changes remotely" data-ok="Create task">Create task</button></div></div></div>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <header><h2>Models installed</h2></header>
+          <table><tbody>
+            <tr><td class="mono">qwen2.5-coder:14b</td><td class="muted">9.0 GB</td><td><span class="pill p-idle">On disk</span></td></tr>
+            <tr><td class="mono">glm-4.7-flash</td><td class="muted">17.2 GB</td><td><span class="pill p-idle">On disk</span></td></tr>
+          </tbody></table>
+        </div>
+        <div class="card">
+          <header><h2>Jobs</h2><span class="muted">0 / 1</span></header>
+          <div class="empty"><b>No jobs on this node</b>The node is offline. Rerouted: <span class="mono">t-7e20c4d9</span> now on master.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VIEW 2: ONBOARDING -->
+<section class="view" id="v-onboard" aria-labelledby="h-onb" data-crumb="Nodes / Onboard a node">
+  <div class="head"><div><h1 id="h-onb">Onboard a node</h1><p class="sub">Four steps. The node appears here after it runs the command; approval stays with you.</p></div><button class="btn" data-go="nodes">Back to nodes</button></div>
+  <div class="card" style="max-width:860px">
+    <div class="wiz" id="wiz" aria-label="Onboarding steps">
+      <div class="on"><b>1. Choose OS</b>What it runs</div>
+      <div><b>2. Command</b>Run on the machine</div>
+      <div><b>3. Waiting</b>Node calls home</div>
+      <div><b>4. Approve</b>Ceiling and roles</div>
+    </div>
+    <div class="body">
+      <div class="step on" data-s="1">
+        <div class="opts" role="radiogroup" aria-label="Operating system">
+          <label class="opt"><input type="radio" name="os" value="macOS"><div>macOS<span>Apple silicon or Intel</span></div></label>
+          <label class="opt"><input type="radio" name="os" value="Linux"><div>Linux<span>systemd distributions</span></div></label>
+          <label class="opt"><input type="radio" name="os" value="Windows" checked><div>Windows<span>PowerShell, needs WSL</span></div></label>
+        </div>
+      </div>
+      <div class="step" data-s="2">
+        <span class="muted" id="oslabel">Windows (PowerShell)</span>
+        <code class="cmd" id="cmdtxt" style="margin:var(--s2) 0">powershell -ExecutionPolicy Bypass -File .\onboard.ps1 -Controller https://master.tailnet.example</code>
+        <div class="row"><button class="btn sm" id="copy">Copy command</button><span class="note">The policy bypass applies to that process only. Command text is illustrative in this mock.</span></div>
+      </div>
+      <div class="step" data-s="3">
+        <div class="stack" style="gap:var(--s4)">
+          <div class="row" role="status" aria-live="polite"><span class="spin"></span><div><b>Waiting for the first heartbeat</b><div class="muted">Listening for enrollment from this machine. 00:42 elapsed.</div></div></div>
+          <ul class="chk">
+            <li><span class="pill p-ok">Done</span>Enrollment request received</li>
+            <li><span class="pill p-run">Checking</span>Tailscale tag <span class="mono">tag:worker</span></li>
+            <li><span class="pill p-idle">Waiting</span>Runner heartbeat</li>
+          </ul>
+          <span class="skel" style="width:70%"></span><span class="skel" style="width:45%"></span>
+          <div class="ins"><div class="bd" style="padding-top:var(--s3)"><span class="tag">Forecast &middot; 83%</span><p>Expect the first heartbeat in about 90 s. The median of the last 5 enrollments was 84 s (range 61 to 140 s).</p><details class="why"><summary>Why?</summary><div>Based on <a href="#">5 enrollment events</a>. If nothing arrives after 5 min, the usual cause (3 of 4 past timeouts) is the tag not being applied; see the error state.</div></details></div></div>
+          <div class="err" role="alert" id="timeout" hidden><div><b>No heartbeat after 5 min.</b> The enrollment arrived but the Tailscale tag was not applied. Re-run the command from an elevated PowerShell, then wait again. <span class="mono">Evidence: evt-48202</span></div></div>
+          <div class="row"><button class="btn sm" id="simhb">Simulate heartbeat</button><button class="btn sm" id="simto">Toggle timeout error</button></div>
+        </div>
+      </div>
+      <div class="step" data-s="4">
+        <div class="stack" style="gap:var(--s4)">
+          <div class="row"><span class="pill p-ok">Heartbeat received</span><b>laptop-new-4kq2</b><span class="muted">windows &middot; 16 GB &middot; runner 0.15.0</span></div>
+          <div class="ins"><div class="bd" style="padding-top:var(--s3)"><span class="tag">Suggestion &middot; confidence 72%</span><p>Ceiling 1 job, models up to 8 GB; roles <b>fast</b> and <b>coder</b>.</p><details class="why"><summary>Why?</summary><div>16 GB total leaves about 9 GB after the OS and WSL, so qwen2.5-coder:14b (9.0 GB) would not fit with headroom. Posture is clean: all 5 checks passed (<a href="#">posture snapshot</a>).</div></details></div></div>
+          <div class="row" style="flex-wrap:wrap;gap:var(--s5)">
+            <label>Ceiling <select id="ceil"><option>1 job, models up to 8 GB</option><option>2 jobs, models up to 8 GB</option><option>1 job, models up to 20 GB</option></select></label>
+            <label class="sw"><input type="checkbox" id="r1" checked> fast</label>
+            <label class="sw"><input type="checkbox" id="r2" checked> coder</label>
+            <label class="sw"><input type="checkbox" id="r3"> reviewer</label>
+          </div>
+          <div><button class="btn primary" id="approve">Approve node</button> <span class="note">You confirm the exact settings first.</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="actions"><button class="btn sm" id="back">Back</button><span class="sp"></span><span class="muted" id="stepno">Step 1 of 4</span><button class="btn sm primary" id="next">Next</button></div>
+  </div>
+</section>
+
+<!-- VIEW 3: MODELS -->
+<section class="view" id="v-models" aria-labelledby="h-mod" data-crumb="Models">
+  <div class="head"><div><h1 id="h-mod">Models</h1><p class="sub">Catalog against nodes: install state, size and the role each model serves.</p></div><button class="btn">Add catalog entry</button></div>
+  <div class="stack">
+    <article class="ins" aria-labelledby="i2">
+      <div class="hd"><div><span class="tag">Suggestion</span><h2 id="i2">qwen3:8b scored 0.71 on reviewer evals vs glm-4.7-flash 0.64: install on M1 Pro and assign?</h2></div>
+        <span class="conf"><span>Confidence</span><span class="bar" role="img" aria-label="62 percent"><i style="width:62%"></i></span><b>62%</b></span></div>
+      <div class="bd">
+        <p>Install qwen3:8b (5.2 GB) on duncan's macbook m1 pro and make it the reviewer primary, keeping glm-4.7-flash as fallback. It also avoids the failed load there (glm needs 17.2 GB, 9.8 GB free).</p>
+        <ul class="ev"><li><a href="#">eval run ev-0412 reviewer, 40 cases</a></li><li><a href="#">eval run ev-0409 reviewer, 40 cases</a></li><li><a href="#">alert: glm-4.7-flash load failed 13:58</a></li></ul>
+        <details class="why"><summary>Why only 62%?</summary><div>The 0.07 gap is over 40 cases and two runs; the ranges overlap slightly. The M1 Pro has 15 of 16 GB in use, so qwen2.5-coder:14b must be unloaded first, which pauses <span class="mono">t-c92e0b64</span>. A third eval run would raise confidence.</div></details>
+        <dl class="fc"><dt>Cost</dt><dd>5.2 GB download, no paid tokens. Reviews on this role stay local.</dd></dl>
+      </div>
+      <div class="ft"><span class="muted">Nothing runs until you confirm.</span><span class="sp"></span><button class="btn sm" data-go="roles">Compare in Roles</button>
+        <button class="btn sm primary" data-confirm data-title="Install qwen3:8b and assign reviewer" data-req="Install qwen3:8b on duncan's macbook m1 pro (5.2 GB)|Set role reviewer primary to qwen3:8b on that node|Keep glm-4.7-flash as fallback|Wait for t-c92e0b64 to finish before unloading qwen2.5-coder:14b" data-ok="Install and assign">Install and assign</button></div>
+    </article>
+
+    <div class="card">
+      <table class="mx">
+        <thead><tr><th>Model</th><th class="n">Size</th><th class="c">master<small>darwin, 64 GB</small></th><th class="c">duncan's macbook m1 pro<small>macOS, 16 GB</small></th><th class="c">laptop-0ir6d81o<small>windows, offline 3h</small></th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">qwen2.5-coder:14b</td><td class="n">9.0 GB</td><td class="c"><span class="pill p-ok">Loaded</span></td><td class="c"><span class="pill p-ok">Loaded</span></td><td class="c"><span class="pill p-idle">On disk, stale</span></td><td>coder, fast</td></tr>
+          <tr><td class="mono">glm-4.7-flash</td><td class="n">17.2 GB</td><td class="c"><span class="pill p-ok">Loaded</span></td><td class="c"><span class="pill p-bad">Load failed</span></td><td class="c"><span class="pill p-idle">On disk, stale</span></td><td>reviewer</td></tr>
+          <tr><td class="mono">qwen3:8b</td><td class="n">5.2 GB</td><td class="c"><span class="pill p-idle">Not installed</span></td><td class="c"><button class="btn sm" data-confirm data-title="Install qwen3:8b on M1 Pro" data-req="Install qwen3:8b on duncan's macbook m1 pro (5.2 GB)|No role change" data-ok="Install">Install</button></td><td class="c"><span class="pill p-idle">Offline</span></td><td class="muted">candidate</td></tr>
+          <tr><td class="mono">claude-sonnet-5-5<small>cloud</small></td><td class="n muted">n/a</td><td class="c muted" colspan="3">Via accounts fleet and spare, any online node</td><td>builds, fixes</td></tr>
+          <tr><td class="mono">claude-fable-5-2<small>cloud</small></td><td class="n muted">n/a</td><td class="c muted" colspan="3">Via account spare</td><td>reviews</td></tr>
+          <tr><td class="mono">claude-opus-5-5, claude-haiku-5-5<small>cloud</small></td><td class="n muted">n/a</td><td class="c muted" colspan="3">Via accounts fleet and spare</td><td>hard builds, merges</td></tr>
+          <tr><td class="mono">codex gpt-5.6-terra<small>cloud</small></td><td class="n muted">n/a</td><td class="c muted" colspan="3">Via account fleet, 83% of weekly limit</td><td>final reviews</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="grid2">
+      <div class="card"><header><h2>Removal suggestions</h2></header><div class="empty"><b>Nothing to remove</b>Models unused for 14 days would be suggested here, with the space freed.</div></div>
+      <div class="card"><header><h2>Memory after install</h2></header><div class="body"><dl class="kv" style="margin:0"><dt>M1 Pro in use</dt><dd>15 GB of 16 GB</dd><dt>After unloading coder</dt><dd>6 GB, then +5.2 GB</dd></dl><p class="note" style="margin-top:var(--s2)">Memory is the limit here, not disk.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- VIEW 4: ROLES -->
+<section class="view" id="v-roles" aria-labelledby="h-rol" data-crumb="Roles">
+  <div class="head"><div><h1 id="h-rol">Roles</h1><p class="sub">Which model answers each local role, how it scored on evals, and what the fleet falls back to.</p></div><button class="btn">Run evals</button></div>
+  <div class="stack">
+    <article class="ins" aria-labelledby="i3">
+      <div class="hd"><div><span class="tag">Suggested reassignment</span><h2 id="i3">Move reviewer from glm-4.7-flash to qwen3:8b</h2></div>
+        <span class="conf"><span>Confidence</span><span class="bar" role="img" aria-label="62 percent"><i style="width:62%"></i></span><b>62%</b></span></div>
+      <div class="bd">
+        <p>Reviewer evals: qwen3:8b <b>0.71</b> vs glm-4.7-flash <b>0.64</b> (40 cases each). qwen3:8b needs about 12 GB less memory, so it can run on the M1 Pro.</p>
+        <ul class="ev"><li><a href="#">ev-0412</a></li><li><a href="#">ev-0409</a></li><li><a href="#">routing decision d-9402</a></li></ul>
+        <details class="why"><summary>Why?</summary><div>Rule <span class="mono">role-better-eval</span>: the candidate beats the current model by at least 0.05 on two runs and fits on a healthy node. Counter-evidence: glm-4.7-flash did better on the security-labelled set (0.80 vs 0.60, 5 cases), so it stays as fallback.</div></details>
+      </div>
+      <div class="ft"><span class="muted">Nothing runs until you confirm.</span><span class="sp"></span>
+        <button class="btn sm primary" data-confirm data-title="Reassign role reviewer" data-req="Set reviewer primary to qwen3:8b on duncan's macbook m1 pro|Fallback 1: glm-4.7-flash on master|Needs qwen3:8b installed there first (not yet)" data-ok="Reassign">Reassign reviewer</button></div>
+    </article>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>Role</th><th>Primary</th><th>Where</th><th class="n">Eval score</th><th>Fallbacks</th><th>Routing</th></tr></thead>
+        <tbody>
+          <tr><td><b>coder</b></td><td class="mono">qwen2.5-coder:14b</td><td>master</td><td class="n">0.78</td><td class="mono">glm-4.7-flash</td><td><button class="why-i" data-why="coder">Why?</button></td></tr>
+          <tr><td><b>fast</b></td><td class="mono">qwen2.5-coder:14b</td><td>duncan's macbook m1 pro</td><td class="n">0.81</td><td class="mono">glm-4.7-flash</td><td><span class="pill p-warn">Fallback model in use</span> <button class="why-i" data-why="fast">Why?</button></td></tr>
+          <tr><td><b>reviewer</b></td><td class="mono">glm-4.7-flash</td><td>master</td><td class="n">0.64</td><td class="mono">qwen2.5-coder:14b</td><td><button class="why-i" data-why="reviewer">Why?</button></td></tr>
+        </tbody>
+      </table>
+      <div id="whybox" style="padding:var(--s3) var(--s5) var(--s4)" aria-live="polite"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Reviewer leaderboard</h2><span class="muted">40 cases</span></header>
+        <table>
+          <thead><tr><th>Model</th><th>Score</th><th class="n">p50 latency</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">qwen3:8b</td><td><div class="row"><div class="bar" style="width:140px" role="img" aria-label="0.71"><i style="width:71%"></i></div><b>0.71</b></div></td><td class="n">14 s</td></tr>
+            <tr><td class="mono">glm-4.7-flash</td><td><div class="row"><div class="bar warn" style="width:140px" role="img" aria-label="0.64"><i style="width:64%"></i></div><b>0.64</b></div></td><td class="n">22 s</td></tr>
+            <tr aria-busy="true"><td class="mono">qwen2.5-coder:14b</td><td colspan="2"><div class="row"><span class="spin"></span><span class="muted">Eval running, 2 of 6 batches</span></div><span class="skel" style="width:60%;margin-top:6px"></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card"><header><h2>Unassigned roles</h2></header><div class="empty"><b>Every role has a primary</b>A role with no healthy model would be listed here with candidates.</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-other" aria-labelledby="h-other" data-crumb="Not mocked">
+  <div class="head"><div><h1 id="h-other">Not part of this mock</h1><p class="sub">This mock covers Nodes, Onboarding, Models and Roles. See c-workbench.html for Now and Work.</p></div></div>
+  <div class="card"><div class="empty"><b>Open Nodes, Models or Roles</b>These views carry the intelligence layer for the Fleet group.</div></div>
+</section>
+
+</main>
+</div>
+</div>
+
+<dialog id="dlg" aria-labelledby="dt">
+  <div class="db"><span class="tag">Confirm</span><h2 id="dt"></h2><p class="sub">This will send exactly:</p><ol id="dr" class="mono"></ol><p class="note">Nothing has run yet. Cancel leaves everything unchanged.</p></div>
+  <div class="df"><button class="btn" id="dno">Cancel</button><button class="btn primary" id="dok">Confirm</button></div>
+</dialog>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(function(){
+  var views={nodes:'v-node',onboard:'v-onboard',models:'v-models',roles:'v-roles'};
+  var rail={onboard:'nodes'};
+  function show(k){
+    var id=views[k]||'v-other',r=rail[k]||k;
+    document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('on',v.id===id)});
+    document.querySelectorAll('.rail .nav').forEach(function(b){
+      if(b.dataset.go===r){b.setAttribute('aria-current','page')}else{b.removeAttribute('aria-current')}
+    });
+    document.getElementById('crumbs').innerHTML='<b>'+document.getElementById(id).dataset.crumb+'</b>';
+    window.scrollTo(0,0);
+  }
+  document.querySelectorAll('[data-go]').forEach(function(b){b.addEventListener('click',function(){show(b.dataset.go)})});
+  var root=document.documentElement,tb=document.getElementById('theme');
+  tb.addEventListener('click',function(){
+    var d=root.dataset.theme!=='dark';
+    root.dataset.theme=d?'dark':'light';tb.setAttribute('aria-pressed',d);tb.textContent=d?'Light theme':'Dark theme';
+  });
+  /* 24h timeline: 48 half-hour bars, now = 14:32 */
+  var s='',i,c;
+  for(i=0;i<48;i++){
+    c=i>=41?'of':(i===5?'wn':'ok');
+    s+='<rect class="'+c+'" x="'+(i*15)+'" y="6" width="13" height="40" rx="2"/>';
+  }
+  s+='<line class="ax" x1="0" x2="720" y1="54" y2="54"/>';
+  [['-24h',0],['-18h',180],['-12h',360],['-6h',540]].forEach(function(t){s+='<text x="'+t[1]+'" y="72">'+t[0]+'</text>'});
+  s+='<text x="640" y="72">now 14:32</text>';
+  document.getElementById('tl').innerHTML=s;
+  /* confirm dialog: nothing executes, only a mock toast */
+  var dlg=document.getElementById('dlg'),cur='';
+  function ask(title,lines,ok){
+    cur=title;
+    document.getElementById('dt').textContent=title;
+    document.getElementById('dr').innerHTML=lines.map(function(l){return '<li>'+l+'</li>'}).join('');
+    document.getElementById('dok').textContent=ok||'Confirm';
+    dlg.showModal();document.getElementById('dno').focus();
+  }
+  document.querySelectorAll('[data-confirm]').forEach(function(b){b.addEventListener('click',function(){ask(b.dataset.title,b.dataset.req.split('|'),b.dataset.ok)})});
+  function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('on');setTimeout(function(){t.classList.remove('on')},4000)}
+  document.getElementById('dno').addEventListener('click',function(){dlg.close()});
+  document.getElementById('dok').addEventListener('click',function(){dlg.close();toast('Confirmed: '+cur+'. Mock only: nothing was sent.')});
+  /* roles Why? */
+  var why={coder:'coder routes to qwen2.5-coder:14b on master: highest coder eval (0.78 vs 0.66), node healthy, 1 of 4 job slots free. Rule v3 "local roles: best eval that fits".',
+    fast:'fast routed to qwen2.5-coder:14b on the M1 Pro: glm-4.7-flash failed to load there (needs 17.2 GB, 9.8 GB free), so fallback 1 took over at 13:58. Decision d-9908.',
+    reviewer:'reviewer routes to glm-4.7-flash on master: it was the only reviewer-capable model that fit master with headroom when set on 9 Nov. qwen3:8b was not in the catalog then. Decision d-9402.'};
+  document.querySelectorAll('[data-why]').forEach(function(b){b.addEventListener('click',function(){
+    document.getElementById('whybox').innerHTML='<details class="why" open><summary>Why '+b.dataset.why+' routes this way</summary><div>'+why[b.dataset.why]+'</div></details>';
+  })});
+  /* onboarding wizard */
+  var step=1,steps=document.querySelectorAll('#v-onboard .step'),wz=document.querySelectorAll('#wiz div');
+  var cmds={macOS:'bash ./onboard.sh --controller https://master.tailnet.example',Linux:'bash ./onboard.sh --controller https://master.tailnet.example',Windows:'powershell -ExecutionPolicy Bypass -File .\\onboard.ps1 -Controller https://master.tailnet.example'};
+  function go(n){
+    step=Math.max(1,Math.min(4,n));
+    steps.forEach(function(e){e.classList.toggle('on',+e.dataset.s===step)});
+    wz.forEach(function(e,j){e.classList.toggle('on',j===step-1)});
+    document.getElementById('stepno').textContent='Step '+step+' of 4';
+    document.getElementById('back').disabled=step===1;
+    document.getElementById('next').style.display=step===4?'none':'';
+    if(step===2){var o=document.querySelector('input[name=os]:checked').value;
+      document.getElementById('oslabel').textContent=o+(o==='Windows'?' (PowerShell)':' (shell)');document.getElementById('cmdtxt').textContent=cmds[o]}
+  }
+  document.getElementById('next').addEventListener('click',function(){go(step+1)});
+  document.getElementById('back').addEventListener('click',function(){go(step-1)});
+  document.getElementById('simhb').addEventListener('click',function(){go(4)});
+  document.getElementById('simto').addEventListener('click',function(){var t=document.getElementById('timeout');t.hidden=!t.hidden});
+  document.getElementById('copy').addEventListener('click',function(){this.textContent='Copied'});
+  document.getElementById('approve').addEventListener('click',function(){
+    var r=['r1','r2','r3'].filter(function(k){return document.getElementById(k).checked}).map(function(k){return document.getElementById(k).parentNode.textContent.trim()});
+    ask('Approve laptop-new-4kq2',['Approve node laptop-new-4kq2','Ceiling: '+document.getElementById('ceil').value,'Roles: '+(r.join(', ')||'none')],'Approve node');
+  });
+  go(1);
+})();
+</script>
+</body>
+</html>

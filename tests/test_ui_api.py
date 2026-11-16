@@ -3,6 +3,7 @@ uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m un
 """
 import time
 import unittest
+from unittest import mock
 
 from tests.test_controller import W
 from tests.test_live import LiveBase
@@ -185,6 +186,42 @@ class UiApiTests(LiveBase):
         self.assertIn("[L102]", seen["user"])
         self.assertNotIn("[L101]", seen["user"])  # only the last 400 lines
         self.assertNotIn("sk-abcdefghijklmnop12345", seen["user"])
+
+    def test_work_repo_is_basename_only(self):
+        put_task(ROOT, title="r", repo="/Users/someone/secret/proj", created=time.time() - 10)
+        body = self.c.get(f"/api/work/{ROOT}").json()
+        self.assertEqual(body["repo"], "proj")
+        self.assertNotIn("/Users/someone", self.c.get(f"/api/work/{ROOT}").text)
+
+    def test_ask_uses_strict_redaction(self):
+        seen = {}
+
+        async def fake_chat(role, system, user):
+            seen["user"] = user
+            return "ok", "m"
+
+        with mock.patch.object(ui_api, "redact", wraps=ui_api.redact) as spy:
+            ui_api.fetch_log, ui_api.chat = no_log, fake_chat
+            r = self.c.post("/api/ask", json={"root_id": ROOT, "question": "why?"}, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(spy.call_args_list)
+        self.assertTrue(all(c.kwargs.get("strict") is True for c in spy.call_args_list))
+
+    def test_search_query_length_capped(self):
+        self.assertEqual(self.c.get("/api/search", params={"q": "a" * 200}).status_code, 200)
+        self.assertEqual(self.c.get("/api/search", params={"q": "a" * 201}).status_code, 400)
+
+    def test_lineage_range_validation(self):
+        now = time.time()
+        self.assertEqual(self.c.get("/api/lineage", params={"since": now, "until": now - 5}).status_code, 400)
+        self.assertEqual(self.c.get("/api/lineage", params={"since": now - 15 * 86400, "until": now}).status_code, 400)
+        self.assertEqual(self.c.get("/api/lineage", params={"since": now - 13 * 86400, "until": now}).status_code, 200)
+
+    def test_lineage_root_members_capped(self):
+        with mock.patch.object(ui_api, "LINEAGE_MAX_TASKS", 1):
+            body = self.c.get("/api/lineage", params={"root": ROOT}).json()
+        self.assertEqual(len(body["nodes"]), 1)
+        self.assertTrue(body["truncated"])
 
     def test_ask_503_when_fast_unavailable(self):
         async def down(role, system, user):

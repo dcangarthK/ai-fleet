@@ -1,3 +1,16 @@
+# Active handoff: 2026-11-14 17:29 SAST (relay routing complete)
+
+The live, step-by-step checkpoint for the current relay-routing takeover is in [`HANDOFF.md`](../HANDOFF.md).
+Relay routing is merged locally at `5334f4a`; the exact delta review is GREEN, the post-merge fleet gate passed,
+and both master services plus Laptop 2 run the matching runner digest. CNTRL `coder` and `fast` are durably routed
+through `100.64.14.85:11436/v1`. Real streamed and non-streamed LiteLLM calls were answered by that deployment;
+raw 11434 is refused and 12434 is unreachable. The five relay build/review/merge worktrees are cleaned. Local
+`main` and `origin/main` both point at `5334f4a`; reflog records an external/owner push at 17:02:39 SAST, not a
+push by this takeover. This historical handover remains below for background; `HANDOFF.md` contains the full
+evidence and chronology.
+
+---
+
 # Current state: 2026-11-13 05:00 SAST (overnight run finished; read this first)
 
 All of the overnight plan (`docs/OVERNIGHT-PLAN.md`) is merged on local `main` (HEAD `c787f67`, 43 commits since

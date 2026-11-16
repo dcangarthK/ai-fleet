@@ -100,6 +100,20 @@ class Fallbacks(unittest.TestCase):
         v = server.trim_task({"id": "t", "state": "review", "result": "Low-hanging fruit first.\nLow: tide today."})
         self.assertEqual(v["findings"], [])
 
+    def _fixture(self, name):
+        text = (ROOT / "tests" / "fixtures" / "review_outputs" / name).read_text()
+        return server.trim_task({"id": "t", "state": "review", "result": text})
+
+    def test_bold_numbered_fixture(self):
+        v = self._fixture("bold_numbered_findings.md")
+        self.assertIn("CHANGES", v["verdict"])
+        self.assertEqual(len(v["findings"]), 16)
+
+    def test_bare_heading_fixture(self):
+        v = self._fixture("bare_heading_findings.md")
+        self.assertEqual(v["verdict"], "CHANGES")
+        self.assertEqual(len(v["findings"]), 3)
+
     def test_unmatched_format_keeps_tail(self):
         text = "x" * 5000 + "\nThe answer is 42."
         v = server.trim_task({"id": "t", "state": "done", "result": text})

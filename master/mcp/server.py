@@ -258,6 +258,10 @@ _FINDING_RE = re.compile(
     r"^\s*(?P<pre>(?:[-*>#|]+\s*|\d+[.)]\s*)*)(?P<wrap>\*\*|\[)?(?P<word>HIGH|MEDIUM|MED|LOW)"
     r"(?:\*\*|\]|\s*(?:[:(|\u2014\u2013]|-\s|\)))", re.I)
 _VERDICT_RE = re.compile(r"^\s*[-*#>\s]*\**verdict\b", re.I)
+_SECTION_RE = re.compile(r"^\s*(?:#+\s*)?\**(?P<word>HIGH|MEDIUM|MED|LOW)\**:?\s*$")  # bare severity heading
+_TAGGED_RE = re.compile(r"^(?:[-*]\s+)?\*\*[A-Z]\d+\.")  # **H1. ...** or - **L1.** ...
+_ITEM_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s)")  # unindented item under a severity heading
+_BARE_VERDICT_RE = re.compile(r"^\s*\**(APPROVE[D]?|CHANGES|REQUEST_CHANGES|LGTM|REJECT)\**\s*$")
 _APPROVE_RE = re.compile(r"approve|lgtm|\bpass|\bok\b|no (issues|findings)", re.I)
 _GATE_RE = re.compile(r"^(Ran \d+ tests?\b|OK\b|FAILED\b)")
 _FAILING_RE = re.compile(r"^(FAIL|ERROR): ")
@@ -289,13 +293,18 @@ def trim_task(t: dict) -> dict:
     the result are kept as `result_tail`; a failed gate with no recognised summary keeps its last 10 lines as
     `tail`. full=True on the tools returns everything."""
     result = t.get("result") or ""
-    verdict, findings, block = "", [], None
+    verdict, findings, block, section, tagged = "", [], None, False, False
     for line in result.splitlines():
-        if _VERDICT_RE.match(line) and not verdict:
+        if _SECTION_RE.match(line):
+            section, block, tagged = True, None, False
+        elif (_VERDICT_RE.match(line) or _BARE_VERDICT_RE.match(line)) and not verdict:
             verdict, block = line.strip(), None
-        elif _is_finding(line):
+        elif _is_finding(line) or (section and (_TAGGED_RE.match(line) or (not tagged and _ITEM_RE.match(line)))):
+            tagged = tagged or bool(_TAGGED_RE.match(line))
             block = [line.strip()]
             findings.append(block)
+        elif line.startswith("#"):
+            section, block = False, None
         elif block is not None and line.strip():
             block.append(line.rstrip())
         else:

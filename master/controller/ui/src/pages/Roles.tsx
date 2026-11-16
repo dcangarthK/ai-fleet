@@ -4,6 +4,7 @@ import { del, post, put, type Assignment, type FleetNode } from "../lib/api";
 import { useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead } from "../components/bits";
+import { Button, Card, Panel, Select, Table, useConfirm } from "../components/ui";
 
 const SUGGESTED = ["coder", "reviewer", "fast"];
 
@@ -25,6 +26,7 @@ export function RolesPage() {
   const models = useModels();
   const { run, busy, error, clearError } = useRun();
   const can = useCan();
+  const confirm = useConfirm();
   const nodes = (fleet.data?.nodes ?? []).filter((n) => n.status === "approved");
   const [role, setRole] = useState("coder");
   const [node, setNode] = useState("");
@@ -52,10 +54,21 @@ export function RolesPage() {
     await run(() => post("/api/roles", { role, node, model, ensure_model: needsInstall, catalog_id: entry?.id }));
   }
 
+  async function remove(a: Assignment) {
+    const ok = await confirm({ title: "Remove role assignment?", message: `Stop routing ${a.role} to ${a.model} on ${a.node ?? a.node_id}?`, confirmLabel: "Remove", danger: true });
+    if (ok) await run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }));
+  }
+
   const reasonFor = (a: Assignment) => {
     const m = catalog.find((x) => x.reference === a.model || x.id === a.catalog_id);
     return m?.nodes[a.node_id]?.reason;
   };
+
+  const rows = roles.flatMap((r) => {
+    const list = assignments.filter((a) => a.role === r);
+    if (!list.length) return [{ key: r, role: r, first: true, a: null as Assignment | null, st: null as ReturnType<typeof routing> | null }];
+    return list.map((a, i) => ({ key: r + a.node_id + a.model, role: r, first: i === 0, a: a as Assignment | null, st: routing(a, fleet.data?.nodes.find((x) => x.id === a.node_id), reasonFor(a)) }));
+  });
 
   return (
     <>
@@ -66,66 +79,49 @@ export function RolesPage() {
       <LoadError error={fleet.error ?? models.error} />
       <ErrorBanner error={error} onDismiss={clearError} />
 
-      <div className="panel">
-        <table>
-          <thead><tr><th>Role</th><th>Model</th><th>Node</th><th>Routing</th><th /></tr></thead>
-          <tbody>
-            {roles.flatMap((r) => {
-              const rows = assignments.filter((a) => a.role === r);
-              if (!rows.length) {
-                return [<tr key={r}><td><b>{r}</b></td><td colSpan={4} className="quiet">No model assigned. Calls to this role fail until you assign one.</td></tr>];
-              }
-              return rows.map((a, i) => {
-                const n = fleet.data?.nodes.find((x) => x.id === a.node_id);
-                const st = routing(a, n, reasonFor(a));
-                return (
-                  <tr key={r + a.node_id + a.model}>
-                    <td>{i === 0 && <b>{r}</b>}</td>
-                    <td className="mono">{a.model}</td>
-                    <td>{a.node ?? a.node_id}</td>
-                    <td><span className={`state tone-${st.tone}`}>{st.label}</span>{st.why && <div className="sub" style={{ maxWidth: 300 }}>{st.why}</div>}</td>
-                    <td>
-                      {can.admin && <button disabled={busy} onClick={() => confirm(`Stop routing ${r} to ${a.model} on ${a.node ?? a.node_id}?`) &&
-                        run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }))}>Remove</button>}
-                    </td>
-                  </tr>
-                );
-              });
-            })}
-          </tbody>
-        </table>
-      </div>
+      <Panel>
+        <Table
+          caption="Role assignments"
+          rows={rows}
+          rowKey={(r) => r.key}
+          columns={[
+            { key: "role", header: "Role", cell: (r) => (r.first ? <b>{r.role}</b> : null) },
+            { key: "model", header: "Model", cell: (r) => r.a ? <span className="mono">{r.a.model}</span> : <span className="quiet">No model assigned. Calls to this role fail until you assign one.</span> },
+            { key: "node", header: "Node", cell: (r) => r.a ? (r.a.node ?? r.a.node_id) : null },
+            { key: "routing", header: "Routing", cell: (r) => r.st ? <><span className={`state tone-${r.st.tone}`}>{r.st.label}</span>{r.st.why && <div className="sub" style={{ maxWidth: 300 }}>{r.st.why}</div>}</> : null },
+            { key: "act", header: "Actions", label: "", cell: (r) => r.a && can.admin ? <Button size="sm" variant="danger" disabled={busy} onClick={() => remove(r.a!)}>Remove</Button> : null },
+          ]}
+        />
+      </Panel>
 
       <section className="section">
         <h2>When a role fails</h2>
-        <div className="panel">
-          <table>
-            <thead><tr><th>Role</th><th>Try next</th></tr></thead>
-            <tbody>
-              {roles.map((r) => {
+        <Panel>
+          <Table
+            caption="Fallback roles"
+            rows={roles}
+            rowKey={(r) => r}
+            columns={[
+              { key: "role", header: "Role", cell: (r) => <b>{r}</b> },
+              { key: "next", header: "Try next", cell: (r) => {
                 const info = fleet.data?.roles?.find((x) => x.name === r);
-                return (
-                  <tr key={r}><td><b>{r}</b></td>
-                    <td>
-                      {can.admin ? (
-                        <select aria-label={`Fallback for ${r}`} value={info?.fallback ?? ""} disabled={busy}
-                                onChange={(e) => run(() => put(`/api/roles/${encodeURIComponent(r)}`, { fallback: e.target.value || null, description: info?.description ?? null }))}>
-                          <option value="">Nothing: report the error</option>
-                          {roles.filter((x) => x !== r).map((x) => <option key={x} value={x}>{x}</option>)}
-                        </select>
-                      ) : (info?.fallback ?? "nothing")}
-                    </td></tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                return can.admin ? (
+                  <Select aria-label={`Fallback for ${r}`} value={info?.fallback ?? ""} disabled={busy}
+                          onChange={(e) => run(() => put(`/api/roles/${encodeURIComponent(r)}`, { fallback: e.target.value || null, description: info?.description ?? null }))}>
+                    <option value="">Nothing: report the error</option>
+                    {roles.filter((x) => x !== r).map((x) => <option key={x} value={x}>{x}</option>)}
+                  </Select>
+                ) : (info?.fallback ?? "nothing");
+              } },
+            ]}
+          />
+        </Panel>
         <p className="small quiet">If a role's models error or time out, the request is tried once on the fallback role and the answer says which role replied.</p>
       </section>
 
       {can.admin && <section className="section">
         <h2>Assign a model to a role</h2>
-        <form className="panel" style={{ padding: 14 }} onSubmit={assign}>
+        <Card as="div"><form onSubmit={assign}>
           <div className="grid-form">
             <label className="field">Role
               <input list="role-names" value={role} onChange={(e) => setRole(e.target.value)} required pattern="[a-z][a-z0-9-]{1,31}"
@@ -146,14 +142,14 @@ export function RolesPage() {
             </label>
           </div>
           <div className="row" style={{ marginTop: 12 }}>
-            <button className="primary" disabled={busy || !node || !model}>{needsInstall ? "Install and assign" : "Assign"}</button>
+            <Button type="submit" variant="primary" disabled={busy || !node || !model}>{needsInstall ? "Install and assign" : "Assign"}</Button>
             <span className="quiet small">
               {needsInstall ? "The node downloads and tests the model first; the role switches on when it's ready."
                 : remoteOff ? "This node doesn't allow remote model installs, so only its installed models are offered."
                 : <>Models not on the node come from the <Link to="/models">catalog</Link> and are installed for you.</>}
             </span>
           </div>
-        </form>
+        </form></Card>
       </section>}
     </>
   );

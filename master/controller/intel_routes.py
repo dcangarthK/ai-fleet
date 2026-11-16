@@ -4,6 +4,7 @@ Read-only except POST /api/intel/cleanup (merged branches only) and POST /api/in
 `suggest` decision, no prompt text). Nothing here approves, unblocks or overrides budget."""
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 
@@ -24,15 +25,42 @@ def _ready(c):
     return c
 
 
+def build_stats(c, now: float | None = None) -> dict:
+    """{(kind, key): {done, bad}} over finished tasks of the last 30 days, keyed by intel.key_of (shared by all callers)."""
+    since = (now or time.time()) - 30 * 86400
+    stats: dict = {}
+    for r in c.execute("SELECT kind, agent, model, state, COUNT(*) AS n FROM tasks WHERE kind IS NOT NULL "
+                       "AND state IN ('done','failed','capped','cancelled') AND created_at>=? "
+                       "GROUP BY kind, agent, model, state", (since,)):
+        s = stats.setdefault((r["kind"], intel.key_of(r["agent"], r["model"])), {"done": 0, "bad": 0})
+        s["done" if r["state"] == "done" else "bad"] += r["n"]
+    return stats
+
+
+def exclusion(c, kind: str, parent_id: str | None) -> tuple:
+    """R6: review kinds never pick the parent builder's key."""
+    if parent_id and kind in REVIEW_KINDS:
+        p = c.execute("SELECT agent, model FROM tasks WHERE id=?", (parent_id,)).fetchone()
+        if p:
+            return (intel.key_of(p["agent"], p["model"]),)
+    return ()
+
+
+def used_5h() -> dict:
+    """{agent: lowest reported 5h used_percent among its accounts, or None}."""
+    out = {}
+    accounts = account_view()
+    for agent in ("claude", "codex"):
+        vals = [a["used_5h"] for a in accounts.values() if a["agent"] == agent and a["used_5h"] is not None]
+        out[agent] = min(vals) if vals else None
+    return out
+
+
 def context(c, kind: str, parent_id: str | None = None) -> dict:
     """Evidence for rank(): rules, history stats, headroom, running load, per-task history rows."""
     now = time.time()
     rules = budget.current_rules()
-    stats: dict = {}
-    for r in c.execute("SELECT kind, agent, model, state, COUNT(*) AS n FROM tasks WHERE kind IS NOT NULL "
-                       "AND state IN ('done','failed','capped') GROUP BY kind, agent, model, state"):
-        s = stats.setdefault((r["kind"], intel.key_of(r["agent"], r["model"])), {"done": 0, "bad": 0})
-        s["done" if r["state"] == "done" else "bad"] += r["n"]
+    stats = build_stats(c, now)
     load: dict = {}
     for r in c.execute("SELECT agent, model, COUNT(*) AS n FROM tasks WHERE state IN ('working','running') "
                        "GROUP BY agent, model"):
@@ -55,12 +83,8 @@ def context(c, kind: str, parent_id: str | None = None) -> dict:
         for key in intel.CANDIDATES:
             if intel.split_key(key)[0] == agent:
                 headroom[key] = dict(entry)
-    exclude = ()
-    if parent_id and kind in REVIEW_KINDS:
-        p = c.execute("SELECT agent, model FROM tasks WHERE id=?", (parent_id,)).fetchone()
-        exclude = (intel.key_of(p["agent"], p["model"]),) if p else ()
-    return {"rules": rules, "stats": stats, "headroom": headroom, "load": load, "exclude": exclude,
-            "history": intel.history(c, now - 30 * 86400)}
+    return {"rules": rules, "stats": stats, "headroom": headroom, "load": load,
+            "exclude": exclusion(c, kind, parent_id), "history": intel.history(c, now - 30 * 86400)}
 
 
 def account_view() -> dict:
@@ -74,24 +98,6 @@ def account_view() -> dict:
                      "rejected_until": rec.get("rejected_until"),
                      "samples": [(w5["observed_at"], used)] if used is not None and w5.get("observed_at") else []}
     return out
-
-
-def auto_pick(kind: str, *, parent_id: str | None = None, task_id: str | None = None, prompt_bytes: int = 0) -> dict:
-    """R6: the top eligible non-local candidate for `kind`, recorded as one `auto_pick`. Raises LookupError if none."""
-    with db() as c:
-        _ready(c)
-        ctx = context(c, kind, parent_id)
-        cands = intel.rank(kind, prompt_bytes=prompt_bytes, **ctx)
-        top = [x for x in cands if x["eligible"]]
-        pick = next((x for x in top if x["agent"] != "local"), None)
-        if pick is None:
-            raise LookupError(f"no eligible agent for {kind}")
-        reasons = list(pick["reasons"])
-        if top and top[0]["agent"] == "local":
-            reasons.insert(0, f"{top[0]['key']} ranked first but local picks are not taken for agent tasks")
-        intel.record(c, task_id=task_id, kind=kind, action="auto_pick", chosen=pick["key"], candidates=cands[:5],
-                     reasons=reasons, est_tokens=pick["est_tokens"], est_usd=pick["est_usd"])
-    return pick
 
 
 def _shape(x: dict | None) -> dict | None:
@@ -126,9 +132,21 @@ def template(kind: str = "build", security: int = 0) -> dict:
             "gate_bounces": 3, "reasons": {"builder": why(builder), "reviewer": why(reviewer), "final": why(final)}}
 
 
+def _git_rev(repo: str, ref: str) -> str | None:
+    r = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", ref], capture_output=True,
+                       text=True, timeout=10)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def _is_merged(repo: str | None, branch: str) -> bool:
+    """True only when the branch has commits and its tip is an ancestor of main (never for tip == main)."""
+    if not repo or not branch:
+        return False
     try:
-        return subprocess.run(["git", "-C", repo or ".", "merge-base", "--is-ancestor", branch, "main"],
+        tip, main = _git_rev(repo, branch), _git_rev(repo, "main")
+        if not tip or not main or tip == main:
+            return False  # missing ref, or never committed (tip == main)
+        return subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"],
                               capture_output=True, timeout=10).returncode == 0
     except Exception:  # noqa: BLE001 - any error means "not merged"
         return False
@@ -142,7 +160,7 @@ def _cleanable(c) -> list[dict]:
 
 
 @router.get("/api/intel/cleanup")
-def cleanup_list() -> list[dict]:
+def cleanup_list() -> list[dict]:  # sync def: FastAPI runs it in a threadpool, git calls stay off the loop
     with db() as c:
         return _cleanable(_ready(c))
 
@@ -150,19 +168,23 @@ def cleanup_list() -> list[dict]:
 @router.post("/api/intel/cleanup")
 async def cleanup_run() -> dict:
     import tasks  # late: tasks owns the runner call
-    with db() as c:
-        found = _cleanable(_ready(c))
+
+    def find():
+        with db() as c:
+            return _cleanable(_ready(c))
+    found = await asyncio.to_thread(find)
     done, failed = [], []
     for t in found:
         try:
             await tasks.cleanup(t["id"])
+            with db() as c:
+                intel.record(_ready(c), task_id=t["id"], kind="cleanup", action="cleanup", chosen=t["branch"],
+                             candidates=[], reasons=["merged into main"])
             done.append(t["id"])
         except HTTPException as e:
             failed.append({"id": t["id"], "error": e.detail})
-            continue
-        with db() as c:
-            intel.record(_ready(c), task_id=t["id"], kind="cleanup", action="cleanup", chosen=t["branch"],
-                         candidates=[], reasons=["merged into main"])
+        except Exception as e:  # noqa: BLE001 - one bad item never stops the rest
+            failed.append({"id": t["id"], "error": f"{e.__class__.__name__}: {e}"})
     return {"cleaned": done, "failed": failed}
 
 

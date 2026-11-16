@@ -305,3 +305,90 @@ class RouteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_h1_codex_builder_with_model_excluded_from_review_pick(self):
+        import intel_routes
+        from store import db, init_db
+        init_db()
+        with db() as c:
+            c.execute("INSERT INTO tasks (id, agent, model, kind, state, created_at) "
+                      "VALUES ('h1b','codex','gpt-5.6-terra','build','done',?)", (time.time(),))
+            self.assertEqual(intel_routes.exclusion(c, "final_review", "h1b"), ("codex",))
+            self.assertEqual(intel_routes.exclusion(c, "build", "h1b"), ())
+        out = intel.rank("final_review", rules=RULES, stats={}, headroom=local_up(), load={}, exclude=("codex",))
+        self.assertFalse(pick(out, "codex")["eligible"])
+
+    def test_h2_intel_view_uses_real_used_percent(self):
+        import intel_routes
+        import tasks
+        orig = intel_routes.used_5h
+        intel_routes.used_5h = lambda: {"claude": 92, "codex": 10}
+        try:
+            headroom, _ = tasks._intel_view(RULES)
+        finally:
+            intel_routes.used_5h = orig
+        self.assertEqual(headroom[SONNET]["used_percent"], 92)
+        out = intel.rank("build", rules=RULES, stats={}, headroom=headroom, load={})
+        self.assertFalse(pick(out, SONNET)["eligible"])
+
+    def test_h3_no_repo_or_no_commits_not_merged(self):
+        import subprocess
+        import intel_routes
+        self.assertFalse(intel_routes._is_merged(None, "fleet/x"))
+        self.assertFalse(intel_routes._is_merged("", "fleet/x"))
+        repo = str(TMP / "h3repo")
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        run = lambda *a: subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True)  # noqa: E731
+        subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True)
+        run(*ident, "commit", "--allow-empty", "-m", "i")
+        run("branch", "fleet/none")  # tip == main: never committed
+        self.assertFalse(intel_routes._is_merged(repo, "fleet/none"))
+        run(*ident, "commit", "--allow-empty", "-m", "m2")
+        run("branch", "fleet/behind", "HEAD~1")  # real commits, tip strictly behind main: merged
+        self.assertTrue(intel_routes._is_merged(repo, "fleet/behind"))
+        run("checkout", "-q", "-b", "fleet/work")
+        run(*ident, "commit", "--allow-empty", "-m", "w")
+        run("checkout", "-q", "main")
+        self.assertFalse(intel_routes._is_merged(repo, "fleet/work"))
+
+    def test_m1_round_reviewer_first_and_security_only_for_re_review(self):
+        s = intel.suggest("re_review", "codex", RULES, local_up(), {}, round_reviewer=SONNET)
+        self.assertEqual((s[0]["agent"], s[0]["model"]), ("claude", "claude-sonnet-5-5"))
+        keys = [(x["agent"], x["model"], x["kind"]) for x in s]
+        self.assertEqual(len(keys), len(set(keys)))
+        s = intel.suggest("review", SONNET, RULES, local_up(), {}, security=True)
+        self.assertFalse(any(x["kind"] == "security_review" for x in s))
+
+    def test_m3_stats_keyed_by_key_of(self):
+        import intel_routes
+        from store import db, init_db
+        init_db()
+        with db() as c:
+            for i in range(2):
+                c.execute("INSERT INTO tasks (id, agent, model, kind, state, created_at) "
+                          "VALUES (?,'codex','gpt-5.6-terra','review','done',?)", ("m3" + str(i), time.time()))
+            st = intel_routes.build_stats(c)
+        self.assertEqual(st[("review", "codex")]["done"], 2)
+
+    def test_l5_cleanup_run_continues_after_error(self):
+        import asyncio
+        import intel_routes
+        import tasks
+        calls = []
+        orig_c, orig_f = intel_routes._cleanable, tasks.cleanup
+        intel_routes._cleanable = lambda c: [dict(id="a", branch="b1"), dict(id="b", branch="b2")]
+
+        async def fake(tid):
+            calls.append(tid)
+            if tid == "a":
+                raise RuntimeError("boom")
+        tasks.cleanup = fake
+        try:
+            out = asyncio.run(intel_routes.cleanup_run())
+        finally:
+            intel_routes._cleanable, tasks.cleanup = orig_c, orig_f
+        self.assertEqual(calls, ["a", "b"])
+        self.assertEqual(out["cleaned"], ["b"])
+        self.assertEqual(out["failed"][0]["id"], "a")

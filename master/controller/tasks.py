@@ -1457,7 +1457,12 @@ def allocate(t: "TaskIn") -> None:
 def _intel_view(rules: dict) -> tuple[dict, dict]:
     """(headroom, load) for intel.rank/suggest, keyed by concrete candidate key (docs/SPEC-intelligent-controller.md R1)."""
     import intel
+    import intel_routes
     status = {m["key"]: m for m in budget.status().get("models", [])}
+    try:
+        used = intel_routes.used_5h()
+    except Exception:  # advisory: admission still enforces limits
+        used = {}
     headroom, load = {}, {}
     for key in intel.CANDIDATES:
         agent, _, model = key.partition(":")
@@ -1466,33 +1471,25 @@ def _intel_view(rules: dict) -> tuple[dict, dict]:
             continue
         rkey = budget.match_key(rules, agent, model or None)
         m = status.get(rkey) or {}
-        headroom[key] = {"limited_until": m.get("limited_until"), "used_percent": 0, "routed": True}
+        headroom[key] = {"limited_until": m.get("limited_until"), "used_percent": used.get(agent), "routed": True}
         load[key] = budget.running_count(rkey) if rkey else 0
     return headroom, load
 
 
-def auto_pick(t: "TaskIn") -> None:
-    """model="auto" (docs/SPEC-intelligent-controller.md R6): fill agent and model from intel.rank, record it."""
+def auto_pick(t: "TaskIn") -> int | None:
+    """model="auto" (docs/SPEC-intelligent-controller.md R6): fill agent and model from intel.rank, record it.
+    Returns the intel_decisions row id (create_task attaches the task id once the task exists)."""
     kind = t.kind
     if not kind or kind not in budget.KINDS:
         raise HTTPException(400, f"model 'auto' needs a kind, one of {list(budget.KINDS)}")
     try:
         import intel
+        import intel_routes
         rules = budget.current_rules()
         headroom, load = _intel_view(rules)
-        exclude, stats = [], {}
-        parent = t.parent_id or t.review_of
         with db() as c:
-            if parent and kind in ("review", "re_review", "final_review", "security_review", "test"):
-                row = c.execute("SELECT agent, model, budget_identity FROM tasks WHERE id=?", (parent,)).fetchone()
-                if row:
-                    exclude = [row["budget_identity"] or budget.identity(row["agent"], row["model"])]
-            for r in c.execute("SELECT kind, COALESCE(budget_identity, agent) AS k, state FROM tasks WHERE kind IS NOT NULL"):
-                s = stats.setdefault((r["kind"], r["k"]), {"done": 0, "bad": 0})
-                if r["state"] in ("done", "review"):
-                    s["done"] += 1
-                elif r["state"] in ("failed", "cancelled", "capped"):
-                    s["bad"] += 1
+            exclude = intel_routes.exclusion(c, kind, t.parent_id or t.review_of)
+            stats = intel_routes.build_stats(c)
         cands = intel.rank(kind, rules=rules, stats=stats, headroom=headroom, load=load,
                            prompt_bytes=len(t.prompt.encode()), exclude=exclude)
         ok = [x for x in cands if x["eligible"]]
@@ -1506,10 +1503,14 @@ def auto_pick(t: "TaskIn") -> None:
     if not pick:
         raise HTTPException(409, f"no eligible model can take a {kind} task now")
     t.agent, t.model = pick["agent"], pick["model"] or ("gpt-5.6-terra" if pick["agent"] == "codex" else None)
-    with db() as c:
-        intel.ensure_schema(c)
-        intel.record(c, task_id=None, kind=kind, action="auto_pick", chosen=pick["key"], candidates=cands[:5],
-                     reasons=pick["reasons"], est_tokens=pick.get("est_tokens"), est_usd=pick.get("est_usd"))
+    try:  # a decision-log failure never blocks task creation
+        with db() as c:
+            intel.ensure_schema(c)
+            return intel.record(c, task_id=None, kind=kind, action="auto_pick", chosen=pick["key"],
+                                candidates=cands[:5], reasons=pick["reasons"], est_tokens=pick.get("est_tokens"),
+                                est_usd=pick.get("est_usd"))
+    except Exception:
+        return None
 
 
 def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: dict):
@@ -1520,7 +1521,7 @@ def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: di
         import intel
         headroom, load = _intel_view(rules)
         security = any(g in t.prompt for g in (rules.get("reviews") or {}).get("security_paths") or [])
-        suggest = intel.suggest(kind, budget.identity(t.agent, t.model), rules, headroom, load, security=security)
+        suggest = intel.suggest(kind, intel.key_of(t.agent, t.model), rules, headroom, load, security=security)
         if suggest:
             return {"error": refusal.detail, "suggest": suggest}
     except Exception:
@@ -1533,8 +1534,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
     `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to.
     `pipeline` (in-process only): the pipeline engine, whose reviews keep their own independence check."""
+    decision_id = None
     if t.model == "auto":
-        auto_pick(t)  # Part I R6: before admission, which still runs unchanged
+        decision_id = auto_pick(t)  # Part I R6: before admission, which still runs unchanged
     allocated = t.agent == "auto"
     if allocated:
         allocate(t)  # docs/SPEC-stall-reroute.md 12.12: the controller picks agent, model and account
@@ -1793,6 +1795,11 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         }
         with db() as c:
             c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+            if decision_id and index == 0:
+                try:  # attach the auto_pick decision to the task; never block creation
+                    c.execute("UPDATE intel_decisions SET task_id=? WHERE id=?", (task_id, decision_id))
+                except Exception:
+                    pass
             if t.replaces and index == 0:
                 resolution = json.dumps({"kind": "handed_off", "task_id": task_id, "link": "retry",
                                          "reason": row["link_reason"], "agent": agent, "model": model, "at": now})

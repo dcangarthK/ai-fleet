@@ -207,19 +207,36 @@ def forecast(accounts: dict, now: float) -> dict:
 
 # ---------- R5 suggestions ----------
 
-def suggest(kind: str, refused_key: str, rules: dict, headroom: dict, load: dict, security: bool = False) -> list[dict]:
-    cands = [c for c in rank(kind, rules=rules, stats={}, headroom=headroom, load=load, exclude=(refused_key,))
-             if c["eligible"]]
-    picks = [{"agent": c["agent"], "model": c["model"], "kind": kind, "why": "; ".join(c["reasons"][:2])}
-             for c in cands]
-    picks = picks[:2] if security else picks[:3]
-    if security:
+def _entry(c: dict, kind: str) -> dict:
+    return {"agent": c["agent"], "model": c["model"], "kind": kind, "why": "; ".join(c["reasons"][:2])}
+
+
+def suggest(kind: str, refused_key: str, rules: dict, headroom: dict, load: dict, security: bool = False,
+            round_reviewer: str | None = None) -> list[dict]:
+    """R5. A refused Codex re_review: the round reviewer's model if eligible, else the top re_review candidate;
+    plus codex security_review only when security=True."""
+    ranked = rank(kind, rules=rules, stats={}, headroom=headroom, load=load, exclude=(refused_key,))
+    cands = [c for c in ranked if c["eligible"]]
+    special = kind == "re_review" and split_key(refused_key)[0] == "codex"
+    if special and round_reviewer:
+        first = [c for c in cands if c["key"] == round_reviewer]
+        if first:
+            cands = [dict(first[0], reasons=["original round reviewer", *first[0]["reasons"]]),
+                     *[c for c in cands if c["key"] != round_reviewer]]
+    picks = [_entry(c, kind) for c in cands]
+    picks = picks[:2] if special else picks[:3]
+    if special and security:
         sec = [c for c in rank("security_review", rules=rules, stats={}, headroom=headroom, load=load)
                if c["key"] == "codex" and c["eligible"]]
         if sec:
-            picks.append({"agent": "codex", "model": None, "kind": "security_review",
-                          "why": "; ".join(sec[0]["reasons"][:2])})
-    return picks
+            picks.append(_entry(sec[0], "security_review"))
+    seen, out = set(), []
+    for p in picks:
+        k = (p["agent"], p["model"], p["kind"])
+        if k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
 
 
 # ---------- R4 decisions ----------
@@ -228,11 +245,12 @@ def ensure_schema(conn) -> None:
     conn.execute(SCHEMA)
 
 
-def record(conn, *, task_id, kind, action, chosen, candidates, reasons, est_tokens=None, est_usd=None) -> None:
-    conn.execute("INSERT INTO intel_decisions (ts, task_id, kind, action, chosen, candidates, reasons, est_tokens, "
+def record(conn, *, task_id, kind, action, chosen, candidates, reasons, est_tokens=None, est_usd=None) -> int:
+    cur = conn.execute("INSERT INTO intel_decisions (ts, task_id, kind, action, chosen, candidates, reasons, est_tokens, "
                  "est_usd) VALUES (?,?,?,?,?,?,?,?,?)",
                  (time.time(), task_id, kind, action, chosen, json.dumps(candidates), json.dumps(reasons),
                   est_tokens, est_usd))
+    return cur.lastrowid
 
 
 def decisions(conn, task_id: str | None = None, limit: int = 50) -> list[dict]:

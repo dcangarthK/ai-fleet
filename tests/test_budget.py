@@ -399,6 +399,28 @@ class BudgetApiTests(unittest.TestCase):
         return t
 
     # --- 2. measurement ---
+    def test_a_second_run_records_only_what_it_added_to_the_session_cost(self):
+        """The agent CLIs report the session's running total. Storing it unchanged counts run 1 again inside
+        run 2, so the budget page overstates spend (docs/TOKEN-AUDIT-2026-11-16.md 1.3)."""
+        t = self.ok(agent="claude", model="claude-sonnet-5-5", kind="draft")
+        job = FakeRunner.jobs[t["id"]]
+        job.update(state="exited", exit_code=0, result="ok",
+                   usage={"input": 100, "output": 10, "cached": 500, "cost_usd": 0.80, "model": "claude-sonnet-5-5"})
+        self.c.portal.call(tasks.poll_task, t["id"])
+        import json as _json
+        with db() as c:  # a second run of the same task, reporting the session total so far
+            c.execute("UPDATE tasks SET runs=2, usage=? WHERE id=?",
+                      (_json.dumps({"input": 50, "output": 5, "cached": 200, "cost_usd": 1.44,
+                                    "model": "claude-sonnet-5-5"}), t["id"]))
+        self.c.portal.call(tasks.record_usage, t["id"])
+        with db() as c:
+            costs = [r["cost_usd"] for r in c.execute(
+                "SELECT cost_usd FROM agent_usage WHERE task_id=? ORDER BY run", (t["id"],))]
+        self.assertEqual(len(costs), 2)
+        self.assertAlmostEqual(costs[0], 0.80)
+        self.assertAlmostEqual(costs[1], 0.64)  # 1.44 total - 0.80 already recorded
+        self.assertAlmostEqual(sum(costs), 1.44)
+
     def test_usage_is_recorded_per_run_and_aggregated(self):
         claude = self.ok(agent="claude", model="claude-sonnet-5-5", kind="draft")
         FakeRunner.jobs[claude["id"]].update(state="exited", exit_code=0, result="ok", num_turns=3, usage={

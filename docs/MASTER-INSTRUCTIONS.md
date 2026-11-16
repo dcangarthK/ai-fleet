@@ -18,6 +18,12 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
 - **Orchestrator hygiene.** State lives in fleet.db and the stored plan, not in chat. Use a fresh session per batch,
   started from the handoff summary. `wait_tasks` is event-based (no polling loop). `wait_tasks` and `task_status`
   return state, verdict, findings and gate summary only; pass `full=True` for the whole output.
+- **One chat per batch, bounded by the plan.** Open a session with `get_plan()`, close it with `put_plan(...)`, and
+  start the next batch fresh from what you stored. Do not carry one conversation across several batches: every turn
+  re-reads the whole conversation, so a long orchestrator chat is the most expensive thing in the fleet. On
+  2026-11-16 a single orchestrator session accounted for 107 M of the day's 186 M cache-read tokens, 57% of the
+  total (`docs/TOKEN-AUDIT-2026-11-16.md` 1.2). The pipeline itself is written out in the `fleet-batch` skill
+  (`.claude/skills/fleet-batch/SKILL.md` in ai-fleet); follow it rather than re-deriving it in prose.
 
 ## Fleet rules that apply everywhere
 - Work in ai-fleet follows the repo's CLAUDE.md (pipeline, paid-model budget, Fable never builds/fixes/tests).

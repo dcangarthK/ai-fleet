@@ -317,6 +317,16 @@ def trim_task(t: dict) -> dict:
         out["denials"] = sorted({d.get("tool_name") or d.get("tool") or "?" if isinstance(d, dict) else str(d)
                                  for d in t["denials"]})
     out |= {"verdict": verdict, "findings": ["\n".join(b) for b in findings], "gate": gate}
+    # A failed task that the controller already handed off is not yours to respawn: show where its work went,
+    # so the orchestrator follows that task instead of starting a duplicate (docs/TOKEN-AUDIT-2026-11-16.md 2.2).
+    done = t.get("resolution")
+    if isinstance(done, str):
+        try:
+            done = json.loads(done)
+        except ValueError:
+            done = None
+    if isinstance(done, dict) and done.get("kind") == "handed_off" and done.get("task_id"):
+        out["handed_off_to"] = done["task_id"]
     if result and (not findings and (not verdict or not _APPROVE_RE.search(verdict))):
         out["result_tail"] = result[-RESULT_TAIL:]
     return out
@@ -334,12 +344,34 @@ def _full_record(t: dict) -> dict:
 
 
 @mcp.tool()
-def fleet_status() -> str:
-    """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
-    including each runner's available gate profiles, and current role assignments. `budget.models` gives each
-    paid model's budget status: ok / limited (limited_until) / soft (at its soft daily budget), running vs
-    max_concurrent and today's fleet tokens."""
-    return _controller("GET", "/api/fleet")
+def fleet_status(full: bool = False) -> str:
+    """The fleet at a glance: each node's state, health, engine and effective ceiling, the routed role
+    assignments, and `budget.models` — each paid model's budget status (ok / limited (limited_until) / soft at
+    its soft daily budget), running vs max_concurrent and today's fleet tokens.
+
+    Trimmed by default (docs/SPEC-token-budget.md 3.11): hardware inventory, per-node model lists, firewall and
+    runner detail, and unrouted role assignments are left out. full=True returns the whole state; so does
+    FLEET_MCP_TRIM=0."""
+    body = _controller("GET", "/api/fleet")
+    if not _trim_on(full):
+        return body
+    try:
+        state = json.loads(body)
+    except ValueError:
+        return body
+    nodes = []
+    for n in state.get("nodes") or []:
+        runner = n.get("runner") or {}
+        nodes.append({k: n.get(k) for k in ("id", "name", "os", "engine", "status", "healthy", "runner_ok",
+                                            "effective_ceiling", "update_available")}
+                     | {"models": len(n.get("models") or []), "profiles": runner.get("profiles"),
+                        "gate_profiles": runner.get("gate_profiles"), "running": runner.get("running"),
+                        "max_jobs": runner.get("max_jobs")})
+    assignments = [{k: a.get(k) for k in ("role", "model", "engine", "node", "state", "route_reason")}
+                   for a in (state.get("assignments") or []) if a.get("routed")]
+    return json.dumps({"nodes": nodes, "assignments": assignments, "budget": state.get("budget"),
+                       "trimmed": "node inventory, model lists and unrouted roles omitted; full=True for all"},
+                      indent=1)
 
 
 @mcp.tool()

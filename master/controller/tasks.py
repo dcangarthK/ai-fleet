@@ -1153,6 +1153,17 @@ def record_usage(task_id: str, outcome_name: str | None = None) -> None:
            "account": budget.task_account(t) if t["agent"] in budget.PAID_AGENTS else None,
            "account_label": t.get("account_label") if t["agent"] in budget.PAID_AGENTS else None}
     with db() as c:
+        # The agent CLIs report a session total, not this run's share, so a second run of the same task repeats
+        # everything the first already cost. Tokens come per run; cost does not. Store the delta, so summing the
+        # column (the budget page, usage grouping) gives the real spend instead of a running total counted again
+        # at every run. See docs/TOKEN-AUDIT-2026-11-16.md 1.3.
+        if row["cost_usd"] is not None:
+            spent = (c.execute("SELECT SUM(cost_usd) AS spent FROM agent_usage WHERE task_id=?",
+                               (task_id,)).fetchone()["spent"]) or 0
+            # A report below what the task has already cost is not a session total (a retry on a fresh session
+            # reports only its own): take it as it stands rather than clamping it to zero.
+            if row["cost_usd"] >= spent:
+                row["cost_usd"] -= spent
         inserted = c.execute(f"INSERT OR IGNORE INTO agent_usage ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
                              tuple(row.values())).rowcount
     if inserted and outcome_name == "limit":
@@ -1523,8 +1534,20 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         raise HTTPException(400, "a link needs a parent_id (only 'check' may stand alone)")
     if t.parent_id:
         with db() as c:
-            if not c.execute("SELECT 1 FROM tasks WHERE id=?", (t.parent_id,)).fetchone():
-                raise HTTPException(400, f"unknown parent task {t.parent_id}")
+            parent = c.execute("SELECT resolution FROM tasks WHERE id=?", (t.parent_id,)).fetchone()
+        if not parent:
+            raise HTTPException(400, f"unknown parent task {t.parent_id}")
+        # A limit handoff settles the dead run as handed_off and starts the replacement itself. A second retry
+        # spawned by hand against the same parent duplicates that work on a paid account; refuse it and name the
+        # task that already carries it. See docs/TOKEN-AUDIT-2026-11-16.md 2.2.
+        if t.link == "retry" and not t.replaces:
+            try:
+                done = json.loads(parent["resolution"] or "null") or {}
+            except (TypeError, ValueError):
+                done = {}
+            if isinstance(done, dict) and done.get("kind") == "handed_off" and done.get("task_id"):
+                raise HTTPException(409, f"{t.parent_id} was already handed off to {done['task_id']}; follow that "
+                                         "task instead of spawning a second retry")
     if t.role is not None and not ROLE_RE.fullmatch(t.role):
         raise HTTPException(400, "role must be lowercase letters, digits, dashes")
     if t.stage is not None and not STAGE_RE.fullmatch(t.stage):

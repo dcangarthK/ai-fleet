@@ -85,6 +85,10 @@ machines and alerts.
    `used_percent` and `resets_at`), not from parsed error text.
 1. **Codex is the scarcest model.** Use it for final reviews, security-sensitive reviews and hard builds only.
    Never use it for merges, benchmarks, availability checks or routine re-reviews.
+   It is also the *default* for a final review, and that direction gets forgotten under load: on 2026-11-16 three
+   final reviews were sent to Claude accounts that were at 100% of their five-hour window, each capping out before
+   reaching a verdict, while Codex sat at 5% (`docs/TOKEN-AUDIT-2026-11-16.md` 2.3). Check `fleet_status()` before
+   routing a final review, and send it to Codex unless the owner names another model for that task.
 2. **One reviewer per round.** A second paid reviewer only for security-sensitive changes or the final review.
 3. **Send less.**
    - Never put generated files (`ui/dist`, minified bundles, lockfiles, eval result JSON) in a prompt.

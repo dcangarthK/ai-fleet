@@ -228,6 +228,21 @@ class HandoffTests(HandoffBase):
         self.assertEqual(items[0]["attempts"][0]["account_label"], "owner-max")
         self.assertEqual(self.get(src["id"])["display"]["label"], f"Handed off → {new}")
 
+    def test_a_manual_retry_of_a_handed_off_task_is_refused(self):
+        """The controller's own handoff already started the replacement. A second retry spawned by hand against
+        the same parent duplicates the work on a paid account (docs/TOKEN-AUDIT-2026-11-16.md 2.2)."""
+        src = self.build()
+        self.limit(src["id"])
+        [new] = self.children(src["id"])
+        body = {"prompt": "Build the greeting module", "repo": "/repo", "agent": "claude", "model": OPUS,
+                "kind": "build", "gate": "pytest", "parent_id": src["id"]}
+        r = self.c.post("/api/tasks", json=body | {"link": "retry"}, headers=W)
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn(new, r.json()["detail"])
+        # Only a retry is refused: another link against the same parent is judged on its own merits.
+        other = self.c.post("/api/tasks", json=body | {"link": "review", "kind": "review"}, headers=W)
+        self.assertNotIn("already handed off", other.text)
+
     def test_two_triggers_race_for_one_claim(self):
         src = self.build()
         self.fail_in_db(src["id"])  # the run settled, but no trigger has run yet
@@ -490,7 +505,7 @@ class WaitTests(HandoffBase):
         self.assertEqual(self.schedule(t["id"])["state"], "skipped")
 
     def test_a_limit_with_no_session_retries_on_the_same_slot_from_a_checkpoint(self):
-        t = self.ok(agent="claude", model=SONNET, kind="draft", gate=None)
+        t = self.ok(agent="claude", model=SONNET, kind="test", gate=None)
         self.limit(t["id"], session_id=None)
         self.assertEqual(self.children(t["id"]), [])  # draft: wait first
         row = self.schedule(t["id"])
@@ -504,7 +519,7 @@ class WaitTests(HandoffBase):
         self.assertEqual(len(self.posts(t["id"], "checkpoint")), 1)
 
     def test_a_first_turn_retry_that_finds_the_task_moved_on_is_skipped_not_left(self):
-        t = self.ok(agent="claude", model=SONNET, kind="draft", gate=None)
+        t = self.ok(agent="claude", model=SONNET, kind="test", gate=None)
         self.limit(t["id"], session_id=None)
         row = self.schedule(t["id"])
         with db() as c:
@@ -993,7 +1008,7 @@ class PipelineTests(HandoffBase):
             policy["limits"] = dict(policy.get("limits") or {}, max_concurrent=1)
             c.execute("UPDATE tasks SET policy=? WHERE id=?", (json.dumps(policy), build))
         current = self.pass_build(p)
-        blocker = self.ok(agent="claude", model=SONNET, kind="draft", gate=None)  # now running on the node
+        blocker = self.ok(agent="claude", model=SONNET, kind="test", gate=None)  # now running on the node
         self.assertEqual(blocker["state"], "working")
         issue = {"severity": "medium", "file": "app.py", "problem": "Greeting regression", "evidence": "hello",
                  "expected": "x", "actual": "y", "fix": "z"}

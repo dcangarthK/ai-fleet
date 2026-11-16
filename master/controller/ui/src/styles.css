@@ -298,12 +298,15 @@ td.wrap { overflow-wrap: anywhere; word-break: break-word; }
 @media (max-width: 639px) {
   .tbl-wrap { border: 0; background: transparent; overflow: visible; }
   table.tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
-  .tbl thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .tbl thead { display: none; }
   .tbl tr { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); margin-bottom: var(--s2); padding: var(--s1) 0; }
   .tbl td { border: 0; display: grid; grid-template-columns: minmax(80px, 36%) minmax(0, 1fr); gap: var(--s3); padding: 6px var(--s3); text-align: left; }
   .tbl td::before { content: attr(data-label); color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; padding-top: 2px; }
   .tbl td[data-label=""]::before, .tbl td:not([data-label])::before { content: none; }
   .tbl td.n { text-align: left; }
+  .tbl-wrap { position: relative; }
+  .tbl td > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .tbl td a { display: block; min-width: 0; overflow: hidden; }
   .tbl tbody tr:hover td { background: transparent; }
   .tbl .cell-trunc { max-width: none; }
 }

@@ -227,9 +227,9 @@ export function parseFindings(text: string | null | undefined): Finding[] {
   let open: Finding | null = null;
   for (const line of (text ?? "").split("\n")) {
     const m = FINDING_RE.exec(line);
-    if (m && m[2].trim()) {
-      const sev = m[1].toUpperCase();
-      open = { severity: sev.startsWith("MED") ? "MED" : (sev as Severity), title: m[2].replace(/\*+/g, "").trim(), detail: "", cites: [] };
+    if (m && ((m[1] ?? "").trim() || (m[3] ?? "").trim())) {
+      const sev = m[2].toUpperCase();
+      open = { severity: sev.startsWith("MED") ? "MED" : (sev as Severity), title: (m[4] ?? "").replace(/\*+/g, "").trim(), detail: "", cites: [] };
       out.push(open);
     } else if (open && /^\s+\S/.test(line)) {
       open.detail = `${open.detail}${open.detail ? " " : ""}${line.trim()}`;

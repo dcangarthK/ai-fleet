@@ -1521,7 +1521,14 @@ def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: di
         import intel
         headroom, load = _intel_view(rules)
         security = any(g in t.prompt for g in (rules.get("reviews") or {}).get("security_paths") or [])
-        suggest = intel.suggest(kind, intel.key_of(t.agent, t.model), rules, headroom, load, security=security)
+        round_reviewer = None
+        if kind == "re_review" and t.parent_id:  # assumption: the parent is the original round's review task
+            with db() as c:
+                p = c.execute("SELECT agent, model, kind FROM tasks WHERE id=?", (t.parent_id,)).fetchone()
+            if p and p["kind"] == "review":
+                round_reviewer = intel.key_of(p["agent"], p["model"])
+        suggest = intel.suggest(kind, intel.key_of(t.agent, t.model), rules, headroom, load, security=security,
+                                round_reviewer=round_reviewer)
         if suggest:
             return {"error": refusal.detail, "suggest": suggest}
     except Exception:

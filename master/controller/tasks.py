@@ -2304,13 +2304,46 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
     return items
 
 
+def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
+    """(merged, reason). Merged = branch is an ancestor of the repo's main. Any failure to check counts as unmerged."""
+    import subprocess
+    if not repo or not branch or not Path(repo).is_dir():
+        return False, "cannot check: repo or branch not available on the controller"
+    try:
+        out = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "cannot check: %s" % exc
+    if out.returncode == 0:
+        return True, "merged"
+    if out.returncode == 1:
+        return False, "branch is not merged into main"
+    return False, "cannot check: " + (out.stderr.strip() or "git failed")[:200]
+
+
 @router.post("/api/tasks/{task_id}/cleanup")
-async def cleanup(task_id: str) -> dict:
+async def cleanup(task_id: str, force: bool = False) -> dict:
+    """Remove the task's worktree. The branch is only deleted when merged into main; otherwise it is kept.
+    force=true keeps the old behaviour: no merge check and no branch deletion."""
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] in ACTIVE:
             raise HTTPException(409, "task is still active")
         out = await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cleanup")
+        if not force:
+            import subprocess
+            branch = task.get("branch") or "fleet/" + task_id
+            merged, reason = _branch_merged(task.get("repo"), branch)
+            out = dict(out)
+            if merged:
+                done = subprocess.run(["git", "-C", task["repo"], "branch", "-d", branch],
+                                      capture_output=True, text=True, timeout=30)
+                if done.returncode:
+                    out.update({"branch_kept": True, "reason": "delete failed: " + done.stderr.strip()[:200]})
+                else:
+                    out["branch_kept"] = False
+            else:
+                out.update({"branch_kept": True, "reason": reason})
     emit(task_id, "task.cleaned_up", {"title": task["title"]})
     return out
 

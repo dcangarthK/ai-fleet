@@ -23,7 +23,12 @@ DEFAULT_CAPS = {
     "review": {"turns": 30, "context": 100_000},
     "re_review": {"turns": 15},
     "test": {"turns": 20},
+    "final_review": {"turns": 60, "context": 250_000},
+    "security_review": {"turns": 60, "context": 250_000},
 }
+# Kinds with no caps of their own draw the bars against the caps the runner actually enforces
+# (nodes/runner.py LEAN_PROFILE_KIND). Without this Live showed an uncapped kind as having no cap at all.
+CAP_FALLBACK_KIND = {"re_review": "review", "security_review": "review", "final_review": "review"}
 LEAN_TURN1_TARGET = 8_000
 TASK_ID_RE = re.compile(r"^t-[0-9a-f]{6,}$")
 _cache: dict[str, tuple[str, int, int, dict[str, Any]]] = {}
@@ -208,7 +213,8 @@ def _row(path: Path) -> dict[str, Any]:
     if model is not None:
         row["model"] = model
     alerts: list[str] = []
-    caps = _caps().get(kind, {}) if kind else {}
+    all_caps = _caps()
+    caps = (all_caps.get(kind) or all_caps.get(CAP_FALLBACK_KIND.get(kind, ""), {})) if kind else {}
     # What Live draws the bars against: the task's caps and its share of each (None when the kind has no such cap).
     row["caps"] = {"turns": caps.get("turns") or None, "context": caps.get("context") or None,
                    "turn1": LEAN_TURN1_TARGET}

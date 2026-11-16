@@ -1,3 +1,63 @@
+# Update 2026-11-16 21:30 SAST: Part I intelligent controller (branch `claude/controller-intel-34bc86`)
+
+**Not merged to main, not pushed.** The owner merges and pushes. The full gate passes on the branch tip.
+
+**Spec:** `docs/SPEC-intelligent-controller.md`. Evidence: `docs/research/controller-intel-evidence.md`.
+
+**New code:**
+- **`master/controller/intel.py`** (pure functions):
+  - model ranking with explanations; hard rules first (rule 0 Fable, Codex allowlist final_review/security_review/build/lead, near-limit, `limited_until`, concurrency, independence)
+  - token and USD estimates from history, using `MAX(cost_usd)` per task
+  - limit forecast
+  - refusal suggestions
+  - merged-worktree cleanup candidates
+  - savings versus a baseline
+- **`master/controller/intel_routes.py`:** `/api/intel/*` routes for the UI, listed in spec section 5:
+  - decisions
+  - `tasks/{id}`
+  - template
+  - cleanup (GET, POST)
+  - savings
+  - estimate
+  - forecast
+
+  Every decision lands in the new `intel_decisions` table. No prompt text is stored there.
+- **`tasks.py` hooks:**
+  - `model="auto"` (needs `kind`). It picks through the same `match_key`/`kind_allowed` that admission uses, and records why.
+  - A budget refusal now returns `{"error", "suggest": [...]}` in `detail`. The status code is unchanged.
+- **MCP:**
+  - `estimate_task` and `intel_savings` tools.
+  - `spawn_task` returns a trimmed row (about 3k tokens less per spawn).
+
+  These take effect after the owner restarts the controller and the MCP server.
+
+**Who built and who reviewed:**
+- Tests first: Sonnet (t-b995e3bc).
+- Builds: Sonnet (t-12338cdc, t-c6f84bde).
+- Round review: Haiku, CHANGES with 3 HIGH and 5 MED (t-3947f855).
+- Fix: Sonnet (t-ad788ec7).
+- Final review: Codex gpt-5.6-terra at high effort, CHANGES with 3 HIGH (t-337f5c27). The findings were: ranking ≠ admission, Codex was on a denylist instead of an allowlist, and cleanup could remove dirty work.
+- Fix: Sonnet (t-dee71625).
+- Delta re-review: done by the orchestrator (Opus), not a second Codex run.
+
+**Open:**
+- The existing `/tasks/{id}/cleanup` endpoint and runner cleanup commit-and-force-remove dirty worktrees without a merged check. This predates Part I and is out of scope; it needs a fix task.
+- The trimmed `wait_tasks` findings parser misses the `**H1.**` style, so findings showed as empty. Use `full=True` for reviews.
+- Merge conflict risk: the main checkout has the owner's uncommitted token-audit edits in tasks.py and server.py. Merge this branch after committing those.
+- Fleet tasks t-b995e3bc, t-12338cdc, t-c6f84bde, t-3947f855, t-ad788ec7, t-337f5c27 and t-dee71625 still need `complete_task` and `cleanup_task` after the owner merges. Three of them are blocked on Bash denials, which only the owner can clear.
+# Active handoff: 2026-11-14 17:29 SAST (relay routing complete)
+
+The live, step-by-step checkpoint for the current relay-routing takeover is in [`HANDOFF.md`](../HANDOFF.md).
+Relay routing is merged locally at `5334f4a`; the exact delta review is GREEN, the post-merge fleet gate passed,
+and both master services plus Laptop 2 run the matching runner digest. CNTRL `coder` and `fast` are durably routed
+through `100.64.14.85:11436/v1`. Real streamed and non-streamed LiteLLM calls were answered by that deployment;
+raw 11434 is refused and 12434 is unreachable. The five relay build/review/merge worktrees are cleaned. Local
+`main` and `origin/main` both point at `5334f4a`; reflog records an external/owner push at 17:02:39 SAST, not a
+push by this takeover. This historical handover remains below for background; `HANDOFF.md` contains the full
+evidence and chronology.
+
+---
+
 # Current state: 2026-11-13 05:00 SAST (overnight run finished; read this first)
 
 All of the overnight plan (`docs/OVERNIGHT-PLAN.md`) is merged on local `main` (HEAD `c787f67`, 43 commits since

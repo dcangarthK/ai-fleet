@@ -86,6 +86,11 @@ DEFAULT_TOKEN_CAPS = {
     "review": {"turns": 30, "context": 100_000},
     "re_review": {"turns": 15},
     "test": {"turns": 20},
+    # A whole-branch final review and a security review read far more than a round review. Without their own
+    # keys they fell into the `review` bucket (30 turns / 100k) and capped before reaching a verdict; the paid
+    # review then had to be run a second time. See docs/TOKEN-AUDIT-2026-11-16.md 2.3.
+    "final_review": {"turns": 60, "context": 250_000},
+    "security_review": {"turns": 60, "context": 250_000},
 }
 LEAD_KINDS = ("lead", "orchestrator")
 STOP_INSTRUCTION = "stop, commit, write a <=300-word handoff summary"

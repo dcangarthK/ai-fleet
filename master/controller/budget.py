@@ -36,6 +36,10 @@ DEFAULT_RULES = {
                                  "kinds": ["build", "final_review", "security_review", "review", "test", "lead"]},
         "claude:claude-fable-*": {"tier": "premium", "max_concurrent": 2,
                                   "kinds": ["review", "re_review", "final_review", "security_review"]},
+        # Drafts belong on the cheap tier (CLAUDE.md, Paid-model budget) and KIND_DEFAULT_MODEL already sends
+        # an unnamed `draft`/`check` to Haiku.  Refusing them outright here is not safe while `draft` is also
+        # the fallback kind for a task that names none: it would refuse every kind-less Claude task.  See
+        # docs/TOKEN-AUDIT-2026-11-16.md 2.6.
         "claude:claude-sonnet-*": {"tier": "standard", "max_concurrent": 2, "kinds": ["*"]},
         "claude:claude-haiku-*": {"tier": "cheap", "max_concurrent": 2, "kinds": ["*"]},
         # A Claude run whose model is unknown (no model named, no single default reported) and any Claude model
@@ -49,7 +53,9 @@ DEFAULT_RULES = {
     "limits": {"on_limit": "queue",
                # Fresh live usage at or above this percentage is held for the next window reset.  This leaves
                # headroom for work already running instead of starting work that will immediately hit a limit.
-               "near_limit_percent": 90,
+               # 85 rather than 90: on 2026-11-16 the fleet account passed 90 with runs already in flight and
+               # those runs then died on the limit mid-task, costing a checkpoint and a handoff each.
+               "near_limit_percent": 85,
                "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
                # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
                # or wait for the reset. By kind; "*" covers the rest.

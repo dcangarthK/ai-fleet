@@ -5907,49 +5907,319 @@
           }
         },
         "evaluated_at": 1794396085.939868
+      },
+      "fast": {
+        "score": 100.0,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Reject expired JWTs and issue new access tokens on refresh"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 1.0,
+            "reply": "Cache product listings in Redis and invalidate on update"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 1.0,
+            "reply": "docs"
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794614009.594204
+      },
+      "reviewer": {
+        "score": 89.3,
+        "json_valid": 100.0,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "sql_injection",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 1
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 1
+          },
+          {
+            "id": "resource_leak",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "path_traversal",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.625,
+            "precision": 0.8333333333333334,
+            "fp_rate": 0.0,
+            "bug_cases": 8,
+            "found": 5,
+            "clean_cases": 6,
+            "alarmed": 0,
+            "serious": 6,
+            "matched": 5,
+            "unsupported": 0,
+            "identical_fix": 2
+          }
+        },
+        "think": false,
+        "evaluated_at": 1794614118.989731
+      },
+      "coder": {
+        "score": 92.7,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 1.0,
+            "passed": 8,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.9090909090909091,
+            "passed": 10,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794615054.741869
       }
     },
     "latencies": [
-      20.178199959002086,
-      16.33702112500032,
-      14.411875582998618,
-      12.21301466699515,
-      11.610886916998425,
-      14.401430625002831,
-      12.965353291998326,
-      10.810523083004227,
-      12.121001708997937,
-      15.479167832992971,
-      2.485966833999555,
-      2.141416874997958,
-      10.80348383400269,
-      11.667569208002533,
-      18.90880599999946,
-      10.805845832997875
+      18.604788166005164,
+      17.027535875036847,
+      10.590367708995473,
+      11.658524750033394,
+      19.18392658297671,
+      10.557900207990315,
+      12.220399707963225,
+      9.991927583992947,
+      7.901027292013168
     ],
     "tps": [
-      21.584917578269216,
-      21.708627038415333,
-      21.773858100287125,
-      21.786898758586975,
-      21.78291944827687,
-      21.603503744725273,
-      21.412762242482515,
-      21.451440100198603,
-      21.185445551796775,
-      21.088303513459508,
-      21.387178403419256,
-      21.45579771199283,
-      20.49241635765962,
-      20.4686794192962,
-      18.79872138959691,
-      17.532985567098223
+      12.997012762976278,
+      12.943580049323092,
+      13.059324593832402,
+      13.077102503615912,
+      12.950176409270162,
+      13.045329725367855,
+      13.000310214298906,
+      13.054621193288915,
+      13.11081399465023
     ],
-    "size_gb": 10.1,
+    "size_gb": 9.5,
     "errors": [],
-    "evaluated_at": 1794395888.592171,
-    "median_s": 12.17,
-    "tokens_per_s": 21.4,
+    "evaluated_at": 1794614934.4814348,
+    "median_s": 11.66,
+    "tokens_per_s": 13.0,
     "fits_16gb": true
   },
   {
@@ -6356,6 +6626,701 @@
     "evaluated_at": 1794403362.9890518,
     "median_s": 167.94,
     "tokens_per_s": 21.6,
+    "fits_16gb": false
+  },
+  {
+    "model": "docker.io/ai/deepcoder-preview:latest",
+    "roles": {
+      "coder": {
+        "score": 22.2,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794620371.241091
+      }
+    },
+    "latencies": [
+      585.5961496249656,
+      529.297800209024
+    ],
+    "tps": [
+      8.603198643342337,
+      8.316679189412113
+    ],
+    "size_gb": null,
+    "errors": [
+      "coder/slugify: timed out",
+      "coder/parse_duration: timed out",
+      "coder/lru_cache: timed out",
+      "coder/int_to_roman: timed out",
+      "coder/flatten_dict: timed out",
+      "coder/chunked: timed out",
+      "coder/is_valid_ipv4: timed out"
+    ],
+    "evaluated_at": 1794615055.279451,
+    "median_s": 557.45,
+    "tokens_per_s": 8.5,
+    "fits_16gb": false
+  },
+  {
+    "model": "docker.io/ai/qwen3:latest",
+    "roles": {
+      "coder": {
+        "score": 84.8,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 1.0,
+            "passed": 4,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 1.0,
+            "passed": 11,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 1.0,
+            "passed": 5,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794656542.077676
+      }
+    },
+    "latencies": [
+      114.72112683299929,
+      134.98163575003855,
+      150.88903179200133,
+      109.5503684169962,
+      128.67904504196486,
+      219.7585822920082,
+      95.81996479199734,
+      136.9443400000455
+    ],
+    "tps": [
+      23.055910214779825,
+      10.305105522471806,
+      10.007354292534108,
+      19.99993274016299,
+      22.241383583991034,
+      22.110626803842024,
+      22.636201179038107,
+      22.556609495499952
+    ],
+    "size_gb": null,
+    "errors": [
+      "coder/parse_duration: timed out"
+    ],
+    "evaluated_at": 1794654848.441949,
+    "median_s": 131.83,
+    "tokens_per_s": 22.2,
+    "fits_16gb": false
+  },
+  {
+    "model": "ai/gemma3:4B-Q4_0",
+    "roles": {
+      "fast": {
+        "score": 83.3,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "commit_summary_auth",
+            "score": 1.0,
+            "reply": "Fix: Reject expired JWTs, issue new tokens on refresh"
+          },
+          {
+            "id": "commit_summary_perf",
+            "score": 1.0,
+            "reply": "Cache product listings, invalidate on update, latency improved"
+          },
+          {
+            "id": "classify_bug",
+            "score": 1.0,
+            "reply": "bug"
+          },
+          {
+            "id": "classify_security",
+            "score": 1.0,
+            "reply": "security"
+          },
+          {
+            "id": "classify_feature",
+            "score": 1.0,
+            "reply": "feature"
+          },
+          {
+            "id": "classify_docs",
+            "score": 0.0,
+            "reply": "bug"
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794633255.7985542
+      },
+      "coder": {
+        "score": 71.5,
+        "json_valid": null,
+        "cases": [
+          {
+            "id": "slugify",
+            "score": 0.3333333333333333,
+            "passed": 2,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "parse_duration",
+            "score": 0.375,
+            "passed": 3,
+            "total": 8,
+            "error": null
+          },
+          {
+            "id": "merge_intervals",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "lru_cache",
+            "score": 0.75,
+            "passed": 3,
+            "total": 4,
+            "error": null
+          },
+          {
+            "id": "int_to_roman",
+            "score": 0.9090909090909091,
+            "passed": 10,
+            "total": 11,
+            "error": null
+          },
+          {
+            "id": "top_k_words",
+            "score": 1.0,
+            "passed": 6,
+            "total": 6,
+            "error": null
+          },
+          {
+            "id": "flatten_dict",
+            "score": 0.8,
+            "passed": 4,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "chunked",
+            "score": 0.6,
+            "passed": 3,
+            "total": 5,
+            "error": null
+          },
+          {
+            "id": "is_valid_ipv4",
+            "score": 0.8333333333333334,
+            "passed": 5,
+            "total": 6,
+            "error": null
+          }
+        ],
+        "think": false,
+        "evaluated_at": 1794658248.458936
+      },
+      "reviewer": {
+        "score": 50.0,
+        "json_valid": 85.7,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "sql_injection",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "missing_none_check",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": true,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 1
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_test_added",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_guard",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.25,
+            "precision": 0.4,
+            "fp_rate": 0.3333333333333333,
+            "bug_cases": 8,
+            "found": 2,
+            "clean_cases": 6,
+            "alarmed": 2,
+            "serious": 5,
+            "matched": 2,
+            "unsupported": 1,
+            "identical_fix": 1
+          }
+        },
+        "think": false,
+        "evaluated_at": 1794658292.851446
+      }
+    },
+    "latencies": [
+      3.060682540992275,
+      7.329512333031744,
+      3.2665916670230217,
+      4.173521459044423,
+      5.0407806250150315,
+      3.8045407499885187,
+      2.9744772919802926,
+      2.6286980839795433,
+      3.4272292500245385,
+      3.403568957990501,
+      3.7707392079755664,
+      4.099879792018328,
+      3.6627506659715436,
+      3.16928850003751,
+      2.0677446250338107,
+      3.208089124993421,
+      3.368634667014703,
+      2.758083416032605,
+      2.9366535419831052,
+      3.4580928329960443,
+      2.8458793750032783,
+      2.9695258749998175,
+      2.668583041988313
+    ],
+    "tps": [
+      51.949196909671045,
+      54.710324750095936,
+      51.73588168551737,
+      51.754855490656986,
+      53.16636845294192,
+      52.30591892085807,
+      49.42044788720947,
+      50.214971739990524,
+      50.76987481906971,
+      46.128050272468776,
+      48.79679814791166,
+      48.294098862475835,
+      48.32433767452495,
+      46.06712200491436,
+      40.62397212065125,
+      46.75680573565973,
+      47.793844068783756,
+      43.87104439866933,
+      45.630169880206765,
+      48.58169173395125,
+      46.73423658367347,
+      46.47206517438023,
+      45.717145796257476
+    ],
+    "size_gb": null,
+    "errors": [],
+    "evaluated_at": 1794658210.552974,
+    "median_s": 3.27,
+    "tokens_per_s": 48.3,
+    "fits_16gb": false
+  },
+  {
+    "model": "ai/deepseek-r1-distill-llama",
+    "roles": {
+      "reviewer": {
+        "score": 42.9,
+        "json_valid": 64.3,
+        "cases": [
+          {
+            "id": "off_by_one_pagination",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "sql_injection",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": false,
+            "found_bug": false,
+            "unsupported": 0,
+            "identical_fix": 1
+          },
+          {
+            "id": "missing_none_check",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "wrong_comparison_operator",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "resource_leak",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "race_condition_counter",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "swallowed_exception",
+            "score": 0.0,
+            "valid_json": false,
+            "verdict_ok": false,
+            "found_bug": false
+          },
+          {
+            "id": "path_traversal",
+            "score": 0.5,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": false,
+            "unsupported": 1,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_rename",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_bugfix",
+            "score": 0.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_test_added",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_logging",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_constant",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          {
+            "id": "clean_guard",
+            "score": 1.0,
+            "valid_json": true,
+            "verdict_ok": true,
+            "found_bug": null,
+            "unsupported": 0,
+            "identical_fix": 0
+          }
+        ],
+        "metrics": {
+          "dev": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "holdout": {
+            "recall": null,
+            "precision": null,
+            "fp_rate": null,
+            "bug_cases": 0,
+            "found": 0,
+            "clean_cases": 0,
+            "alarmed": 0,
+            "serious": 0,
+            "matched": 0,
+            "unsupported": 0,
+            "identical_fix": 0
+          },
+          "all": {
+            "recall": 0.0,
+            "precision": 0.0,
+            "fp_rate": 0.16666666666666666,
+            "bug_cases": 8,
+            "found": 0,
+            "clean_cases": 6,
+            "alarmed": 1,
+            "serious": 1,
+            "matched": 0,
+            "unsupported": 2,
+            "identical_fix": 1
+          }
+        },
+        "think": false,
+        "evaluated_at": 1794657945.464191
+      }
+    },
+    "latencies": [
+      24.435576332965866,
+      19.392669624998234,
+      26.080170332978014,
+      17.451485582976602,
+      25.153041834011674,
+      25.976657874998637,
+      37.755954375024885,
+      33.77369658299722,
+      32.52444058301626,
+      17.527309541997965,
+      14.714716542046517,
+      25.926522374968044,
+      16.07502425002167,
+      17.270612708001863
+    ],
+    "tps": [
+      24.2269710332691,
+      24.33909354035329,
+      23.926224101802,
+      23.7802104598373,
+      23.41665091192114,
+      21.211350692281037,
+      19.54658575623712,
+      18.594351922855722,
+      19.15482599646374,
+      20.025891547071346,
+      20.523670920676665,
+      21.946637955168537,
+      22.581614456943083,
+      23.218631948952666
+    ],
+    "size_gb": null,
+    "errors": [],
+    "evaluated_at": 1794657611.399657,
+    "median_s": 24.79,
+    "tokens_per_s": 22.3,
     "fits_16gb": false
   }
 ]

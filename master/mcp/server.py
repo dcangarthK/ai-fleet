@@ -317,6 +317,16 @@ def trim_task(t: dict) -> dict:
         out["denials"] = sorted({d.get("tool_name") or d.get("tool") or "?" if isinstance(d, dict) else str(d)
                                  for d in t["denials"]})
     out |= {"verdict": verdict, "findings": ["\n".join(b) for b in findings], "gate": gate}
+    # A failed task that the controller already handed off is not yours to respawn: show where its work went,
+    # so the orchestrator follows that task instead of starting a duplicate (docs/TOKEN-AUDIT-2026-11-16.md 2.2).
+    done = t.get("resolution")
+    if isinstance(done, str):
+        try:
+            done = json.loads(done)
+        except ValueError:
+            done = None
+    if isinstance(done, dict) and done.get("kind") == "handed_off" and done.get("task_id"):
+        out["handed_off_to"] = done["task_id"]
     if result and (not findings and (not verdict or not _APPROVE_RE.search(verdict))):
         out["result_tail"] = result[-RESULT_TAIL:]
     return out
@@ -334,12 +344,34 @@ def _full_record(t: dict) -> dict:
 
 
 @mcp.tool()
-def fleet_status() -> str:
-    """List fleet nodes (state, health, engine, models, hardware, installed agent CLIs and apps)
-    including each runner's available gate profiles, and current role assignments. `budget.models` gives each
-    paid model's budget status: ok / limited (limited_until) / soft (at its soft daily budget), running vs
-    max_concurrent and today's fleet tokens."""
-    return _controller("GET", "/api/fleet")
+def fleet_status(full: bool = False) -> str:
+    """The fleet at a glance: each node's state, health, engine and effective ceiling, the routed role
+    assignments, and `budget.models` — each paid model's budget status (ok / limited (limited_until) / soft at
+    its soft daily budget), running vs max_concurrent and today's fleet tokens.
+
+    Trimmed by default (docs/SPEC-token-budget.md 3.11): hardware inventory, per-node model lists, firewall and
+    runner detail, and unrouted role assignments are left out. full=True returns the whole state; so does
+    FLEET_MCP_TRIM=0."""
+    body = _controller("GET", "/api/fleet")
+    if not _trim_on(full):
+        return body
+    try:
+        state = json.loads(body)
+    except ValueError:
+        return body
+    nodes = []
+    for n in state.get("nodes") or []:
+        runner = n.get("runner") or {}
+        nodes.append({k: n.get(k) for k in ("id", "name", "os", "engine", "status", "healthy", "runner_ok",
+                                            "effective_ceiling", "update_available")}
+                     | {"models": len(n.get("models") or []), "profiles": runner.get("profiles"),
+                        "gate_profiles": runner.get("gate_profiles"), "running": runner.get("running"),
+                        "max_jobs": runner.get("max_jobs")})
+    assignments = [{k: a.get(k) for k in ("role", "model", "engine", "node", "state", "route_reason")}
+                   for a in (state.get("assignments") or []) if a.get("routed")]
+    return json.dumps({"nodes": nodes, "assignments": assignments, "budget": state.get("budget"),
+                       "trimmed": "node inventory, model lists and unrouted roles omitted; full=True for all"},
+                      indent=1)
 
 
 @mcp.tool()
@@ -414,6 +446,8 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
     """Delegate work to an agent on the fleet and return immediately with the task.
     agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
+    model: optional; 'auto' lets the controller pick the best eligible model for `kind` (kind required; the choice
+          is recorded, admission still runs). Returns a trimmed view; FLEET_MCP_TRIM=0 returns the whole row.
     repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
     mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
           | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
@@ -437,7 +471,47 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                  "independence": independence, "independence_reason": independence_reason}.items():
         if v:
             body[k] = v
-    return _controller("POST", "/api/tasks", body, scope="operate")
+    out = _controller("POST", "/api/tasks", body, scope="operate")
+    if not _trim_on(False):
+        return out
+    try:
+        row = json.loads(out)
+        keys = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
+        return json.dumps({k: row[k] for k in keys if k in row}, indent=2)
+    except (ValueError, TypeError):
+        return out  # an error string
+
+
+@mcp.tool()
+def estimate_task(kind: str, model: str = "", prompt_bytes: int = 0) -> str:
+    """Before spawning: ranked candidates and a cost estimate for a kind (top 3, one line each).
+    model: optional, 'agent:model' (e.g. 'claude:claude-sonnet-5-5') or 'codex'."""
+    body: dict = {"kind": kind, "prompt_bytes": prompt_bytes}
+    if model:
+        agent, _, name = model.partition(":")
+        body.update({"agent": agent, "model": name} if name else {"agent": agent})
+    out = _controller("POST", "/api/intel/estimate", body, scope="operate")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return out
+    lines = [f"{c.get('key')} {'ok' if c.get('eligible') else 'no'} score={c.get('score')} "
+             f"~{c.get('est_tokens')} tok usd={c.get('est_usd')} - {'; '.join(c.get('reasons') or [])[:120]}"
+             for c in (data.get("candidates") or [])[:3]]
+    est = data.get("chosen_estimate") or {}
+    lines.append(f"estimate: {est.get('tokens')} tok, usd {est.get('usd')} ({est.get('basis')}, n={est.get('samples')})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def intel_savings() -> str:
+    """Current vs baseline paid-token use: one line per delta."""
+    out = _controller("GET", "/api/intel/savings", scope="operate")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return out
+    return "\n".join(f"{k}: {v}" for k, v in (data.get("delta") or {}).items()) or out
 
 
 @mcp.tool()

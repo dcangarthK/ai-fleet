@@ -301,7 +301,10 @@ class Launch(Base):
         saved = os.environ.pop("FLEET_TOKEN_CAPS", None)
         try:
             self.assertEqual(runner.token_caps("build"), {"turns": 120, "context": 150_000})
-            self.assertEqual(runner.token_caps("security_review"), {"turns": 30, "context": 100_000})
+            # A whole-branch review gets its own, larger caps; a round review keeps the smaller ones.
+            self.assertEqual(runner.token_caps("security_review"), {"turns": 60, "context": 250_000})
+            self.assertEqual(runner.token_caps("final_review"), {"turns": 60, "context": 250_000})
+            self.assertEqual(runner.token_caps("review"), {"turns": 30, "context": 100_000})
             self.assertEqual(runner.token_caps("re_review"), {"turns": 15})
             self.assertEqual(runner.token_caps("test"), {"turns": 20})
             self.assertEqual(runner.token_caps(None), {})

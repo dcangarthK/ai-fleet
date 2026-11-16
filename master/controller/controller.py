@@ -586,6 +586,7 @@ app.include_router(tasks.router)
 app.include_router(handoff.router)
 app.include_router(live.router)
 app.include_router(leader.router)
+app.include_router(__import__("ui_api").router)
 app.include_router(__import__("tokens").router)
 auth.presence_hook = live.note_presence
 

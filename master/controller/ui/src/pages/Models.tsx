@@ -4,6 +4,7 @@ import { post, put, type CatalogModel, type FleetNode, type ModelParams, type No
 import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
+import { describeRequest } from "../lib/request";
 import { Button, Empty, Panel, Table, useConfirm, type Column } from "../components/ui";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
@@ -66,8 +67,12 @@ export function ModelsPage() {
         <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
           onInstall={() => setInstalling({ model: m, node: n.id })}
           onRemove={() => remove(m, n.id, m.nodes[n.id])}
-          onRetry={() => run(() => put(`/api/nodes/${encodeURIComponent(n.id)}/models/${encodeURIComponent(m.id)}`,
-            { desired: "present", params: m.nodes[n.id]?.params ?? undefined }))} />
+          onRetry={async () => {
+            const path = `/api/nodes/${encodeURIComponent(n.id)}/models/${encodeURIComponent(m.id)}`;
+            const body = { desired: "present", params: m.nodes[n.id]?.params ?? undefined };
+            const ok = await confirm({ title: `Retry ${m.reference} on ${n.name}?`, message: describeRequest("PUT", path, body), confirmLabel: "Retry" });
+            if (ok) await run(() => put(path, body));
+          }} />
       ),
     })),
   ];
@@ -93,7 +98,10 @@ export function ModelsPage() {
         <Section title="On nodes but not in the catalog" aside="Add them to manage and route them from here">
           <div className="row">
             {uncatalogued.map((ref) => (
-              <Button key={ref} className="mono" size="sm" disabled={busy} onClick={() => run(() => post("/api/models", { reference: ref }))}>
+              <Button key={ref} className="mono" size="sm" disabled={busy} onClick={async () => {
+                const ok = await confirm({ title: `Add ${ref} to the catalog?`, message: describeRequest("POST", "/api/models", { reference: ref }), confirmLabel: "Add" });
+                if (ok) await run(() => post("/api/models", { reference: ref }));
+              }}>
                 Add {ref}
               </Button>
             ))}
@@ -220,13 +228,16 @@ const clean = (p: ModelParams) => Object.fromEntries(Object.entries(p).filter(([
 function AddModelDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const ref = useDialog(open);
   const { run, busy, error, clearError } = useRun();
+  const confirm = useConfirm();
   const [reference, setReference] = useState("");
   const [name, setName] = useState("");
   const [defaults, setDefaults] = useState<ModelParams>({ temperature: 0.2 });
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const ok = await run(() => post("/api/models", { reference: reference.trim(), display_name: name.trim() || undefined, defaults: clean(defaults) }));
+    const body = { reference: reference.trim(), display_name: name.trim() || undefined, defaults: clean(defaults) };
+    if (!(await confirm({ title: `Add ${body.reference} to the catalog?`, message: describeRequest("POST", "/api/models", body), confirmLabel: "Add" }))) return;
+    const ok = await run(() => post("/api/models", body));
     if (ok) { setReference(""); setName(""); onClose(); }
   }
 
@@ -263,6 +274,7 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
 }) {
   const ref = useDialog(true);
   const { run, busy, error, clearError } = useRun();
+  const confirm = useConfirm();
   const [node, setNode] = useState(initialNode ?? "");
   const [params, setParams] = useState<ModelParams>(model.defaults ?? {});
   const [override, setOverride] = useState(false);
@@ -272,8 +284,10 @@ function InstallDialog({ model, nodes, initialNode, onClose }: {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const ok = await run(() => put(`/api/nodes/${encodeURIComponent(node)}/models/${encodeURIComponent(model.id)}`,
-      { desired: "present", params: clean(params), override_fit: override || undefined }));
+    const path = `/api/nodes/${encodeURIComponent(node)}/models/${encodeURIComponent(model.id)}`;
+    const body = { desired: "present", params: clean(params), override_fit: override || undefined };
+    if (!(await confirm({ title: `Install ${model.reference} on ${chosen?.name ?? node}?`, message: describeRequest("PUT", path, body), confirmLabel: "Install" }))) return;
+    const ok = await run(() => put(path, body));
     if (ok) onClose();
   }
 

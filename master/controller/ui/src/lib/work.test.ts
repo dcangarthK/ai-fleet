@@ -28,6 +28,10 @@ describe("work", () => {
     expect(f).toHaveLength(2);
     expect(f[0]).toMatchObject({ severity: "HIGH", cites: [12] });
   });
+  it("does not treat prose starting with a severity word as a finding", () => {
+    expect(parseFindings("High level overview\nHigh-level summary\nLow risk change overall\n# High level")).toHaveLength(0);
+    expect(parseFindings("**HIGH** bad\n[MED] other\nLOW - nit\nMEDIUM: x")).toHaveLength(4);
+  });
   it("parses verdict", () => { expect(parseVerdict("Verdict: approved")).toBe("approved"); expect(parseVerdict("none")).toBeNull(); });
   it("splits citations", () => {
     expect(splitCitations("see [L3].")).toEqual([{ kind: "text", text: "see " }, { kind: "cite", line: 3 }, { kind: "text", text: "." }]);

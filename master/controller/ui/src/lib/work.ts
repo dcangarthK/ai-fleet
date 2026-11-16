@@ -221,13 +221,24 @@ export function citesIn(text: string): number[] {
   return [...new Set([...text.matchAll(CITE_RE)].map((m) => Number(m[1])))].sort((a, b) => a - b);
 }
 
+/** A severity word starts a finding only with a closed bracket/bold opener, or a ":" / spaced dash followed by text.
+ * "High level overview", "High-level" and "# High level" are prose, not findings. */
+function isFindingHead(opener: string, delim: string, title: string): boolean {
+  const o = opener.trim();
+  const closed = /[\]):*]/.test(delim);
+  if (o && !o.startsWith("#") && closed) return true;
+  if (!title.trim()) return false;
+  // A dash counts only when spaced off the word ("LOW - nit"); "High-level" is a hyphenated word.
+  return /:/.test(delim) || /^\s+[\-–—]/.test(delim);
+}
+
 /** HIGH/MED/LOW blocks from review output: "HIGH: title", an indented line or two of detail. */
 export function parseFindings(text: string | null | undefined): Finding[] {
   const out: Finding[] = [];
   let open: Finding | null = null;
   for (const line of (text ?? "").split("\n")) {
     const m = FINDING_RE.exec(line);
-    if (m && ((m[1] ?? "").trim() || (m[3] ?? "").trim())) {
+    if (m && isFindingHead(m[1] ?? "", m[3] ?? "", m[4] ?? "")) {
       const sev = m[2].toUpperCase();
       open = { severity: sev.startsWith("MED") ? "MED" : (sev as Severity), title: (m[4] ?? "").replace(/\*+/g, "").trim(), detail: "", cites: [] };
       out.push(open);

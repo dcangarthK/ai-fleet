@@ -4,6 +4,7 @@ import { del, post, put, type Assignment, type FleetNode } from "../lib/api";
 import { useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead } from "../components/bits";
+import { describeRequest } from "../lib/request";
 import { Button, Card, Panel, Select, Table, useConfirm } from "../components/ui";
 
 const SUGGESTED = ["coder", "reviewer", "fast"];
@@ -51,11 +52,13 @@ export function RolesPage() {
   async function assign(e: FormEvent) {
     e.preventDefault();
     const entry = catalog.find((m) => m.reference === model);
-    await run(() => post("/api/roles", { role, node, model, ensure_model: needsInstall, catalog_id: entry?.id }));
+    const body = { role, node, model, ensure_model: needsInstall, catalog_id: entry?.id };
+    const ok = await confirm({ title: `Assign ${role} to ${model}?`, message: describeRequest("POST", "/api/roles", body), confirmLabel: "Assign" });
+    if (ok) await run(() => post("/api/roles", body));
   }
 
   async function remove(a: Assignment) {
-    const ok = await confirm({ title: "Remove role assignment?", message: `Stop routing ${a.role} to ${a.model} on ${a.node ?? a.node_id}?`, confirmLabel: "Remove", danger: true });
+    const ok = await confirm({ title: "Remove role assignment?", message: `Stop routing ${a.role} to ${a.model} on ${a.node ?? a.node_id}? ${describeRequest("DELETE", "/api/roles", { role: a.role, node: a.node_id, model: a.model })}`, confirmLabel: "Remove", danger: true });
     if (ok) await run(() => del("/api/roles", { role: a.role, node: a.node_id, model: a.model }));
   }
 
@@ -107,7 +110,12 @@ export function RolesPage() {
                 const info = fleet.data?.roles?.find((x) => x.name === r);
                 return can.admin ? (
                   <Select aria-label={`Fallback for ${r}`} value={info?.fallback ?? ""} disabled={busy}
-                          onChange={(e) => run(() => put(`/api/roles/${encodeURIComponent(r)}`, { fallback: e.target.value || null, description: info?.description ?? null }))}>
+                          onChange={async (e) => {
+                            const path = `/api/roles/${encodeURIComponent(r)}`;
+                            const body = { fallback: e.target.value || null, description: info?.description ?? null };
+                            const ok = await confirm({ title: `Change fallback for ${r}?`, message: describeRequest("PUT", path, body), confirmLabel: "Change fallback" });
+                            if (ok) await run(() => put(path, body));
+                          }}>
                     <option value="">Nothing: report the error</option>
                     {roles.filter((x) => x !== r).map((x) => <option key={x} value={x}>{x}</option>)}
                   </Select>

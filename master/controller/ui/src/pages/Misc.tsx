@@ -4,7 +4,8 @@ import { api, get, post, put, type NotifyRule } from "../lib/api";
 import { Link } from "react-router-dom";
 import { newestFirst, useCan, useEvents, useFleet, useRun } from "../lib/data";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
-import { Button, Card, Empty, Panel, Select, Table } from "../components/ui";
+import { Button, Card, Empty, Panel, Select, Table, useConfirm } from "../components/ui";
+import { describeRequest } from "../lib/request";
 import { Terminal } from "../components/Terminal";
 
 function when(ts: number) {
@@ -121,6 +122,7 @@ export function SettingsPage() {
 function Notifications({ admin }: { admin: boolean }) {
   const rules = useQuery({ queryKey: ["notify-rules"], queryFn: () => get<NotifyRule[]>("/api/notify-rules"), retry: 0 });
   const { run, busy, error, clearError } = useRun();
+  const confirm = useConfirm();
   const [sent, setSent] = useState<string | null>(null);
   return (
     <Section title="Notifications" aside="Which events reach your notification plugins">
@@ -134,11 +136,16 @@ function Notifications({ admin }: { admin: boolean }) {
             { key: "plugin", header: "Send through", cell: (r) => r.plugin },
             { key: "on", header: "On", cell: (r) => (
               <input type="checkbox" aria-label={`Notify on ${r.event_glob}`} checked={r.enabled} disabled={!admin || busy}
-                     onChange={(e) => run(() => put(`/api/notify-rules/${encodeURIComponent(r.id)}`, { enabled: e.target.checked }))} />
+                     onChange={async (e) => {
+                       const path = `/api/notify-rules/${encodeURIComponent(r.id)}`;
+                       const body = { enabled: e.target.checked };
+                       const ok = await confirm({ title: `${body.enabled ? "Enable" : "Disable"} notifications for ${r.event_glob}?`, message: describeRequest("PUT", path, body), confirmLabel: "Save" });
+                       if (ok) await run(() => put(path, body));
+                     }} />
             ) },
             { key: "act", header: "Actions", label: "", cell: (r) => admin ? (
               <Button size="sm" variant="ghost" disabled={busy}
-                      onClick={async () => { const ok = await run(() => post(`/api/notify-rules/${encodeURIComponent(r.id)}/test`)); if (ok) setSent(`Sent a test through ${r.plugin}.`); }}>Send a test</Button>
+                      onClick={async () => { const path = `/api/notify-rules/${encodeURIComponent(r.id)}/test`; if (!(await confirm({ title: `Send a test through ${r.plugin}?`, message: describeRequest("POST", path), confirmLabel: "Send" }))) return; const ok = await run(() => post(path)); if (ok) setSent(`Sent a test through ${r.plugin}.`); }}>Send a test</Button>
             ) : null },
           ]}
         />
@@ -151,6 +158,7 @@ function Notifications({ admin }: { admin: boolean }) {
 
 function Backup() {
   const { run, busy, error, clearError } = useRun();
+  const confirm = useConfirm();
   const [plan, setPlan] = useState<{ doc: unknown; diff: unknown } | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -188,7 +196,7 @@ function Backup() {
           <Terminal title="restore preview (dry run)" text={JSON.stringify(plan.diff, null, 2)} height={280} label="Restore preview" />
           <div className="row" style={{ marginTop: "var(--s3)" }}>
             <Button variant="primary" disabled={busy}
-                    onClick={async () => { const ok = await run(() => api("/api/import", "POST", plan.doc)); if (ok) { setPlan(null); setDone("Restored. Changes were saved as new versions; nothing was deleted."); } }}>Apply these changes</Button>
+                    onClick={async () => { if (!(await confirm({ title: "Restore this configuration?", message: describeRequest("POST", "/api/import", { document: "uploaded file (see preview above)" }), confirmLabel: "Apply" }))) return; const ok = await run(() => api("/api/import", "POST", plan.doc)); if (ok) { setPlan(null); setDone("Restored. Changes were saved as new versions; nothing was deleted."); } }}>Apply these changes</Button>
             <Button variant="ghost" onClick={() => setPlan(null)}>Cancel</Button>
           </div>
         </Card>

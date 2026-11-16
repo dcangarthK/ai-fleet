@@ -28,6 +28,7 @@ MAX_LINE_CHARS = 400
 MAX_RESULT_CHARS = 4000
 MAX_QUESTION_CHARS = 2000
 MAX_QUERY_CHARS = 200
+WORK_MAX_ATTEMPTS = 200
 SEARCH_MAX_SCAN = 2000
 CITE_RE = re.compile(r"\[L(\d+)\]")
 TOKEN_KEYS = ("turns", "input", "cache_read", "cache_write", "output")
@@ -80,10 +81,11 @@ def _attempt(t: dict) -> dict:
 def work_item(root_id: str) -> dict:
     members = _work_members(root_id)
     root = members[0]
-    attempts = [_attempt(t) for t in members]
+    truncated = len(members) > WORK_MAX_ATTEMPTS
+    attempts = [_attempt(t) for t in members[:WORK_MAX_ATTEMPTS]]
     totals = {k: sum((a["tokens"] or {}).get(k, 0) for a in attempts) for k in TOKEN_KEYS}
     return {"root_id": root_id, "title": root.get("title"), "state": root.get("state"), "repo": os.path.basename(str(root.get("repo") or "").rstrip("/\\")) or None,
-            "chain": root.get("chain"), "attempts": attempts, "tokens": totals}
+            "chain": root.get("chain"), "attempts": attempts, "tokens": totals, "truncated": truncated}
 
 
 @router.get("/api/search")

@@ -119,3 +119,18 @@ describe("rateWindows", () => {
     expect(rateWindows({ primary: null, secondary: { used_percent: 1, resets_at: 5, window_minutes: null }, seen_at: null })).toHaveLength(1);
   });
 });
+
+import { previewSpawn } from "./budget";
+describe("previewSpawn", () => {
+  const rows = [{ kind: "fix", agent: "codex", tasks: 2, input: 1000, output: 500, cached: 0, cost_usd: 1, limit_hits: 0, local: false, avg_prompt_kb: null }] as BudgetUsageRow[];
+  const model = (state: string) => [{ key: "codex", agent: "codex", state }] as unknown as ModelStatus[];
+  it("averages earlier tasks", () => {
+    const p = previewSpawn(rows, model("ok"), "fix", "codex");
+    expect([p.tokens, p.cost, p.blocked, p.state]).toEqual([750, 0.5, false, "OK"]);
+  });
+  it("flags a limited model and an empty history", () => {
+    const p = previewSpawn([], model("limited"), "review", "codex");
+    expect([p.tokens, p.cost, p.blocked]).toEqual([null, null, true]);
+    expect(p.basis).toMatch(/no earlier/);
+  });
+});

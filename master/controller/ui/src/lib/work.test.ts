@@ -53,3 +53,24 @@ describe("work", () => {
     expect(filterWork([item], { ...none, view: "merge" })).toHaveLength(0);
   });
 });
+
+import { diffAnchor, isCommitHash, whyAttempt } from "./work";
+describe("task B helpers", () => {
+  it("splits a diff into files with counts for the tree", () => {
+    const f = splitDiff("diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n+a\n+b\n-c\ndiff --git a/y b/y\n+z\n");
+    expect(f.map((x) => [x.path, x.added, x.removed])).toEqual([["x.ts", 2, 1], ["y", 1, 0]]);
+  });
+  it("makes safe anchors", () => { expect(diffAnchor("src/a b.ts")).toBe("diff-src-a-b-ts"); });
+  it("validates commit hashes strictly", () => {
+    expect(isCommitHash("abc1234")).toBe(true);
+    expect(isCommitHash("ABCDEF0123456789abcdef0123456789abcdef01")).toBe(true);
+    expect(isCommitHash("abc123")).toBe(false);
+    expect(isCommitHash("xyz1234")).toBe(false);
+    expect(isCommitHash("a".repeat(41))).toBe(false);
+  });
+  it("explains routing", () => {
+    const w = whyAttempt(att({ model: "sonnet", account_label: "spare", kind: "fix", stage: "fix" }));
+    expect(w).toMatchObject({ model: "sonnet", account: "spare", kind: "fix" });
+    expect(w.rule).toMatch(/builder/);
+  });
+});

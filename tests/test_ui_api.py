@@ -223,6 +223,13 @@ class UiApiTests(LiveBase):
         self.assertEqual(len(body["nodes"]), 1)
         self.assertTrue(body["truncated"])
 
+    def test_work_attempts_capped_with_truncated_flag(self):
+        self.assertFalse(self.c.get(f"/api/work/{ROOT}").json()["truncated"])
+        with mock.patch.object(ui_api, "WORK_MAX_ATTEMPTS", 1):
+            body = self.c.get(f"/api/work/{ROOT}").json()
+        self.assertEqual([a["id"] for a in body["attempts"]], [ROOT])
+        self.assertTrue(body["truncated"])
+
     def test_ask_503_when_fast_unavailable(self):
         async def down(role, system, user):
             raise ConnectionError("no gateway")

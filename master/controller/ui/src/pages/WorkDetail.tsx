@@ -10,6 +10,8 @@ import { Terminal } from "../components/Terminal";
 import { ChainStrip } from "../components/work/ChainStrip";
 import { Actions } from "../components/work/Actions";
 import { Ask } from "../components/work/Ask";
+import { DiffTree } from "../components/work/DiffTree";
+import { WhyPanel } from "../components/work/WhyPanel";
 import { chainSummary, deriveChain, gateRounds, parseFindings, sameModelWarning, tokenTotal, VERDICT_LABEL, parseVerdict, type DetailAttempt, type WorkDetail } from "../lib/work";
 
 const ACTIVE = new Set(["queued", "starting", "working"]);
@@ -57,18 +59,21 @@ export function WorkDetailPage() {
           <h2>Attempts</h2>
           {attempts.length === 0 ? <Empty title="No attempts yet" /> : <Table columns={cols} rows={attempts} rowKey={(a) => a.id} selectedKey={current?.id} caption="Attempts" />}
         </Card>
+        {d.truncated && <div role="status"><Badge tone="warn">Truncated</Badge> Showing the first {attempts.length} attempts only.</div>}
+        <Card><h2>Why?</h2><WhyPanel attempts={attempts} /></Card>
         {current && (
           <>
             <Card>
               <h2>Log <span className="muted mono">{current.id}</span></h2>
               <Terminal title={`${current.node ?? "node"}:~/worktree${current.branch ? ` (${current.branch})` : ""}`} text={log} live={ACTIVE.has(current.state)} label={`Log of ${current.id}`} />
             </Card>
+            <Card><h2>Changes <span className="muted mono">{current.id}</span></h2><DiffTree taskId={current.id} /></Card>
             <Card>
               <h2>Gate</h2>
               {gate.rounds === 0 ? <p className="muted">No gate has run.</p> : (
                 <>
                   <p>{gate.rounds} round{gate.rounds > 1 ? "s" : ""}, {gate.failed} failed (max {gate.max}). Latest: {gate.last?.gate?.passed ? "passed" : gate.last?.gate?.passed === false ? "failed" : "running"}.</p>
-                  {gate.last?.gate?.tail && <pre className="mono" style={{ overflow: "auto", maxHeight: 220 }}>{gate.last.gate.tail}</pre>}
+                  {gate.last?.gate?.tail && <Terminal title={`gate: ${gate.last.node ?? "node"}`} text={gate.last.gate.tail} height={220} idPrefix="gate-" label="Gate output" />}
                 </>
               )}
             </Card>

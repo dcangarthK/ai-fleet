@@ -40,6 +40,8 @@ export interface WorkDetail {
   chain: PlannedStage[] | string | null;
   attempts: DetailAttempt[];
   tokens: Tokens;
+  /** True when the controller capped the attempts list (200). */
+  truncated?: boolean;
 }
 
 export interface AskResponse { answer: string; citations: number[]; model: string; local: boolean }
@@ -318,6 +320,25 @@ export function splitDiff(diff: string): DiffFile[] {
     else if (line.startsWith("-") && !line.startsWith("---")) cur.removed++;
   }
   return files;
+}
+
+/** DOM id for a diff file, so the tree can scroll to it. */
+export const diffAnchor = (path: string): string => `diff-${path.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+
+/** A commit hash: 7 to 40 hex characters, nothing else. */
+export const isCommitHash = (s: string): boolean => /^[0-9a-f]{7,40}$/i.test(s.trim());
+
+// ---------- "Why?" per attempt ----------
+
+/** Why an attempt ran where it did: its model, account, kind and the standing budget rule for its stage. Uses only the detail response. */
+export function whyAttempt(a: DetailAttempt): { model: string; account: string; kind: string; rule: string } {
+  const stage = stageOf(a);
+  return {
+    model: a.model || a.agent || "unknown",
+    account: a.account_label || a.account || "default account",
+    kind: a.kind || stage,
+    rule: STAGE_WHY[stage] ?? "No standing budget rule is recorded for this stage.",
+  };
 }
 
 // ---------- work list ----------

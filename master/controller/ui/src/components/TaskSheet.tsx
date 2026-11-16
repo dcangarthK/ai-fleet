@@ -5,7 +5,8 @@ import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../li
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
 import { Terminal } from "./Terminal";
-import { useConfirm } from "./ui";
+import { Button, Dialog, Field, Input, useConfirm } from "./ui";
+import { isCommitHash } from "../lib/work";
 import { displayOf } from "../lib/lineage";
 import { handoffSlotName, plannedText, type HandoffSlot } from "../lib/handoff";
 
@@ -96,20 +97,35 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
   const can = { ...all, approve: all.approve && scope.admin, reject: all.reject && scope.admin, resolve: all.resolve && scope.admin,
     cancel: all.cancel && scope.operate, complete: all.complete && scope.operate, cleanup: all.cleanup && scope.operate };
   const gate = task.gate_result;
+  const [elsewhere, setElsewhere] = useState(false);
+  const [by, setBy] = useState("");
+  const [commit, setCommit] = useState("");
+  const byErr = !by.trim() ? "Say who finished it." : null;
+  const commitErr = commit.trim() && !isCommitHash(commit) ? "A commit is 7 to 40 hex characters." : null;
+  async function submitElsewhere() {
+    if (byErr || commitErr) return;
+    const body = { kind: "done_elsewhere", by: by.trim(), ...(commit.trim() ? { commit: commit.trim() } : {}) };
+    if (await confirm({ title: "Mark done elsewhere?", message: `Closes ${task.id} as done by ${body.by}.`, confirmLabel: "Mark done" })) {
+      act("resolve", body);
+      setElsewhere(false); setBy(""); setCommit("");
+    }
+  }
   return (
     <>
+      <Dialog open={elsewhere} onClose={() => setElsewhere(false)} title="Mark done elsewhere"
+        footer={<><Button onClick={() => setElsewhere(false)}>Cancel</Button><Button variant="primary" disabled={!!byErr || !!commitErr} onClick={submitElsewhere}>Continue</Button></>}>
+        <div className="stack" style={{ gap: 8 }}>
+          <Field label="Who finished this?" hint="For example: Sonnet 5.5 (orchestrator session)">{(p) => <Input {...p} value={by} onChange={(e) => setBy(e.target.value)} />}</Field>
+          <Field label="Commit (optional)" error={commitErr}>{(p) => <Input {...p} value={commit} placeholder="7 to 40 hex characters" onChange={(e) => setCommit(e.target.value)} />}</Field>
+        </div>
+      </Dialog>
       <div className="row" style={{ marginBottom: 14 }}>
         {can.approve && <button className="primary" disabled={busy} onClick={() => act("approve")}>Approve</button>}
         {can.reject && <button className="danger" disabled={busy} onClick={() => act("reject")}>Reject</button>}
         {can.cancel && <button className="danger" disabled={busy} onClick={() => act("cancel")}>Cancel task</button>}
         {can.complete && <button disabled={busy} onClick={() => act("complete")}>Mark done</button>}
         {can.resolve && (
-          <button disabled={busy} onClick={() => {
-            const by = prompt("Who finished this? (for example: Sonnet 5.5 (orchestrator session))");
-            if (!by?.trim()) return;
-            const commit = prompt("Commit that has the work (7 to 40 hex characters, or leave empty)") ?? "";
-            act("resolve", { kind: "done_elsewhere", by: by.trim(), ...(commit.trim() ? { commit: commit.trim() } : {}) });
-          }}>Mark done elsewhere…</button>
+          <button disabled={busy} onClick={() => setElsewhere(true)}>Mark done elsewhere…</button>
         )}
         {can.resolve && <button disabled={busy} onClick={() => act("resolve", { kind: "dismissed" })}>Dismiss</button>}
         {can.diff && <button disabled={busy} onClick={loadDiff}>Show changes</button>}

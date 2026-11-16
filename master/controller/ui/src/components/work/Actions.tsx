@@ -5,7 +5,8 @@ import { Button, Field, Input, Select, useConfirm } from "../ui";
 import { ErrorBanner } from "../bits";
 import { describeRequest } from "../../lib/request";
 import { FOLLOW_KINDS, followUpBody, followUpError } from "../../lib/spawn";
-import type { DetailAttempt } from "../../lib/work";
+import { isCommitHash, type DetailAttempt } from "../../lib/work";
+import { SpawnPreview } from "./SpawnPreview";
 
 const LIVE = new Set(["queued", "awaiting_approval", "starting", "working", "blocked"]);
 const RESUMABLE = new Set(["review", "blocked", "failed", "interrupted", "done"]);
@@ -57,6 +58,7 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
     const path = `/api/tasks/${attempt.id}/resolve`;
     const body = { kind: resKind, by: resBy.trim() || undefined, commit: resCommit.trim() || undefined };
     if (resKind === "done_elsewhere" && !body.by) { setErr("done_elsewhere needs who finished it."); return; }
+    if (body.commit && !isCommitHash(body.commit)) { setErr("A commit is 7 to 40 hex characters."); return; }
     setErr(null);
     if (await confirm({ title: "Mark resolved?", message: describeRequest("POST", path, body), confirmLabel: "Resolve" })) {
       if ((await run(() => post(path, body))) !== undefined) { setResolving(false); setResBy(""); setResCommit(""); }
@@ -65,7 +67,7 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
   async function outcome() {
     const path = `/api/tasks/${attempt.id}/outcome`;
     const body = { kind: outKind, commit: outCommit.trim() || undefined };
-    if (outKind === "merged" && !body.commit) { setErr("merged needs a commit (7 to 40 hex characters)."); return; }
+    if ((outKind === "merged" && !body.commit) || (body.commit && !isCommitHash(body.commit))) { setErr("merged needs a commit (7 to 40 hex characters)."); return; }
     setErr(null);
     if (await confirm({ title: `Record outcome: ${outKind}?`, message: describeRequest("POST", path, body), confirmLabel: "Record" })) {
       if ((await run(() => post(path, body))) !== undefined) { setOutcomeOpen(false); setOutCommit(""); }
@@ -80,7 +82,7 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
     const bad = followUpError(f);
     setErr(bad);
     if (bad) return;
-    if (await confirm({ title: `Spawn ${kind} task?`, message: `${agent} runs a ${kind} under ${attempt.id}. This may use paid-model budget.`, confirmLabel: "Spawn" })) {
+    if (await confirm({ title: `Spawn ${kind} task?`, message: <><p>{agent} runs a {kind} under {attempt.id}. This may use paid-model budget.</p><SpawnPreview kind={kind} agent={agent} /></>, confirmLabel: "Spawn" })) {
       if ((await run(() => post("/api/tasks", followUpBody(f)))) !== undefined) { setFollow(false); setPrompt(""); }
     }
   }
@@ -121,6 +123,7 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
             <Field label="Kind">{(p) => <Select {...p} value={kind} onChange={(e) => setKind(e.target.value)}>{FOLLOW_KINDS.map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
             <Field label="Agent">{(p) => <Select {...p} value={agent} onChange={(e) => setAgent(e.target.value)}>{["claude", "codex", "ollama"].map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
           </div>
+          <SpawnPreview kind={kind} agent={agent} />
           <Field label="What should it do?" error={err}>{(p) => <textarea {...p} rows={3} value={prompt} onChange={(e) => setPrompt(e.target.value)} />}</Field>
           <div><Button variant="primary" disabled={busy} onClick={spawn}>Spawn</Button></div>
         </div>

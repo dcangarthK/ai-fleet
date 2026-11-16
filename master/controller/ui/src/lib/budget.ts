@@ -402,3 +402,32 @@ export const RULES_FORM_CLASS = "rules-form";
 export function rulesFormClass(phone: boolean): string {
   return phone ? `${RULES_FORM_CLASS} one-col` : RULES_FORM_CLASS;
 }
+
+// ---------- spawn preview ----------
+
+export interface SpawnPreview {
+  tokens: number | null;
+  cost: number | null;
+  basis: string;
+  tone: Tone;
+  state: string;
+  blocked: boolean;
+}
+
+/** Estimate a spawn from the average of earlier tasks with the same kind and agent, and read the target agent's budget state. */
+export function previewSpawn(rows: BudgetUsageRow[], models: ModelStatus[], kind: string, agent: string): SpawnPreview {
+  const mine = rows.filter((r) => r.kind === kind && (!r.agent || r.agent === agent) && r.tasks > 0);
+  const tasks = mine.reduce((t, r) => t + r.tasks, 0);
+  const tok = mine.reduce((t, r) => t + r.input + r.output, 0);
+  const costed = mine.filter((r) => r.cost_usd != null);
+  const costedTasks = costed.reduce((t, r) => t + r.tasks, 0);
+  const cost = costedTasks ? costed.reduce((t, r) => t + (r.cost_usd ?? 0), 0) / costedTasks : null;
+  const target = models.filter((m) => m.agent === agent);
+  const bad = target.find((m) => m.state === "limited") ?? target.find((m) => m.state === "soft");
+  const card = bad ? statusCard(bad) : target.length ? { tone: "ok" as Tone, label: "OK" } : { tone: "quiet" as Tone, label: "No budget rule for this agent" };
+  return {
+    tokens: tasks ? Math.round(tok / tasks) : null, cost,
+    basis: tasks ? `average of ${tasks} earlier ${kind} task${tasks > 1 ? "s" : ""}` : `no earlier ${kind} tasks to estimate from`,
+    tone: card.tone, state: card.label, blocked: bad?.state === "limited",
+  };
+}

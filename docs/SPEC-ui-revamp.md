@@ -1,6 +1,6 @@
 # SPEC: Console UI revamp (16 Nov 2026)
 
-Status: draft, awaiting the owner's choice of design direction (section 6).
+Status: direction C (Workbench) chosen by the owner on 16 Nov, with an intelligence layer (section 6a).
 Scope: `master/controller/ui/` (React 18, react-router 6, TanStack Query 5, Vite 5) and small additive routes in
 `master/controller/`. The full page and route inventory behind this spec is in the session notes
 (`ui-inventory.md`); the summary below is what the redesign needs.
@@ -103,6 +103,28 @@ rings, no gradients, no emoji, no glass, no decorative shadows.
 - **C. Workbench.** Calm, roomier, light-first. Work item as the hero: big chain/timeline, side panel for
   context. Feels like Linear/GitHub's PR view, but with this fleet's data.
 
+
+## 6a. Chosen: Workbench + intelligence layer
+
+The owner chose C and asked that the console feel like the UI of an intelligent system, in function as much as
+looks. The console should not only display state; it should explain it, predict it and propose the next move,
+with every proposal one click (and one confirmation) away. Intelligence is grounded in controller data only; no
+model is called from page render.
+
+| Capability | What the owner sees | Source |
+|---|---|---|
+| **Briefing** | Top of Now: 3-5 sentence plain-language state of the fleet ("2 items need you; Codex at 83% of weekly, final reviews only until Thu 09:00; laptop offline 3h, its queue moved to master"). | Derived client-side from `/api/live`, `/api/budget/status`, `/api/fleet`; optional `fast` role summary on demand. |
+| **Next best actions** | Ranked cards: "Merge t-3f9a12c0 (gate green, Fable approved)", "Re-run gate on t-9c1e07b2 (runner not re-embedded: run nodes/build.py)". Each card: why, expected cost, one action button. | Rules over task/gate/review state (`lib/insights.ts`). |
+| **Why?** on every decision | Placement, reroute, budget refusal, queue wait each show the controller's reason ("routed to Sonnet: Codex limited until 16:42; rule v3 'builds->Sonnet'"). | `placement`, `routed_from`, `budget_wait`, `/api/budget/decisions`. |
+| **Forecasts** | Per paid model: projected time to soft/hard limit at the current burn rate; queue ETA; per work item, remaining stages x typical cost. | `/api/tokens/summary`, rate_limits, chain. |
+| **Anomalies** | Stalls, flapping nodes, repeated gate failures on the same trap, token spikes, "same model built and reviewed". | Events + tasks, `lib/insights.ts`. |
+| **Intent bar (⌘K)** | Palette accepts commands and plain intents: "review t-3f9a12c0 with fable", "drain laptop", "spawn build: …". Shows the exact request (agent, model, kind, stage, parent, budget rule that applies) before running. | Deterministic parser first; `fast` role fallback only to fill a form, never to execute. |
+| **Ask the fleet** | Side panel on a work item: questions about this item answered from its log/diff/findings by the local `fast` role, with citations to log lines. | New `POST /api/ask` (local roles only, never paid, redacted). |
+| **Confidence and provenance** | Every insight shows its evidence (links to events/log lines) and how sure it is; nothing auto-executes. | — |
+
+Additive route for this: `POST /api/ask` in `ui_api.py` (local `fast` role through the existing gateway; refuses
+paid models; uses the existing redaction).
+
 ## 7. Acceptance criteria
 
 1. All pages in section 3 exist; old routes redirect.
@@ -119,6 +141,8 @@ rings, no gradients, no emoji, no glass, no decorative shadows.
 - `lib/nav.test.ts`: legacy route map redirects; group/page list matches section 3.
 - `lib/work.test.ts`: chain derivation from attempts (stage order, current stage, gate round count, verdicts).
 - `lib/palette.test.ts`: search ranking and keyboard shortcut parsing.
+- `lib/insights.test.ts`: next-best-action rules, anomaly rules, forecast maths, briefing sentences.
+- `lib/intent.test.ts`: intent parser -> spawn/message/drain request bodies; unknown intents fall back to search.
 - `lib/spawn.test.ts`: spawn form -> request body (kind/stage/parent/link), validation.
 - `tests/test_ui_api.py`: `GET /api/work/{root}` shape and 404; `GET /api/search` limits and scope.
 

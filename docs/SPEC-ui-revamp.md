@@ -180,3 +180,35 @@ Small fleet tasks, Sonnet builders, one writer per file set, run in parallel whe
 3. Now page. 4. Work list + detail. 5. Budget. 6. Nodes + onboarding. 7. Models/Roles/Evals restyle.
 8. Plan page + Policies/Skills/Activity/Settings restyle.
 Round review by Fable (guidance only), final whole-branch review by Codex (`gpt-5.6-terra`, high).
+
+## 6c. Lineage (owner addition, 16 Nov)
+
+A new page, **Lineage** (`/lineage`, under Operate, `g l`), shows tasks, agents and the whole fleet as they work, and lets the owner trace any piece of work end to end. It is the "flight recorder" of the fleet.
+
+**Lenses** (tabs, one shared time axis and scrubber):
+1. **Fleet river.** Swimlanes, one per node and account (grouped by node). Each attempt is a bar on its lane from start to end, coloured by state, with its kind as an icon. Edges between bars show lineage links (retry, fix, review, merge, handoff) as curved arrows labelled with the link reason. A vertical "now" line moves in real time while follow mode is on. Queue waits show as hatched segments before a bar starts. Limit hits, stalls and gate failures are marked as small diamonds on the bar.
+2. **Trace** (`/lineage/:root`). The work item's DAG laid out left to right by stage (spawn, build, gate, review, fix, re-review, merge, done). The critical path (the chain of dependencies that set the end time) is highlighted, and every other node is dimmed. Clicking a node opens a side panel with the attempt's terminal log excerpt (the shared Terminal), gate summary, findings, tokens and duration. A replay control plays the trace back step by step from the event history.
+3. **Agents.** One row per agent and model (claude-sonnet, codex, local roles). It shows a heartbeat strip of the agent's activity: when it ran, idle gaps, tokens per minute, and which account it ran on. This answers "who is doing what right now".
+
+**Intelligence on the page** (in line with 6a, it advises and never acts):
+- **Bottleneck callout.** The longest queue wait or slowest stage in view, with why (budget wait, node busy, limit until).
+- **Anomaly markers.** Retries above two, gate rounds above three, stalls and cost outliers against the per-kind median.
+- **Narrative.** A one-paragraph "what happened" for a trace, generated deterministically from the events. No model is needed.
+
+Each insight shows its evidence (task ids and timestamps).
+
+**Data.** A new additive route `GET /api/lineage?since=&until=&root=` in `ui_api.py` (view scope) returns:
+- `nodes`: attempts with id, root_id, parent_id, link, kind, stage, agent, model, account, node, state, created/started/ended, tokens.
+- `edges`: parent to child, with the link reason.
+- `lanes`.
+- `events`: state transitions with timestamps, taken from what the task records already hold.
+
+The page live-updates through the existing SSE invalidation.
+
+**Rendering.** Hand-written SVG, no new dependencies. Layout, critical path, lane packing and narrative live in `src/lib/lineageGraph.ts`, which has unit tests. It is responsive:
+- Below 1024px, the river scrolls horizontally inside its own container.
+- Below 640px, the trace becomes a vertical list of steps.
+
+It respects reduced-motion and works in both themes.
+
+**Tests.** `lineageGraph.test.ts` (lane packing without overlap, critical path, narrative text, stage ordering); `tests/test_ui_api.py` gains `/api/lineage` cases.

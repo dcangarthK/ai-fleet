@@ -1465,11 +1465,100 @@ def allocate(t: "TaskIn") -> None:
     t.agent, t.model, t.profile = slot["agent"], slot["model"], slot["profile"]
 
 
+def _intel_view(rules: dict) -> tuple[dict, dict]:
+    """(headroom, load) for intel.rank/suggest, keyed by concrete candidate key (docs/SPEC-intelligent-controller.md R1)."""
+    import intel
+    import intel_routes
+    status = {m["key"]: m for m in budget.status().get("models", [])}
+    try:
+        used = intel_routes.used_5h()
+    except Exception:  # advisory: admission still enforces limits
+        used = {}
+    headroom, load = {}, {}
+    for key in intel.CANDIDATES:
+        agent, _, model = key.partition(":")
+        if agent == "local":
+            headroom[key] = {"routed": False, "used_percent": 0}  # agent tasks never run on local roles
+            continue
+        rkey = budget.match_key(rules, agent, model or None)
+        m = status.get(rkey) or {}
+        headroom[key] = {"limited_until": m.get("limited_until"), "used_percent": used.get(agent), "routed": True}
+        load[key] = budget.running_count(rkey) if rkey else 0
+    return headroom, load
+
+
+def auto_pick(t: "TaskIn") -> int | None:
+    """model="auto" (docs/SPEC-intelligent-controller.md R6): fill agent and model from intel.rank, record it.
+    Returns the intel_decisions row id (create_task attaches the task id once the task exists)."""
+    kind = t.kind
+    if not kind or kind not in budget.KINDS:
+        raise HTTPException(400, f"model 'auto' needs a kind, one of {list(budget.KINDS)}")
+    try:
+        import intel
+        import intel_routes
+        rules = budget.current_rules()
+        allowed = intel_routes.admission_allowed(rules)
+        headroom, load = _intel_view(rules)
+        with db() as c:
+            exclude = intel_routes.exclusion(c, kind, t.parent_id or t.review_of)
+            stats = intel_routes.build_stats(c)
+        cands = intel.rank(kind, rules=rules, stats=stats, headroom=headroom, load=load,
+                           prompt_bytes=len(t.prompt.encode()), exclude=exclude,
+                           allowed=allowed)
+        ok = [x for x in cands if x["eligible"] and allowed(x["key"], kind)]
+        pick = next((x for x in ok if not x["key"].startswith("local:")), None)
+        if pick and ok[0] is not pick:
+            pick["reasons"] = [*pick["reasons"], f"top candidate {ok[0]['key']} is local; agent tasks need a paid model"]
+    except HTTPException:
+        raise
+    except Exception as e:  # intel missing or broken: don't guess a model
+        raise HTTPException(503, f"intel unavailable ({e.__class__.__name__})")
+    if not pick:
+        raise HTTPException(409, f"no eligible model can take a {kind} task now")
+    t.agent, t.model = pick["agent"], pick["model"] or ("gpt-5.6-terra" if pick["agent"] == "codex" else None)
+    try:  # a decision-log failure never blocks task creation
+        with db() as c:
+            intel.ensure_schema(c)
+            return intel.record(c, task_id=None, kind=kind, action="auto_pick", chosen=pick["key"],
+                                candidates=cands[:5], reasons=pick["reasons"], est_tokens=pick.get("est_tokens"),
+                                est_usd=pick.get("est_usd"))
+    except Exception:
+        return None
+
+
+def _refusal_detail(refusal: "budget.Refusal", t: "TaskIn", kind: str, rules: dict):
+    """R5: a str refusal gains a suggest list; any failure leaves the old text exactly as it was."""
+    if not isinstance(refusal.detail, str):
+        return refusal.detail
+    try:
+        import intel
+        import intel_routes
+        headroom, load = _intel_view(rules)
+        security = any(g in t.prompt for g in (rules.get("reviews") or {}).get("security_paths") or [])
+        round_reviewer = None
+        if kind == "re_review" and t.parent_id:  # assumption: the parent is the original round's review task
+            with db() as c:
+                p = c.execute("SELECT agent, model, kind FROM tasks WHERE id=?", (t.parent_id,)).fetchone()
+            if p and p["kind"] == "review":
+                round_reviewer = intel.key_of(p["agent"], p["model"])
+        suggest = intel.suggest(kind, intel.key_of(t.agent, t.model), rules, headroom, load, security=security,
+                                round_reviewer=round_reviewer,
+                                allowed=intel_routes.admission_allowed(rules))
+        if suggest:
+            return {"error": refusal.detail, "suggest": suggest}
+    except Exception:
+        pass
+    return refusal.detail
+
+
 async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None = None,
                       pipeline: bool = False) -> dict:
     """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
     `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to.
     `pipeline` (in-process only): the pipeline engine, whose reviews keep their own independence check."""
+    decision_id = None
+    if t.model == "auto":
+        decision_id = auto_pick(t)  # Part I R6: before admission, which still runs unchanged
     allocated = t.agent == "auto"
     if allocated:
         allocate(t)  # docs/SPEC-stall-reroute.md 12.12: the controller picks agent, model and account
@@ -1640,7 +1729,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     except budget.Refusal as refusal:
         budget.log_decision("refused", refusal.detail, agent=t.agent, model=t.model, kind=kind,
                             title=(t.title or t.prompt.strip().splitlines()[0])[:80])
-        raise HTTPException(refusal.status, refusal.detail)
+        raise HTTPException(refusal.status, _refusal_detail(refusal, t, kind, rules))
     agent, model = decision["agent"], decision["model"]
     row_model = None if (kind_default and not t.model and agent == t.agent and model == kind_default) else model
     engine = local_engine(agent, model, t.role, t.node, t.engine)
@@ -1740,6 +1829,11 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         }
         with db() as c:
             c.execute(f"INSERT INTO tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+            if decision_id and index == 0:
+                try:  # attach the auto_pick decision to the task; never block creation
+                    c.execute("UPDATE intel_decisions SET task_id=? WHERE id=?", (task_id, decision_id))
+                except Exception:
+                    pass
             if t.replaces and index == 0:
                 resolution = json.dumps({"kind": "handed_off", "task_id": task_id, "link": "retry",
                                          "reason": row["link_reason"], "agent": agent, "model": model, "at": now})

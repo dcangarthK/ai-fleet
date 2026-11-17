@@ -16,17 +16,15 @@ The under-25k target was not met on the CLI (35.5k) before this change.
 
 Mechanism: `claude --setting-sources project,local` (listed in `claude --help`: "setting sources to load (user, project, local)"). The launcher now passes it, so `~/.claude` settings (user source) are not loaded. No new config dir, no new login, nothing under `~/.claude*` is touched or copied; auth is unaffected because it is not a setting. A dedicated `CLAUDE_CONFIG_DIR` was rejected: it would need a fresh login (owner step) and would hide the installed plugins.
 
-What this should drop: user-level skills/agents/CLAUDE.md/hooks. What is kept: project skill `.claude/skills/fleet-batch` and the project CLAUDE.md (project source), the `local-llm` MCP server (`--mcp-config`), and claude-mem, which is now enabled explicitly in `orchestrator/settings.json` (`claude-mem@thedotmack`) because its user-settings entry no longer loads.
+What it drops: user-level skills and agents (no custom agents listed any more). Kept, confirmed in the measurement below: project skill `fleet-batch`, the `local-llm` MCP server (29 tools), and claude-mem (its skills load), the last now enabled explicitly in `orchestrator/settings.json` (`claude-mem@thedotmack`) because its user-settings entry no longer loads.
 
-Side effect: the user-level master instructions (`~/.claude/CLAUDE.md`, caveman mode, SessionStart hook) are also not loaded in these sessions.
+Correction to the earlier expectation: `~/.claude/CLAUDE.md` (1.1k) still loads, listed as a "Project" memory file, so the master instructions stay. Whether the SessionStart hook (caveman) still runs was not checked.
 
-**UNVERIFIED.** The task session could not run a nested `claude -p ... "/context"` (command refused, not retried), so there is no after-measurement, and I did not confirm that `--setting-sources` also stops `~/.claude/skills` and `~/.claude/agents` loading, nor that claude-mem loads from `--settings`. Owner step: run
-`scripts/orchestrator.sh -p --model haiku "/context"` and record the numbers here.
-If skills (9.9k) and agents (3k) drop out, expect about 22k (35.5k - 9.9k - 3k, plus memory-file savings), under 25k. If they do not drop, the fallback needing an owner step is a dedicated `CLAUDE_CONFIG_DIR` with a one-time `claude` login in it; 25k is then reachable only by that route.
+Measured 17 Nov 2026 with `scripts/orchestrator.sh -p --model haiku "/context"`: **19.8k tokens**, under the 25k target. System prompt 3.4k, system tools 3.1k, memory files 4.9k, skills 5.2k (fleet-batch, claude-mem and built-ins), messages 3.2k; MCP tools (7.1k) and deferred system tools (14.2k) are listed but not loaded. No new login was needed.
 
-| | total | skills | agents | memory |
-|---|---|---|---|---|
-| Before | 35.5k | 9.9k | 3k | 5.5k |
-| After | not measured | | | |
+| | total | system tools | skills | agents | memory |
+|---|---|---|---|---|---|
+| Before | 35.5k | 9.9k | 9.9k | 3k | 5.5k |
+| After | 19.8k | 3.1k | 5.2k | none | 4.9k |
 
 The launcher cds to the repo root, so relative paths in your own args resolve from there. Run it by its real path, not a symlink.

@@ -32,9 +32,18 @@ whatever N is. The controller runs the build, gate, review and fix loop for ever
 - `pipeline_status` (server.py:668-670) is a read. It does not wait.
 - Reviewer independence: `pipeline.new` rejects a same-agent reviewer with the builder's model (pipeline.py:45-50).
   `tasks.check_independence` (master/controller/tasks.py:1493) covers tasks.
-- **Blocked gap.** `step()` handles build events `failed`, `interrupted` and `cancelled` (pipeline.py:225-298). There
-  is no branch for a builder that is `blocked` or `awaiting_approval`, so such a pipeline would sit in `building`.
-  UNVERIFIED: how `poll_pipeline` (controller.py:2032) turns task states into build events. Confirm before build.
+- **Blocked gap (verified).** `poll_pipeline` (master/controller/controller.py:2032) forwards a build to `step()` only
+  when its state is one of review, failed, interrupted, cancelled or capped (controller.py:2082). `blocked` and
+  `awaiting_approval` are not forwarded, and `step()` has no branch for them (pipeline.py:225-298). A blocked builder
+  therefore leaves its pipeline in `building` with nothing to act on.
+- **Existing approval path.** A task that a run leaves with denied tools becomes `blocked` (tasks.py:959). The
+  transition to `blocked` calls `auto_approve_denials` (tasks.py:1092). That function (tasks.py:1265-1300) resumes the
+  task with its denied tools when policy `auto_approve` allows the agent and tools (policy.py:71-79). It runs at most
+  `AUTO_APPROVE_ROUNDS = 3` times (tasks.py:1262). It emits `task.auto_approved`, `task.auto_approve_held` or
+  `task.auto_approve_exhausted`. `awaiting_approval` is set at creation for supervised and full modes
+  (tasks.py:1861; handoff.py:948; tasks.py:52), and auto-approve does not act on it. The approve endpoint itself was
+  not read in this pass: UNVERIFIED that only the owner can clear `awaiting_approval`; check at build time.
+- Reviewers: `poll_pipeline` already treats a `blocked` reviewer as finished and uses its answer (controller.py:2113-2114).
 - Model routing: `agent="auto"` exists for tasks (tasks.py:1518; handoff.py:359, via `rank_slots`). There is no
   `model="auto"` for pipelines. That is a gap this spec fills.
 - Budget state: `budget.limit_state` (master/controller/budget.py:492) is what `fleet_status` reports. The controller
@@ -102,13 +111,19 @@ The controller runs these steps. Each step is a pure function over stored state 
 Escalation to the owner. The item stops; other items keep running. The summary says why.
 - Gate failed more than `gate_bounces` times.
 - CHANGES after `max_fix_rounds` fix rounds.
-- Builder or reviewer `blocked` or `awaiting_approval`. The item enters `blocked`, and the dashboard is the owner's
-  to act on. The batch never approves or unblocks.
+- Builder `awaiting_approval`. Auto-approve does not cover it, so the item escalates at once with the reason
+  `owner approval needed`.
+- Builder `blocked` that stays blocked after the controller's auto-approve has finished (its `auto_approve_held` or
+  `auto_approve_exhausted` event, or no auto-approve policy for its agent). The item escalates with the reason
+  `owner approval needed`. Builder `blocked` that the controller auto-approves is not an escalation: the item waits
+  (state `building`, note "waiting for controller auto-approve") and resumes when the task leaves `blocked`.
+- Reviewer `blocked`: its answer is used, as today (controller.py:2113-2114).
+- The batch never approves or unblocks a task. The owner's dashboard clears `awaiting_approval`.
 - Budget limit: `on_limit = escalate`, or a wait longer than `limit_wait_max`.
 - No trusted review (existing rule, pipeline.py:387-392).
 - Builder `capped`, `failed`, `interrupted` or `cancelled` (existing handling, pipeline.py:225-298).
 
-Batch final review. Runs once, after every item is settled (`ready`, `escalated`, `blocked`, `failed` or `cancelled`).
+Batch final review. Runs once, after every item is settled (`ready`, `escalated`, `failed` or `cancelled`).
 It is one Codex `final_review` (`gpt-5.6-terra`, high effort) over the `ready` branches. Each diff is sent by path or
 as a bounded diff under about 60 KB; larger sets are split by area (CLAUDE.md rule 3). Findings are reported, not
 auto-fixed: the owner decides. If Codex is limited, the final review waits until `resets_at`. It is not silently
@@ -120,7 +135,8 @@ Never: approve or unblock a blocked task; merge to main; push; call `complete_ta
 ## 6. Output
 
 Per item, one short block:
-- `id`, `state` (ready, escalated, blocked, failed or cancelled), `branch`, `rounds` (builds used).
+- `id`, `state` (ready, escalated, failed or cancelled), `branch`, `rounds` (builds used). A blocked task shows as
+  `escalated` with the reason `owner approval needed`, or as `building` while the controller auto-approves it.
 - `verdict`: one line.
 - `open_findings`: up to 5, each a severity and one line. Trimmed like `task_status` does.
 - `models`: builder and reviewer models used, with counts per task.
@@ -142,15 +158,15 @@ gate output tail.
 ## 7. Acceptance criteria
 
 - AC1. One `run_batch` call creates the batch and every item. No per-item call is needed from the chat.
-- AC2. Every item ends in exactly one of ready, escalated, blocked, failed or cancelled. None is left in limbo.
+- AC2. Every item ends in exactly one of ready, escalated, failed or cancelled. None is left in limbo.
 - AC3. With the default policy, an item gets at most three fix builds after its first build. The fourth CHANGES escalates.
 - AC4. A gate failure is bounced to the builder three times. The fourth escalates.
 - AC5. Submit rejects a reviewer that matches the builder's agent and model (400). Codex-built items get Claude reviewers.
 - AC6. Routing never assigns Fable to build, fix or test. The routing table is data and is tested.
 - AC7. Exactly one Codex final review per batch, at high effort, model `gpt-5.6-terra`. It is not spawned while any
   item is unsettled, and not sent to Claude while Codex is limited.
-- AC8. A blocked or awaiting_approval task puts its item in `blocked`. No code path calls an approve or unblock
-  endpoint.
+- AC8. No code path in the pipeline or batch module calls an approve or unblock endpoint. The controller's existing
+  auto-approve is the only thing that resumes a blocked task.
 - AC9. No code path in the batch module merges, pushes, calls `complete_task` or `cleanup_task`, or uses
   `budget_override`.
 - AC10. A limit wait does not retry before `resets_at`. A wait longer than `limit_wait_max` escalates.
@@ -160,7 +176,12 @@ gate output tail.
 - AC14. The default summary is trimmed. `full=True` returns the whole record.
 - AC15. Overlapping `files` and `depends_on` run in order.
 - AC16. `run_pipeline`, `set_chain`, `pipeline_status` and `wait_tasks` behave as before. Their tests pass unchanged.
-- AC17. A builder in `blocked` or `awaiting_approval` gets a pipeline event, and the pipeline does not sit in building.
+- AC17. A build in `blocked` or `awaiting_approval` reaches `step()` as a build event. The pipeline is never left
+  silently in `building` with a settled-blocked build.
+- AC18. Auto-approve path: a blocked builder that the controller auto-approves stays `building` with the wait note,
+  then continues through gate and review once the task leaves `blocked`. The item does not escalate.
+- AC19. Stays-blocked path: a builder that stays `blocked` after auto-approve has finished, or is `awaiting_approval`,
+  escalates with `owner approval needed`. Other items keep running. The batch does not wait on it.
 
 ## 8. Test cases
 
@@ -175,7 +196,12 @@ Run one test file per process (scripts/gate.sh rule).
 - T6. Final review gating: unsettled item means not spawned; all settled means spawned once; a repeated loop tick does
   not spawn it again.
 - T7. Codex limited at final review: parked with `resets_at`; no Claude task spawned.
-- T8. Blocked task: item becomes `blocked`; the mock HTTP client records no approve or unblock call.
+- T8a. Auto-approve path: build goes `blocked`; the fake controller emits `task.auto_approved` and moves the task to
+  `working`. The item stays `building` with the wait note, then reaches gate and review. No escalation.
+- T8b. Stays-blocked path: build goes `blocked` and the fake controller emits `task.auto_approve_held`; the task stays
+  blocked. The item becomes `escalated` with `owner approval needed`, and the other items finish.
+- T8c. `awaiting_approval` build: escalates on the first poll with `owner approval needed`.
+- T8d. In all three, the mock HTTP client records no approve or unblock call (only the controller's own resume).
 - T9. Restart: state persisted after each event; reload; no duplicate spawn.
 - T10. `wait_batch`: returns on settle; returns with state at timeout; exactly one request.
 - T11. Summary trimming: default trimmed; `full=True` whole.
@@ -189,8 +215,12 @@ Run one test file per process (scripts/gate.sh rule).
 
 - `master/controller/batch.py` (new): validation, routing table, per-item state machine. Reuses `pipeline.new` and
   `pipeline.step`.
-- `master/controller/pipeline.py`: one new build-event branch for `blocked` and `awaiting_approval`, which escalates
-  (fixes the gap in section 2). No change to round rules or constants.
+- `master/controller/controller.py`: `poll_pipeline` also forwards `blocked` and `awaiting_approval` builds (add to the
+  tuple at controller.py:2082), so `step()` sees them.
+- `master/controller/pipeline.py`: `step()` gets build-event branches. `blocked` sets `budget.waiting_approval` and
+  keeps `building` (with a history note). A later poll that finds the build out of `blocked` clears the wait and
+  continues. `awaiting_approval`, or `blocked` after auto-approve has finished, escalates with `owner approval
+  needed`. No change to round rules or constants.
 - `master/controller/controller.py`: batch routes next to the pipeline routes (around 2157-2230), a batch loop started
   like `pipeline_loop` (2139), and the batch table created with the pipelines table.
 - `master/controller/live.py`: per-item chain labels for Live, via the existing chain writer. Descriptive only.
@@ -199,14 +229,17 @@ Run one test file per process (scripts/gate.sh rule).
 - New test files for batch.py, the routes and the MCP tools. One file per process.
 - Not changed: budget rules, `tasks.py` routing, `set_chain` semantics, `run_pipeline` arguments.
 
-## 10. Decisions taken in this draft (owner may change)
+## 10. Decisions (all decided by the owner)
 
-1. DECIDED (owner): `max_fix_rounds = 3` means three real fix rounds after the first build, so it maps to
-   `max_rounds = 4`. The mapping is stated in sections 2, 3 and 8 (T2); sections 5 and 7 use `max_fix_rounds` only. `max_rounds=3` is not used by the batch.
-2. Final-review findings are reported, not auto-fixed. This keeps spend bounded.
-3. Codex limited at final review means wait, not fall back to Claude.
-4. A limit wait over 6 h escalates.
-5. A security-sensitive item gets Codex as its single reviewer, at high effort.
-6. The batch stops at `ready`. Merging stays with the owner or a later merge task.
-7. OPEN (owner has not decided): whether the blocked and awaiting_approval branch in `pipeline.step` (section 2,
-   section 9) lands before the batch build starts.
+1. DECIDED: `max_fix_rounds = 3` means three real fix rounds after the first build, so it maps to `max_rounds = 4`.
+   The mapping is stated in sections 2, 3 and 8 (T2); sections 5 and 7 use `max_fix_rounds` only. `max_rounds=3`
+   is not used by the batch.
+2. DECIDED: final-review findings are reported, not auto-fixed. This keeps spend bounded.
+3. DECIDED: Codex limited at final review means wait, not fall back to Claude.
+4. DECIDED: a limit wait over 6 h escalates.
+5. DECIDED: a security-sensitive item gets Codex as its single reviewer, at high effort.
+6. DECIDED: the batch stops at `ready`. Merging stays with the owner or a later merge task.
+7. DECIDED: a blocked builder is handled by `pipeline.step`. The pipeline never approves or unblocks. Auto-approve
+   (`task.auto_approved`) resumes it, and the item waits and then continues. If the task stays `blocked` or is
+   `awaiting_approval`, the item is marked `escalated: owner approval needed` and the batch continues with the other
+   items. Sections 2, 5, 6, 7 (AC8, AC17-AC19), 8 (T8a-d) and 9 reflect this.

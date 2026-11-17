@@ -152,6 +152,22 @@ describe("graph layout", () => {
       expect(y + 64).toBeLessThanOrEqual(block.y + block.h);
     }
   });
+
+  it("leaves no more than 40px between neighbouring blocks on a shelf", () => {
+    const nodes = [
+      node({ id: "wide-a", root_id: "wide" }),
+      node({ id: "wide-b", root_id: "wide", parent_id: "wide-a" }),
+      node({ id: "wide-c", root_id: "wide", parent_id: "wide-b" }),
+      ...["one", "two", "three", "four"].map((id, i) => node({ id, root_id: id, created_at: T0 + 10 + i })),
+    ];
+    const graph = layoutGraph(nodes, []);
+    const shelves = new Map<number, typeof graph.groups>();
+    for (const group of graph.groups) shelves.set(group.y, [...(shelves.get(group.y) ?? []), group]);
+    for (const shelf of shelves.values()) {
+      const ordered = [...shelf].sort((a, b) => a.x - b.x);
+      for (let i = 1; i < ordered.length; i++) expect(ordered[i].x - (ordered[i - 1].x + ordered[i - 1].w)).toBeLessThanOrEqual(40);
+    }
+  });
 });
 
 describe("trace layout", () => {

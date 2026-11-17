@@ -128,7 +128,7 @@ export function LineagePage() {
               <Summary live={live} nodes={snap.length} lanes={data.lanes.length} roots={roots.length} cursor={cursor} root={root} />
 
               <TabPanel id="graph" value={lens} idPrefix="lin">
-                <div className="graph-layout"><div><Graph nodes={snap} edges={data.edges} now={effNow} selected={sel} onSelect={(n) => setParam("sel", n?.id ?? null)} />{selected && <RiverPanel node={selected} now={effNow} onClose={() => setParam("sel", null)} />}</div><details className="graph-insights"><summary>Insights</summary><Intel nodes={snap} bottleneck={bottleneck} anomalies={anomalies} narrative={null} /></details></div>
+                <div className="graph-layout"><div><Graph nodes={snap} edges={data.edges} now={effNow} selected={sel} onSelect={(n) => setParam("sel", n?.id ?? null)} /></div>{selected ? <RiverPanel node={selected} now={effNow} onClose={() => setParam("sel", null)} /> : <details className="graph-insights"><summary>Insights</summary><Intel nodes={snap} bottleneck={bottleneck} anomalies={anomalies} narrative={null} /></details>}</div>
               </TabPanel>
 
               <TabPanel id="river" value={lens} idPrefix="lin">

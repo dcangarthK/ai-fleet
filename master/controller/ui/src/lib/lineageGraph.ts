@@ -274,20 +274,18 @@ export function layoutGraph(nodes: LNode[], edges: LEdge[] = []): GraphLayout {
     const members = nodes.filter((n) => n.root_id === root).sort((a, b) => getDepth(a.id) - getDepth(b.id) || a.created_at - b.created_at || a.id.localeCompare(b.id));
     const rows = new Map<number, number>(); let maxCol = 0;
     const local = members.map((n) => { const col = getDepth(n.id); const row = rows.get(col) ?? 0; rows.set(col, row + 1); maxCol = Math.max(maxCol, col); return { n, col, row }; });
-    return { root, local, newest: Math.max(...members.map((n) => n.created_at)), width: Math.max(268, (maxCol + 1) * 268 + 48), height: Math.max(132, Math.max(1, ...rows.values()) * 88 + 52) };
+    return { root, local, newest: Math.max(...members.map((n) => n.created_at)), width: Math.max(268, (maxCol + 1) * 268), height: Math.max(132, Math.max(1, ...rows.values()) * 88 + 52) };
   }).sort((a, b) => b.newest - a.newest || a.root.localeCompare(b.root));
-  const columns = Math.max(1, Math.ceil(Math.sqrt(blocks.length)));
-  const columnW = Math.max(300, ...blocks.map((b) => b.width + 20));
-  const columnY = new Array<number>(columns).fill(20); const columnX = Array.from({ length: columns }, (_, i) => 20 + i * columnW);
-  let width = 560;
+  // Keep each work item compact: shelves fill a practical graph viewport before wrapping.
+  const shelfWidth = 1160, gap = 20;
+  let x = gap, y = gap, rowHeight = 0, width = 560;
   for (const block of blocks) {
-    const col = columnY.reduce((best, y, i) => y < columnY[best] ? i : best, 0);
-    const x = columnX[col], y = columnY[col];
+    if (x > gap && x + block.width > shelfWidth) { x = gap; y += rowHeight + gap; rowHeight = 0; }
     for (const item of block.local) place[item.n.id] = { root: block.root, col: item.col, row: item.row, x: 24 + item.col * 268, y: 30 + item.row * 88 };
     groups.push({ root: block.root, x, y, w: block.width, h: block.height });
-    columnY[col] += block.height + 20; width = Math.max(width, x + block.width + 20);
+    x += block.width + gap; rowHeight = Math.max(rowHeight, block.height); width = Math.max(width, x);
   }
-  return { place, groups, width, height: Math.max(160, ...columnY) };
+  return { place, groups, width, height: Math.max(160, y + rowHeight + gap) };
 }
 
 // ---------------------------------------------------------------------------------------------------- trace layout

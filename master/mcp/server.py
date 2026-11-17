@@ -298,7 +298,7 @@ def trim_task(t: dict) -> dict:
         if _SECTION_RE.match(line):
             section, block, tagged = True, None, False
         elif (_VERDICT_RE.match(line) or _BARE_VERDICT_RE.match(line)) and not verdict:
-            verdict, block = line.strip(), None
+            verdict, block, section = line.strip(), None, False
         elif _is_finding(line) or (section and (_TAGGED_RE.match(line) or (not tagged and _ITEM_RE.match(line)))):
             tagged = tagged or bool(_TAGGED_RE.match(line))
             block = [line.strip()]

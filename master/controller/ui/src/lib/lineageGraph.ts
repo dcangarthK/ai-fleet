@@ -252,7 +252,8 @@ export function focusSet(nodes: LNode[], edges: LEdge[], focused: string | null)
   return out;
 }
 
-export interface GraphPlace { col: number; row: number; x: number; y: number }
+/** In-block DAG position. The group origin is deliberately kept separate. */
+export interface GraphPlace { root: string; col: number; row: number; x: number; y: number }
 export interface GraphLayout { place: Record<string, GraphPlace>; groups: { root: string; x: number; y: number; w: number; h: number }[]; width: number; height: number }
 /** Deterministic left-to-right DAG layout: dependency depth is column, sibling order is row. */
 export function layoutGraph(nodes: LNode[], edges: LEdge[] = []): GraphLayout {
@@ -282,7 +283,7 @@ export function layoutGraph(nodes: LNode[], edges: LEdge[] = []): GraphLayout {
   for (const block of blocks) {
     const col = columnY.reduce((best, y, i) => y < columnY[best] ? i : best, 0);
     const x = columnX[col], y = columnY[col];
-    for (const item of block.local) place[item.n.id] = { col: item.col, row: item.row, x: x + 24 + item.col * 268, y: y + 30 + item.row * 88 };
+    for (const item of block.local) place[item.n.id] = { root: block.root, col: item.col, row: item.row, x: 24 + item.col * 268, y: 30 + item.row * 88 };
     groups.push({ root: block.root, x, y, w: block.width, h: block.height });
     columnY[col] += block.height + 20; width = Math.max(width, x + block.width + 20);
   }

@@ -8,12 +8,13 @@ const hue = (agent: string | null) => agent === "claude" ? "graph-claude" : agen
 export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[]; edges: LEdge[]; now: number; selected: string | null; onSelect: (node: LNode | null) => void }) {
   const layout = useMemo(() => layoutGraph(nodes, edges), [nodes, edges]);
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const blockByRoot = useMemo(() => new Map(layout.groups.map((g) => [g.root, g])), [layout]);
   const focused = useMemo(() => focusSet(nodes, edges, selected), [nodes, edges, selected]);
   const [view, setView] = useState({ x: 0, y: 0, z: 1 });
   const [offset, setOffset] = useState<Record<string, { x: number; y: number }>>({});
   const drag = useRef<{ x: number; y: number; view: typeof view; node?: string; base?: { x: number; y: number } } | null>(null);
   useEffect(() => { const clear = (e: KeyboardEvent) => { const t = e.target as HTMLElement; if (e.key === "Escape" && !t.closest("input,textarea,select,[role=dialog]")) onSelect(null); }; window.addEventListener("keydown", clear); return () => window.removeEventListener("keydown", clear); }, [onSelect]);
-  const at = (id: string) => { const p = layout.place[id]; const o = offset[id] ?? { x: 0, y: 0 }; return { x: p.x + o.x, y: p.y + o.y }; };
+  const at = (id: string) => { const p = layout.place[id], block = blockByRoot.get(p.root)!; const o = offset[id] ?? { x: 0, y: 0 }; return { x: block.x + p.x + o.x, y: block.y + p.y + o.y }; };
   const onWheel = (e: WheelEvent<SVGSVGElement>) => { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); const ax = (e.clientX - r.left - view.x) / view.z, ay = (e.clientY - r.top - view.y) / view.z; const z = Math.max(.45, Math.min(2.4, view.z * Math.exp(-e.deltaY * .0015))); setView({ z, x: e.clientX - r.left - ax * z, y: e.clientY - r.top - ay * z }); };
   const down = (e: PointerEvent<SVGElement>, node?: LNode) => { if (e.button !== 0) return; drag.current = { x: e.clientX, y: e.clientY, view, node: node?.id, base: node ? offset[node.id] ?? { x: 0, y: 0 } : undefined }; e.currentTarget.setPointerCapture(e.pointerId); };
   const move = (e: PointerEvent<SVGElement>) => { const d = drag.current; if (!d) return; const dx = (e.clientX - d.x) / view.z, dy = (e.clientY - d.y) / view.z; if (d.node) setOffset((old) => ({ ...old, [d.node!]: { x: d.base!.x + dx, y: d.base!.y + dy } })); else setView({ ...d.view, x: d.view.x + e.clientX - d.x, y: d.view.y + e.clientY - d.y }); };

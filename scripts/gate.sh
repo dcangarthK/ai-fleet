@@ -11,7 +11,7 @@ uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m un
   tests/test_limit_reroute.py tests/test_admission_limit.py \
   tests/test_usage_watcher.py tests/test_capacity.py tests/test_networking_n2.py tests/test_relay_routing.py tests/test_cleanup_safety.py
 uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_leader.py tests/test_orchestrator_hygiene.py
-uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_intel.py tests/test_loop_heal.py tests/test_token_budget_h3.py tests/test_visible_decisions.py
+uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_draft_routing.py tests/test_intel.py tests/test_loop_heal.py tests/test_token_budget_h3.py tests/test_visible_decisions.py
 python3 nodes/build.py --check
 bash -n nodes/onboard.sh master/setup.sh
 echo "gate passed"

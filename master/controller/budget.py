@@ -1157,6 +1157,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     resolved = model or (node_default_model(agent, node_id) if paid else None)
     key = match_key(rules, agent, resolved)
+    drafted_from = None
+    # Drafts belong on Haiku (TOKEN-DEEPDIVE 2.5): an explicit sonnet/opus draft is admitted on Haiku and the
+    # original identity recorded as routed_from. The owner's budget_override keeps the named model.
+    if kind == "draft" and agent == "claude" and model and not override and \
+            key in ("claude:claude-sonnet-*", "claude:claude-opus-*"):
+        drafted_from = identity(agent, model)
+        model = resolved = KIND_DEFAULT_MODEL["draft"]
+        key = match_key(rules, agent, resolved)
     if rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind):
         raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "
                            "guidance only)")
@@ -1170,7 +1178,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         reserved = ", ".join(entry.get("kinds") or [])
         raise Refusal(400, f"{label(key)} is reserved for [{reserved}]"
                            + (f"; use {alternative} for {kind}" if alternative else f"; no model in the rules allows {kind}"))
-    decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": None,
+    decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": drafted_from,
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
         placed, (until, why, wait_account, watched) = place(agent, key, decision["identity"], entry)

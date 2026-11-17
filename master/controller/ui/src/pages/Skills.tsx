@@ -105,7 +105,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
         </label>
         <div className="row" style={{ marginTop: 12 }}>
           {can.admin && <button className="primary" disabled={busy || !agents.length}>{isNew ? "Create skill" : "Save new version"}</button>}
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
         </div>
 
         {!isNew && (

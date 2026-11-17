@@ -694,7 +694,6 @@ a.live-row:hover { background: var(--sunken); }
   .row:has(> input[type="search"]), .row:has(> select) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .row:has(> input[type="search"]) > input { grid-column: 1 / -1; width: 100%; }
   .row:has(> select) > select { width: 100%; }
-  .tbl tr.click, .tbl td a, .pill { min-height: 24px; }
   .term-bar { gap: var(--s2); }
   .term-title { flex-basis: 0; }
 }

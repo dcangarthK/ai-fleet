@@ -973,9 +973,6 @@ async def poll_task(task_id: str) -> None:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
         task = get_task(task_id)
-        if (handoff.limit_failure(task) and _profile_is_pinned(task)
-                and await requeue_limit_wait(task_id, "explicit profile is pinned; waiting for its reset")):
-            return
         await handoff.after_settled(task_id)
         task = get_task(task_id)
         if task.get("failure_reason") == "limit" and task.get("resolution"):
@@ -983,8 +980,10 @@ async def poll_task(task_id: str) -> None:
             if isinstance(resolution, dict) and resolution.get("kind") == "handed_off":
                 emit(task_id, "task.rerouted", {"title": task["title"], "to": resolution.get("task_id"),
                                                   "reason": "usage limit; eligible account selected"})
-        elif handoff.limit_failure(task):
-            await requeue_limit_wait(task_id, "usage limit; no eligible account before the next reset")
+        elif handoff.limit_failure(task) and not handoff.pipeline_owned(task_id):  # the pipeline parks its own
+            reason = ("explicit profile is pinned; waiting for its reset" if _profile_is_pinned(task)
+                      else "usage limit; no eligible account before the next reset")
+            await requeue_limit_wait(task_id, reason)
     elif get_task(task_id)["state"] == "capped":
         await auto_continue(task_id)  # Part H 3.3: a capped build carries on in a fresh session
 
@@ -1020,14 +1019,17 @@ def _earliest_limit_reset(task: dict, now: float) -> float | None:
 async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None) -> bool:
     """Keep a provider-limited task queued rather than blocked or left failed.
 
-    A profile pin deliberately keeps the task on that account.  Otherwise this only runs after the handoff path
-    found no eligible replacement slot, so the next scheduler pass can retry when the earliest account resets.
+    Backstop: runs only after handoff.after_settled, and only when it parked nothing (no resume_schedule row,
+    no resolution).  It never deletes or replaces a scheduled resume.
     """
     now = time.time() if now is None else now
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] != "failed" or task.get("failure_reason") != "limit" or task.get("resolution"):
             return False
+        with db() as c:  # backstop only: a resume the existing machinery scheduled is never touched
+            if c.execute("SELECT 1 FROM resume_schedule WHERE task_id=?", (task_id,)).fetchone():
+                return False
         reset = _earliest_limit_reset(task, now)
         if reset is None:
             reset = task.get("resets_at")
@@ -1036,9 +1038,6 @@ async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None
         if not transition(task, {"failed"}, "queued", not_before=reset, ended_at=None, budget_wait="limit",
                           error=reason, resolution=None):
             return False
-        # The legacy scheduled-resume path is no longer applicable once this task is a normal queued item.
-        with db() as c:
-            c.execute("DELETE FROM resume_schedule WHERE task_id=?", (task_id,))
     emit(task_id, "task.rerouted", {"title": task["title"], "reason": reason, "not_before": reset})
     return True
 
@@ -1287,18 +1286,6 @@ async def auto_approve_denials(task: dict) -> None:
         update(task["id"], auto_approvals=rounds, error=str(exc.detail))
         emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
                                                     "reason": str(exc.detail)})
-        verdict = exc.verdict or {}
-        until = verdict.get("until")
-        # Only a provider usage limit ("... limited until T"); the daily hard token budget stays for the owner.
-        if (verdict.get("wait") == "limit" and "limited until" in str(verdict.get("reason"))
-                and until and until > time.time()):
-            # A usage limit never leaves the task blocked: keep it queued until the reset.
-            async with _locks[task["id"]]:
-                current = get_task(task["id"])
-                if transition(current, {"blocked"}, "queued", not_before=until, ended_at=None, budget_wait="limit",
-                              error=str(exc.detail), resolution=None):
-                    emit(task["id"], "task.rerouted", {"title": task["title"], "reason": str(exc.detail),
-                                                       "not_before": until})
         return
     emit(task["id"], "task.auto_approved", {"title": task["title"], "tools": tools, "agent": task["agent"]})
 

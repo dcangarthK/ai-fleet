@@ -1135,7 +1135,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
             # Fresh provider usage near the window limit reserves the remaining headroom before dispatch.
-            near = near_limit_until(rules, account, of_agent, now)
+            near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
             watched = near is not None
             if near and not until:
                 until, why = near, f"waiting for {label(of_key)} at {clock(near)}"
@@ -1229,7 +1229,7 @@ def start_wait(task: dict, now: float | None = None) -> tuple[str | None, str | 
     until, why = blocked_by(rules, limit_snapshot(rules, now, account), task["agent"], key, ident)
     if until:
         return "limit", why
-    near = near_limit_until(rules, account, task["agent"], now)
+    near = near_limit_until(rules, account, task["agent"], now) if usage.is_live() else None
     if near:
         return "limit", f"waiting for {label(key)} at {clock(near)}"
     maximum = entry_for(rules, key, task["agent"]).get("max_concurrent")

@@ -205,6 +205,27 @@ class LifecycleTrim(unittest.TestCase):
                 self.assertEqual(self.call(tool, err), err, tool)
                 self.assertEqual(self.call(tool, err, full=True), err, tool)
 
+    def _msg(self, ret, **kw):
+        saved = server._controller
+        server._controller = lambda *a, **k: ret
+        try:
+            return server.message_task("t-1", "go on", **kw)
+        finally:
+            server._controller = saved
+
+    def test_message_task_trimmed(self):
+        v = json.loads(self._msg(json.dumps(self.ROW)))
+        self.assertEqual(set(v), set(server.ROW_KEYS))
+
+    def test_message_task_full(self):
+        raw = json.dumps(self.ROW)
+        self.assertEqual(self._msg(raw, full=True), raw)
+
+    def test_message_task_errors_pass_through(self):
+        err = "error 409: task is running"
+        self.assertEqual(self._msg(err), err)
+        self.assertEqual(self._msg(err, full=True), err)
+
 
 class Docs(unittest.TestCase):
     def test_documented(self):

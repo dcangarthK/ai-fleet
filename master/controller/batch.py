@@ -25,9 +25,9 @@ BUILD_ROWS = {
              {"agent": "codex", "model": TERRA, "effort": "medium"}],
 }
 CODEX_BUILD = {"agent": "codex", "model": TERRA, "effort": "medium"}
-CLAUDE_REVIEW_ROWS = [{"agent": "claude", "model": FABLE, "effort": None},
-                      {"agent": "claude", "model": SONNET, "effort": None},
-                      {"agent": "claude", "model": OPUS, "effort": None}]
+CLAUDE_REVIEW_ROWS = [{"agent": "claude", "model": FABLE, "effort": "medium"},
+                      {"agent": "claude", "model": SONNET, "effort": "medium"},
+                      {"agent": "claude", "model": OPUS, "effort": "medium"}]
 SECURITY_REVIEW = {"agent": "codex", "model": TERRA, "effort": "high"}
 
 DEFAULT_POLICY = {
@@ -157,16 +157,23 @@ def check_reviewer(builder: dict, reviewer: dict) -> None:
         raise ValueError("builder cannot review itself: a reviewer must differ in agent or model")
 
 
-def pipeline_spec(item: dict, policy: dict, build: dict, review: dict) -> dict:
+def pipeline_spec(item: dict, policy: dict, build: dict, review: dict, tag: str | None = None) -> dict:
     """The body for a pipeline. `max_rounds = max_fix_rounds + 1`: round 1 is the first build (section 10 item 1)."""
     if policy.get("reviewer_must_differ", True):
         check_reviewer(build, review)
     spec = item["spec"] or f"Implement the spec at {item['spec_path']}."
     if item.get("spec_sections"):
         spec += f"\nSections: {', '.join(item['spec_sections'])}."
+    builder = {"agent": build["agent"], "model": build["model"]}
+    reviewer = {"kind": "agent", "agent": review["agent"], "model": review["model"]}
+    if build.get("effort"):
+        builder["effort"] = build["effort"]
+    if review.get("effort"):
+        reviewer["effort"] = review["effort"]
+    # `batch` tags the pipeline so a restart finds it instead of starting a second one (AC12).
     return {"title": item["title"], "spec": spec, "repo": item["repo"], "gate": item["gate"], "mode": "auto-edit",
-            "builder": {"agent": build["agent"], "model": build["model"]},
-            "reviewers": [{"kind": "agent", "agent": review["agent"], "model": review["model"]}],
+            "builder": builder, "reviewers": [reviewer],
+            "batch": {"tag": tag, "security": item["security_sensitive"]} if tag else None,
             "max_rounds": policy["max_fix_rounds"] + 1, "require_trusted": policy["require_trusted"],
             "spec_sections": item.get("spec_sections"), "spec_path": item.get("spec_path")}
 
@@ -187,7 +194,7 @@ def _pick(rows: list[dict], limits: dict, now: float) -> dict:
         if until is None:
             return dict(row)
         waits.append(until)
-    return {"wait_until": min(waits), "candidate": dict(rows[0])}
+    return {"wait_until": min(waits)}
 
 
 def route_build(item: dict, limits: dict, now: float) -> dict:
@@ -219,10 +226,21 @@ def all_settled(batch: dict) -> bool:
 
 
 def _slots(batch: dict) -> dict:
+    """Running jobs per agent: a building item holds its builder's slot, a reviewing item its reviewer's, and the
+    spawned final review its agent's. The routing rows carry no account, so the count is per agent (one account
+    each); a per-account key needs the account on the routing row."""
     used = {}
+
+    def take(agent):
+        used[agent] = used.get(agent, 0) + 1
+
     for i in batch["items"]:
-        if i["state"] in ACTIVE and i.get("build"):
-            used[i["build"]["agent"]] = used.get(i["build"]["agent"], 0) + 1
+        if i["state"] == "building" and i.get("build"):
+            take(i["build"]["agent"])
+        elif i["state"] == "reviewing" and i.get("review"):
+            take(i["review"]["agent"])
+    if (batch.get("final") or {}).get("state") == "spawned":
+        take(batch["final"]["agent"])
     return used
 
 
@@ -243,6 +261,11 @@ def step(batch: dict, event: dict) -> tuple[dict, list[dict]]:
         b["final"] = {**(b.get("final") or {}), "state": "done", "verdict": event.get("verdict"),
                       "model": event.get("model"), "findings": list(event.get("findings") or [])}
         b["state"] = "done"
+        return b, []
+    if kind == "final_limited" and (b.get("final") or {}).get("state") == "spawned":
+        # The final review stopped at a usage limit: park until its reset, then run it again (decision 3).
+        final = b["final"]
+        b["final"] = {"state": "parked", "until": event["until"], "attempt": final.get("attempt", 0) + 1}
         return b, []
     if kind == "tick" and b["state"] != "done":
         return _tick(b, float(event.get("now") or 0), event.get("limits") or {"models": {}, "accounts": {}})
@@ -271,19 +294,18 @@ def _tick(b: dict, now: float, limits: dict) -> tuple[dict, list[dict]]:
         if _overlaps(item, started):
             continue
         build = route_build(item, limits, now)
-        if "wait_until" in build:
-            waited = build["wait_until"] - now
+        review = route_review(build, item["security_sensitive"], limits, now) if "wait_until" not in build else build
+        if "wait_until" in review:  # no usable builder or reviewer: park until the earliest reset, never pick a limited one
+            waited = review["wait_until"] - now
             if policy["on_limit"] == "escalate" or waited > policy["limit_wait_max"]:
                 item["state"] = "escalated"
-                item["escalation"] = f"budget limit until {build['wait_until']:.0f}: not waiting"
+                item["escalation"] = f"budget limit until {review['wait_until']:.0f}: not waiting"
             else:
-                item["wait_until"] = build["wait_until"]
+                item["wait_until"] = review["wait_until"]
                 item["note"] = "waiting for a usage limit to reset"
             continue
         if used.get(build["agent"], 0) >= policy["concurrency"].get(build["agent"], 1):
             continue
-        review = route_review(build, item["security_sensitive"], limits, now)
-        review = review.get("candidate") if "wait_until" in review else review  # a limited reviewer waits in-pipeline
         used[build["agent"]] = used.get(build["agent"], 0) + 1
         item.update(state="building", wait_until=None, note=None, build=build, review=review)
         started.append(item)
@@ -309,11 +331,11 @@ def _final(b: dict, now: float, limits: dict) -> list[dict]:
     if until is not None:
         # Codex is limited: wait for the reset. Never route the final review to Claude (decision 3).
         b["state"] = "final_review"
-        b["final"] = {"state": "parked", "until": until}
+        b["final"] = {"state": "parked", "until": until, "attempt": parked.get("attempt", 0)}
         return [{"do": "park_final", "until": until}]
     b["state"] = "final_review"
     b["final"] = {"state": "spawned", "ids": ready, "agent": cfg["agent"], "model": cfg["model"],
-                  "effort": cfg["effort"]}
+                  "effort": cfg["effort"], "attempt": parked.get("attempt", 0)}
     return [{"do": "spawn_final_review", "ids": ready, "agent": cfg["agent"], "model": cfg["model"],
              "effort": cfg["effort"]}]
 

@@ -1,5 +1,6 @@
 {
   "enabledPlugins": {
+    "claude-mem@thedotmack": true,
     "frontend-design@claude-plugins-official": false,
     "superpowers@claude-plugins-official": false,
     "ui-ux-pro-max@ui-ux-pro-max-skill": false,

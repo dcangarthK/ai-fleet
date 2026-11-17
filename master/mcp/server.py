@@ -469,26 +469,16 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
                role: str = "", kind: str = "", effort: str = "", budget_override: str = "", link: str = "",
                profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
-    """Delegate work to an agent on the fleet and return immediately with the task.
-    agent: 'codex' or 'claude' (coding agents with tools) or 'ollama' (one-shot model answer; needs model).
-    model: optional; 'auto' lets the controller pick the best eligible model for `kind` (kind required; the choice
-          is recorded, admission still runs). Returns a trimmed view; FLEET_MCP_TRIM=0 returns the whole row.
-    repo: absolute path of a git repo on the target node; the agent works in its own worktree/branch there.
-    mode: 'read-only' | 'supervised' (user approves the start and any denied tools) | 'auto-edit' (default)
-          | 'full' (user approval required). gate: profile name defined on the node, e.g. 'pytest'.
-    node: optional; otherwise the least-busy eligible node is picked. role selects its instruction/policy layer.
-    parent_id links sub-tasks.
-    kind: always name it: build, fix, review, re_review, final_review, security_review, merge, benchmark, check,
-          draft, test, lead. The budget rules (console Budget page) refuse a kind a model is not for, with the cheaper model
-          to use; a limited model's task is queued until its reset (or rerouted, per the rules).
-    effort: low | medium | high; default from the budget rules.
-    budget_override: the owner's (admin) decision only; this bridge's calls have operate scope, so it is refused.
-    link: why it exists relative to parent_id: retry, resume, review, fix, merge, check.
-    profile: pin a runner profile (its account), e.g. 'spare'; refused when unknown or not signed in.
-    stage: display-only step name for Live, e.g. 'test-1' (lowercase letters, digits, dashes).
-    independence: 'waived' (with independence_reason) lets a review/test run on a model that built the work;
-          advisory and shown to the owner on Live. kind 'test' is a test pass.
-    Then use wait_tasks; don't poll."""
+    """Start a task for an agent on the fleet; returns at once; wait_tasks blocks until it settles.
+    agent: 'codex' or 'claude' (coding agents), or 'ollama' (one-shot answer; needs model).
+    prompt: the instructions. repo: absolute git repo path; the agent works in its own worktree/branch.
+    kind: build, fix, review, re_review, final_review, security_review, merge, benchmark, check, draft, test, lead.
+    The budget rules refuse a kind a model isn't for.
+    model: 'auto' picks the best eligible model for kind.
+    mode: read-only, supervised, auto-edit (default), full (needs user approval).
+    gate: test profile name, e.g. 'pytest'.
+    Optional: node, effort (low|medium|high), profile (e.g. 'spare'), parent_id with link, stage, independence='waived' with independence_reason.
+    budget_override is refused."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
     for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node,
                  "parent_id": parent_id, "role": role, "kind": kind, "effort": effort,

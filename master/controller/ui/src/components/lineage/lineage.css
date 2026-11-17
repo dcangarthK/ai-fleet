@@ -259,3 +259,4 @@ input.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent)
   .lin-minimap { display: none; }
   .lin-river-panel { position: fixed; inset: auto 0 0; z-index: 45; max-height: min(62vh, 520px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -12px 32px var(--scrim); padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
 }
+@media (max-width: 640px), (pointer: coarse) { .graph-actions .quiet { display: none; } }

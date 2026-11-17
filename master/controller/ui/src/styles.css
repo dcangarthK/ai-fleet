@@ -381,7 +381,8 @@ td.wrap { overflow-wrap: anywhere; word-break: break-word; }
   border-radius: 3px; background: var(--sunken); border: 1px solid var(--line); color: var(--ink-2); overflow-wrap: anywhere;
 }
 
-.tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+.tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button {
   border: 0; border-radius: 0; background: transparent; padding: 0; min-height: var(--h); color: var(--ink-3);
   border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; font-weight: 400;

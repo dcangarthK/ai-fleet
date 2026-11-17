@@ -53,5 +53,33 @@ class AdmissionLimitTests(unittest.TestCase):
             self.assertNotIn("transition", calls)
 
 
+class RequeuedResumeTests(unittest.TestCase):
+    """A task requeued from admission (runs >= 1) resumes through try_start once not_before has passed."""
+
+    def start(self, not_before):
+        import capacity
+        task = {"id": "t-x", "state": "queued", "agent": "claude", "model": "m", "mode": "auto-edit", "gate": None,
+                "policy": {}, "runs": 1, "not_before": not_before, "budget_wait": "limit", "error": "x"}
+        restart = mock.AsyncMock(return_value=True)
+        with mock.patch.object(tasks, "node_of", return_value={}), \
+             mock.patch.object(tasks, "eligible", return_value=None), \
+             mock.patch.object(tasks, "temporary_reason", return_value=None), \
+             mock.patch.object(tasks, "update"), \
+             mock.patch.object(tasks.budget, "start_wait", return_value=(None, None)), \
+             mock.patch.object(capacity, "restart_requeued", restart):
+            result = asyncio.run(tasks.try_start(task))
+        return result, restart
+
+    def test_picked_once_not_before_has_passed(self):
+        result, restart = self.start(time.time() - 1)
+        self.assertTrue(result)
+        restart.assert_awaited_once()
+
+    def test_not_picked_before_the_reset(self):
+        result, restart = self.start(time.time() + 3600)
+        self.assertFalse(result)
+        restart.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

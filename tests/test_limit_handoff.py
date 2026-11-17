@@ -623,7 +623,9 @@ class ContinuationTests(HandoffBase):
         self.c.portal.call(tasks.auto_approve_denials, task)
         self.assertFalse(self.posts(t["id"], "message"))
         got = self.get(t["id"])
-        self.assertEqual(got["state"], "blocked")  # left for the owner
+        self.assertEqual(got["state"], "queued")  # a usage limit holds it until the reset, not for the owner
+        self.assertEqual(got["budget_wait"], "limit")
+        self.assertGreater(got["not_before"], time.time())
         self.assertIn("limited until", got["error"])
         self.assertEqual(got["auto_approvals"] or 0, 0)  # a refused round isn't spent
         self.settle_all()
@@ -636,7 +638,8 @@ class ContinuationTests(HandoffBase):
         task["policy"] = dict(task["policy"] or {}, auto_approve={"denied_tools": True, "agents": ["claude"]})
         self.c.portal.call(tasks.auto_approve_denials, task)
         self.assertFalse(self.posts(t["id"], "message"))
-        self.assertEqual(self.get(t["id"])["state"], "blocked")
+        # A hard daily token budget acts as a limit until local midnight: held queued, not blocked.
+        self.assertEqual(self.get(t["id"])["state"], "queued")
 
     def test_resolve_cannot_overwrite_a_claim_written_after_its_read(self):
         src = self.build()

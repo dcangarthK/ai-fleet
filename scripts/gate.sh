@@ -2,7 +2,7 @@
 # The repo's full gate: what every pipeline build must pass. Used by the "fleet-gate" runner profile.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python3 -m unittest tests/test_orchestrator_profile.py tests/test_grounding.pytests/test_ask_grounded.py tests/test_pipeline.py tests/test_policy.py tests/test_runner.py tests/test_runner_security.py \
+python3 -m unittest tests/test_orchestrator_profile.py tests/test_grounding.py tests/test_ask_grounded.py tests/test_pipeline.py tests/test_policy.py tests/test_runner.py tests/test_runner_security.py \
   tests/test_runner_models.py tests/test_runner_policy.py tests/test_runner_power.py tests/test_evals.py \
   tests/test_runner_budget.py tests/test_runner_handoff.py tests/test_runner_live.py tests/test_runner_engines.py \
   tests/test_runner_stall.py tests/test_real_engine.py tests/test_onboard.py tests/test_runner_caps.py tests/test_runner_no_push.py tests/test_gateway.py tests/test_net_policy.py tests/test_runner_posture.py tests/test_windows_networking.py tests/test_runner_relay.py

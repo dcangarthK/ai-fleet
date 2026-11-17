@@ -1179,6 +1179,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, f"{label(key)} is reserved for [{reserved}]"
                            + (f"; use {alternative} for {kind}" if alternative else f"; no model in the rules allows {kind}"))
     decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": drafted_from,
+                "routed_why": "draft kind -> haiku" if drafted_from else None,
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
         placed, (until, why, wait_account, watched) = place(agent, key, decision["identity"], entry)

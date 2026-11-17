@@ -1933,7 +1933,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                                                  "kind": kind,
                                                  "reason": decision.get("reason") or "placed by rank_slots"})
             if decision["routed_from"]:
-                budget.log_decision("rerouted", f"{decision['routed_from']} is limited; sent to {decision['identity']}",
+                budget.log_decision("rerouted", decision.get("routed_why")
+                                    or f"{decision['routed_from']} is limited; sent to {decision['identity']}",
                                     task_id=task_id, title=part_title, routed_from=decision["routed_from"],
                                     to=decision["identity"], kind=kind)
             if decision["wait"]:

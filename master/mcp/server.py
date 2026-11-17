@@ -447,7 +447,7 @@ def drain_node(node: str) -> str:
 ROW_KEYS = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
 
 
-def _trim_row(out: str, trim: bool) -> str:
+def _trim_row(out: str, trim: bool, keys: tuple = ROW_KEYS) -> str:
     """Trim a controller task row to ROW_KEYS when trim is true; error strings pass through unchanged."""
     if not trim or not _trim_on(False):
         return out
@@ -457,7 +457,7 @@ def _trim_row(out: str, trim: bool) -> str:
         return out  # an error string
     if not isinstance(row, dict):
         return out
-    return json.dumps({k: row[k] for k in ROW_KEYS if k in row}, indent=2)
+    return json.dumps({k: row[k] for k in keys if k in row}, indent=2)
 
 
 def _q(value: str) -> str:
@@ -629,7 +629,8 @@ def complete_task(task_id: str, full: bool = False) -> str:
 @mcp.tool()
 def cleanup_task(task_id: str, full: bool = False) -> str:
     """Remove a settled task's worktree (its branch is kept for merging). Returns a trimmed row; full=True for the raw row."""
-    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cleanup"), not full)
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cleanup"), not full,
+                     keys=ROW_KEYS + ("branch_kept", "reason"))
 
 
 @mcp.tool()

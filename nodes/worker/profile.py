@@ -27,9 +27,9 @@ TOOLS = {
 BASH_RULES = [
     "Bash(python3:*)", "Bash(git:*)", "Bash(uv run:*)", "Bash(scripts/gate.sh:*)", "Bash(./scripts/gate.sh:*)",
     "Bash(npx vitest:*)",
-    # Read-only inspection and the two fixed npm commands (not sed:*, npm run:*, echo, test or find).
-    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(rg:*)",
-    "Bash(sed -n:*)", "Bash(diff:*)", "Bash(pwd)", "Bash(npm ci --ignore-scripts)", "Bash(npm run build)",
+    # Read-only inspection and the two fixed npm commands (not sed, rg, npm run:*, echo, test or find).
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)",
+    "Bash(diff:*)", "Bash(pwd)", "Bash(npm ci --ignore-scripts)", "Bash(npm run build)",
 ]
 
 # Placeholder in settings-*.json hook commands; the runner substitutes the absolute path of quiet_bash.py.

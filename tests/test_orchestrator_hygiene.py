@@ -187,6 +187,13 @@ class LifecycleTrim(unittest.TestCase):
             v = json.loads(self.call(tool, raw))
             self.assertEqual(set(v), set(server.ROW_KEYS), tool)
 
+    def test_cleanup_keeps_branch_fields(self):
+        raw = json.dumps({**self.ROW, "branch_kept": True, "reason": "branch is not merged into main"})
+        v = json.loads(self.call("cleanup_task", raw))
+        self.assertEqual(set(v), set(server.ROW_KEYS) | {"branch_kept", "reason"})
+        self.assertIs(v["branch_kept"], True)
+        self.assertEqual(v["reason"], "branch is not merged into main")
+
     def test_full(self):
         raw = json.dumps(self.ROW)
         for tool in self.TOOLS:

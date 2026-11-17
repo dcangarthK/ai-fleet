@@ -25,6 +25,10 @@ class DraftRoutingTests(unittest.TestCase):
             d = admit("draft", model)
             self.assertEqual(d["model"], HAIKU)
             self.assertEqual(d["routed_from"], budget.identity("claude", model))
+            self.assertEqual(d["routed_why"], "draft kind -> haiku")
+
+    def test_other_routes_have_no_draft_reason(self):
+        self.assertIsNone(admit("build", "claude-sonnet-5-5")["routed_why"])
 
     def test_budget_override_keeps_explicit_model(self):
         d = admit("draft", "claude-sonnet-5-5", override=True)

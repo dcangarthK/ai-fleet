@@ -68,10 +68,10 @@ def run_cmd(cmd, job):
 class BashRules(unittest.TestCase):
     def test_allowed_and_denied(self):
         rules = set(wprofile.BASH_RULES)
-        for r in ("ls:*", "cat:*", "head:*", "tail:*", "wc:*", "grep:*", "rg:*", "sed -n:*", "diff:*", "pwd",
+        for r in ("ls:*", "cat:*", "head:*", "tail:*", "wc:*", "grep:*", "diff:*", "pwd",
                   "npm ci --ignore-scripts", "npm run build"):
             self.assertIn("Bash(" + r + ")", rules)
-        for r in ("sed:*", "npm run:*", "echo", "echo:*", "test", "test:*", "find", "find:*"):
+        for r in ("sed:*", "sed -n:*", "rg:*", "npm run:*", "echo", "echo:*", "test", "test:*", "find", "find:*"):
             self.assertNotIn("Bash(" + r + ")", rules)
         self.assertNotIn("Bash", rules)
 

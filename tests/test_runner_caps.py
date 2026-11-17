@@ -252,7 +252,7 @@ class Launch(Base):
                                 "p", [], False)  # no kind: the old launch, policy list only
         self.assertEqual(flag(allow, "--allowedTools"), "Bash(python3:*),Bash(git:*),Bash(uv run:*),"
                          "Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*)"
-                         ",Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(rg:*),Bash(sed -n:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)")
+                         ",Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)")
 
     def test_mode_filter_applies_to_explicit_tool_lists(self):
         self.assertEqual(self.settings_allow(kind="re_review", mode="read-only", tools=["Read", "Bash", "Edit"]),
@@ -322,7 +322,7 @@ class Launch(Base):
 
 SCOPED_BASH = "Bash(python3:*),Bash(git:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*)," \
               "Bash(npx vitest:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*)," \
-              "Bash(rg:*),Bash(sed -n:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)"
+              "Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)"
 SCOPED_BUILD = "Read,Edit,Write," + SCOPED_BASH + ",Grep,Glob"
 
 

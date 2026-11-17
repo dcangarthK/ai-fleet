@@ -238,3 +238,17 @@ This also follows from the deep dive's reroute costs.
    4.4). Also add the **plan in 5 lines, then Works/Failed/Next** close to the Build or fix brief (5).
 5. Build a **harness-eval set** (5 to 10 past tasks) that runs after any change to `CLAUDE.md`, the skill or a
    template, and use it before changing any kind's effort (1.2, 3.6). Then clean up the contradictory Fable notes (3.3).
+
+## Result of the 3.1 tool-description audit (2026-11-17)
+
+The audit scanned the docstrings of the `local-llm` tools in `master/mcp/server.py` for the words always, must,
+never and don't, and for descriptions over 120 words.
+
+- **`spawn_task`** (277 words) is the only real finding. It contains "kind: always name it" and "Then use
+  wait_tasks; don't poll". Proposed wording: "kind: the work type (build, fix, …); the budget rules use it to pick
+  caps, effort and allowed models." and "wait_tasks blocks until the task settles." The parameter detail could
+  move into the parameter descriptions, which would bring the docstring under 120 words.
+- **No change needed:** `ask_model`, `report_activity` and `set_chain` use "never" to describe what the tool does,
+  not to instruct the caller. `install_model` uses "must" for a user-consent guard and should keep it.
+
+No edits were made. Changing `server.py` is a separate build, and the MCP server must be restarted afterwards.

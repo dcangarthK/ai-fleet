@@ -252,6 +252,33 @@ export function focusSet(nodes: LNode[], edges: LEdge[], focused: string | null)
   return out;
 }
 
+export interface GraphPlace { col: number; row: number; x: number; y: number }
+export interface GraphLayout { place: Record<string, GraphPlace>; groups: { root: string; y: number; h: number }[]; width: number; height: number }
+/** Deterministic left-to-right DAG layout: dependency depth is column, sibling order is row. */
+export function layoutGraph(nodes: LNode[], edges: LEdge[] = []): GraphLayout {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const parents = new Map<string, string[]>();
+  for (const n of nodes) if (n.parent_id) parents.set(n.id, [...(parents.get(n.id) ?? []), n.parent_id]);
+  for (const e of edges) parents.set(e.to, [...(parents.get(e.to) ?? []), e.from]);
+  const depth = new Map<string, number>();
+  const getDepth = (id: string, seen = new Set<string>()): number => {
+    if (depth.has(id)) return depth.get(id)!;
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    const d = Math.max(0, ...(parents.get(id) ?? []).filter((p) => byId.has(p)).map((p) => getDepth(p, new Set(seen)) + 1));
+    depth.set(id, d); return d;
+  };
+  const place: Record<string, GraphPlace> = {}, groups: GraphLayout["groups"] = [];
+  let y = 20, maxCol = 0;
+  for (const root of [...new Set(nodes.map((n) => n.root_id))].sort()) {
+    const members = nodes.filter((n) => n.root_id === root).sort((a, b) => getDepth(a.id) - getDepth(b.id) || a.created_at - b.created_at || a.id.localeCompare(b.id));
+    const rows = new Map<number, number>(); const top = y;
+    for (const n of members) { const col = getDepth(n.id); const row = rows.get(col) ?? 0; rows.set(col, row + 1); place[n.id] = { col, row, x: 48 + col * 248, y: y + row * 88 }; maxCol = Math.max(maxCol, col); }
+    const count = Math.max(1, ...rows.values()); const h = Math.max(112, count * 88 + 44); groups.push({ root, y: top - 28, h }); y += h + 24;
+  }
+  return { place, groups, width: Math.max(560, (maxCol + 1) * 248 + 96), height: Math.max(160, y) };
+}
+
 // ---------------------------------------------------------------------------------------------------- trace layout
 
 export interface TraceItem { id: string; col: number; row: number }

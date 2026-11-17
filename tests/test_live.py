@@ -750,6 +750,19 @@ class HeartbeatTests(LiveBase):
         self.assertEqual(self.beat(sig="0" * 64).status_code, 429)
         self.assertEqual(self.beat().status_code, 200)
 
+    def test_live_workers_pass_through_the_stored_tool_heartbeat(self):
+        a = self.ok(agent="claude", model=SONNET, kind="draft")
+        b = self.ok(agent="claude", model=SONNET, kind="draft")
+        jobs = [{"id": a["id"], "state": "running", "alive": True,
+                 "tool_heartbeat": {"last_tool": "Edit", "files_touched": ["x.py", "y.py"], "count": 8}},
+                {"id": b["id"], "state": "running", "alive": True}]
+        r = self.beat(body={"ok": True, "version": "2", "agents": {"claude": "/x/claude"}, "jobs": jobs})
+        self.assertEqual(r.status_code, 200, r.text)
+        rows = {w["task_id"]: w for w in self.live()["workers"] if w.get("task_id") in (a["id"], b["id"])}
+        self.assertEqual(rows[a["id"]]["tool_heartbeat"],
+                         {"last_tool": "Edit", "files_touched": ["x.py", "y.py"], "count": 8})
+        self.assertNotIn("tool_heartbeat", rows[b["id"]])
+
     def test_heartbeat_never_resets_runner_fails(self):
         with db() as c:
             c.execute("UPDATE nodes SET runner_fails=3 WHERE id='master'")

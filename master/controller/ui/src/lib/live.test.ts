@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  LIVE_POLL_MS, accountTone, alertText, fill, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass,
+  LIVE_POLL_MS, accountTone, alertText, fill, heartbeatText, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass,
   stageChip, stageTitle, workerText, type Account, type Machine, type QueueRow, type Session, type Worker,
 } from "./live";
 
@@ -126,5 +126,18 @@ describe("refresh and layout", () => {
   it("collapses rows to cards at phone width", () => {
     expect(rowsClass(true)).toBe("live-rows live-cards");
     expect(rowsClass(false)).toBe("live-rows");
+  });
+});
+
+describe("heartbeatText", () => {
+  it("compact line with files for hover", () => {
+    expect(heartbeatText({ last_tool: "Edit", files_touched: ["a.py", "b.py", "c.py"], count: 8 }))
+      .toEqual({ line: "8 silent tool calls · last: Edit · 3 files", files: "a.py\nb.py\nc.py" });
+    expect(heartbeatText({ last_tool: "Bash", files_touched: [], count: 1 })?.line).toBe("1 silent tool call · last: Bash");
+  });
+  it("nothing when absent or unusable", () => {
+    expect(heartbeatText(undefined)).toBeNull();
+    expect(heartbeatText(null)).toBeNull();
+    expect(heartbeatText({ last_tool: "Edit", files_touched: [], count: 0 })).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import { LoadError, PageHead, Section } from "../components/bits";
 import { ago, duration } from "../lib/format";
 import { clockTime } from "../lib/budget";
 import {
-  accountTone, alertText, barPercent, failureLabels, fill, firewallBadge, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
+  accountTone, alertText, barPercent, failureLabels, fill, firewallBadge, heartbeatText, liveQueryOptions, machineWarnings, presenceText, queueText, rowsClass, stageChip,
   stageTitle, tokenAlertText, workerText, type Live, type Machine, type TokenRow, type TokenSpend,
 } from "../lib/live";
 
@@ -182,6 +182,7 @@ function WorkersSection({ data, now, phone }: { data: Live; now: number; phone: 
       <div className={rowsClass(phone)}>
         {running.map((w) => {
           const text = workerText(w, now);
+          const beat = heartbeatText(w.tool_heartbeat);
           const elapsed = w.started_at ? duration(now - w.started_at) : "—";
           return (
             <Link key={w.task_id} to={`/tasks?task=${w.task_id}`} className="live-row live-running"
@@ -192,6 +193,7 @@ function WorkersSection({ data, now, phone }: { data: Live; now: number; phone: 
               <span className="small mono quiet live-branch">{w.branch ?? ""}</span>
               <span className="small">{elapsed}</span>
               {text.flag && <span className="state tone-warn small">{text.flag}</span>}
+              {beat && <span className="small quiet live-beat" title={beat.files || undefined}>{beat.line}</span>}
             </Link>
           );
         })}

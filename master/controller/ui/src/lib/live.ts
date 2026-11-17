@@ -16,6 +16,9 @@ export interface Session {
   last_wait: { ids: string[]; ago_s: number } | null;
 }
 
+/** Runner heartbeat summary of tool calls that printed nothing (files_touched is capped by the runner). */
+export interface ToolHeartbeat { last_tool: string; files_touched: string[]; count: number }
+
 export interface Worker {
   task_id: string | null;
   agent: string;
@@ -35,6 +38,7 @@ export interface Worker {
   elapsed_s?: number | null;
   independence?: "waived" | null;
   waiver_reason?: string | null;
+  tool_heartbeat?: ToolHeartbeat | null;
   // idle rows
   idle_since?: number | null;
   limited_until?: number | null;
@@ -259,6 +263,16 @@ export interface RowText {
 }
 
 /** The short text of one worker row; the detail goes in its title (hover/tap). */
+/** "8 silent tool calls · last: Edit · 3 files"; null when the runner sent nothing usable. */
+export function heartbeatText(hb: ToolHeartbeat | null | undefined): { line: string; files: string } | null {
+  if (!hb || !Number.isInteger(hb.count) || hb.count < 1) return null;
+  const files = Array.isArray(hb.files_touched) ? hb.files_touched : [];
+  const parts = [`${hb.count} silent tool call${hb.count === 1 ? "" : "s"}`];
+  if (hb.last_tool) parts.push(`last: ${hb.last_tool}`);
+  if (files.length) parts.push(`${files.length} file${files.length === 1 ? "" : "s"}`);
+  return { line: parts.join(" · "), files: files.join("\n") };
+}
+
 export function workerText(w: Worker, now = Date.now() / 1000): RowText {
   if (w.task_id) {
     const account = w.account_label ?? w.profile ?? (w.agent === "ollama" ? "local" : "fleet");

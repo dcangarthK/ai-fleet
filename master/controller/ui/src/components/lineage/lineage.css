@@ -268,3 +268,12 @@ input.lin-range:focus:not(:focus-visible) { outline: none; }
 @media (max-width: 640px), (pointer: coarse) { .graph-actions .quiet { display: none; } }
 @media (max-width: 640px) { .graph-wrap { height: 60vh; min-height: 420px; } }
 @media (max-width: 900px) { .lin-scrub-note { min-height: 3em; } }
+/* Narrow: buttons + status share the top row (status right-aligned); the track takes its own full row below. */
+@media (max-width: 640px) {
+  .lin-scrub-row > input.lin-range { order: 9; flex-basis: 100%; }
+  .lin-scrub-end { margin-left: auto; }
+}
+@media (max-width: 640px) {
+  /* Track sits on its own row here, so the hidden slot can leave layout without resizing it. */
+  .lin-scrub-end > [data-on="false"] { display: none; }
+}

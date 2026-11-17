@@ -4,6 +4,8 @@ Run: python3 -m unittest -v tests/test_orchestrator_profile.py
 import json
 import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,6 +55,23 @@ class OrchestratorProfileTests(unittest.TestCase):
         for s in ("--strict-mcp-config", "orchestrator/mcp.json", "orchestrator/settings.json", "exec claude"):
             self.assertIn(s, text)
         self.assertTrue(os.access(os.path.join(ROOT, "scripts/orchestrator.sh"), os.X_OK))
+
+    @unittest.skipIf(os.name == "nt", "sh launcher")
+    def test_launcher_behaviour(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "rec.txt")
+            fake = os.path.join(d, "claude")
+            with open(fake, "w") as f:
+                f.write('#!/bin/sh\npwd > "$REC"\nfor a in "$@"; do printf \'%s\\n\' "$a" >> "$REC"; done\n')
+            os.chmod(fake, 0o755)
+            env = dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"], REC=out)
+            subprocess.run(["sh", os.path.join(ROOT, "scripts/orchestrator.sh"), "-p", "a b", "x"],
+                           cwd=d, env=env, check=True)
+            with open(out) as f:
+                lines = f.read().split("\n")[:-1]
+            self.assertEqual(os.path.realpath(lines[0]), os.path.realpath(ROOT))
+            self.assertEqual(lines[1:], ["--strict-mcp-config", "--mcp-config", "orchestrator/mcp.json",
+                                         "--settings", "orchestrator/settings.json", "-p", "a b", "x"])
 
 
 if __name__ == "__main__":

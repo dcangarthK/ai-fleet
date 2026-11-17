@@ -2609,7 +2609,89 @@ class JobManager:
                 usage["cached"] = self._add(usage["cached"], cached)
                 usage["output"] = self._add(usage["output"], found.get("output_tokens"))
                 usage["model"] = job.get("model")
+        if job.get("agent") == "claude":
+            transcript = self._claude_transcript_usage(job)
+            if transcript is not None:
+                for field in ("input", "output", "cached"):
+                    if transcript[field] is not None:
+                        usage[field] = max(usage[field], transcript[field]) if usage[field] is not None else transcript[field]
+                if usage["cost_usd"] is not None:
+                    usage["cost_source"] = "result"
+                elif transcript["cost_usd"] is not None:
+                    usage["cost_usd"] = transcript["cost_usd"]
+                    usage["cost_source"] = "transcript"
+                if usage["model"] is None:
+                    usage["model"] = transcript["model"]
+            elif usage["cost_usd"] is not None:
+                usage["cost_source"] = "result"
         return usage, turns
+
+    @staticmethod
+    def _claude_price(model):
+        """List prices per million tokens: input, output, cache read, cache write."""
+        prices = {
+            "opus": (5, 25, 0.5, 6.25),
+            "sonnet": (3, 15, 0.3, 3.75),
+            "haiku": (1, 5, 0.1, 1.25),
+            "fable": (15, 75, 1.5, 18.75),
+        }
+        model = model.lower() if isinstance(model, str) else ""
+        for name, price in prices.items():
+            if name in model:
+                return price
+        return None
+
+    def _claude_transcript_usage(self, job):
+        """Return this Claude run's de-duplicated assistant usage from its session transcript."""
+        session_id = job.get("session_id")
+        started = started_epoch(job)
+        cwd = job.get("cwd")
+        if not isinstance(session_id, str) or not session_id or started is None or not isinstance(cwd, str):
+            return None
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+        slug = cwd.replace("/", "-").replace(".", "-")
+        path = Path(os.path.expanduser(config)) / "projects" / slug / (session_id + ".jsonl")
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return None
+        totals = {"input": 0, "output": 0, "cached": 0, "cache_creation": 0}
+        models, seen, found = {}, set(), False
+        for line in lines:
+            try:
+                event = json.loads(line)
+                stamp = event.get("timestamp") if isinstance(event, dict) else None
+                when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if isinstance(stamp, str) else None
+            except (ValueError, TypeError):
+                continue
+            if when is None or when < started or event.get("type") != "assistant":
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("id"), str) or message["id"] in seen:
+                continue
+            seen.add(message["id"])
+            values = message.get("usage")
+            if not isinstance(values, dict):
+                continue
+            numbers = [values.get(name) for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+            if not all(isinstance(value, int) and not isinstance(value, bool) for value in numbers):
+                continue
+            found = True
+            totals["input"] += numbers[0] + numbers[3]
+            totals["output"] += numbers[1]
+            totals["cached"] += numbers[2]
+            totals["cache_creation"] += numbers[3]
+            model = message.get("model")
+            if isinstance(model, str):
+                models[model] = models.get(model, 0) + numbers[1]
+        if not found:
+            return None
+        model = max(models, key=models.get) if models else None
+        price = self._claude_price(model)
+        cost = None if price is None else ((totals["input"] - totals["cache_creation"]) * price[0] +
+                                           totals["output"] * price[1] + totals["cached"] * price[2] +
+                                           totals["cache_creation"] * price[3]) / 1_000_000
+        return {key: totals[key] for key in ("input", "output", "cached")} | {"cost_usd": cost, "model": model}
 
     @staticmethod
     def _codex_error(job, lines):
@@ -2653,6 +2735,18 @@ class JobManager:
             offset = 0
         lines = data.decode("utf-8", errors="replace").split("\n")
         current = data[offset:].decode("utf-8", errors="replace").split("\n")
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") in ("system", "result") and event.get("session_id"):
+                session_id = event["session_id"]
+            if event.get("type") == "thread.started" and event.get("thread_id"):
+                session_id = event["thread_id"]
+        job["session_id"] = session_id or job.get("session_id")
         job["usage"], job["num_turns"] = self._usage(job, current)
         job["error"] = self._codex_error(job, current)
         job["max_turns_hit"] = self._hit_max_turns(current)

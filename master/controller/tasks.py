@@ -1211,6 +1211,7 @@ def record_usage(task_id: str, outcome_name: str | None = None) -> None:
     row = {"ts": time.time(), "task_id": task_id, "run": run, "agent": t["agent"],
            "model": usage.get("model") or t.get("model"), "kind": t.get("kind"), "input": usage.get("input"),
            "output": usage.get("output"), "cached": usage.get("cached"), "cost_usd": usage.get("cost_usd"),
+           "cost_source": usage.get("cost_source"),
            "prompt_bytes": prompt_bytes, "effort": t.get("effort"), "outcome": outcome_name,
            "num_turns": t.get("num_turns"), "identity": t.get("budget_identity") or budget.identity(t["agent"], t.get("model")),
            "resets_at": t.get("resets_at") if outcome_name == "limit" else None,

@@ -112,7 +112,7 @@ class UsageParsing(Base):
         self.write_events(job, CLAUDE_MULTI_TURN)
         self.m._parse_events(job)
         self.assertEqual(job["usage"], {"input": 3120, "output": 900, "cached": 40000, "cost_usd": 0.0731,
-                                        "model": "claude-sonnet-5-5"})
+                                        "model": "claude-sonnet-5-5", "cost_source": "result"})
         self.assertEqual(job["num_turns"], 4)
 
     def test_codex_turns_are_summed(self):
@@ -142,6 +142,95 @@ class UsageParsing(Base):
         self.assertIsNone(job["num_turns"])
         self.assertIn("usage", runner.PUBLIC_JOB_KEYS)
         self.assertIn("num_turns", runner.PUBLIC_JOB_KEYS)
+
+    def transcript(self, job, messages):
+        config = self.base / "claude"
+        slug = job["cwd"].replace("/", "-").replace(".", "-")
+        path = config / "projects" / slug / (job["session_id"] + ".jsonl")
+        path.parent.mkdir(parents=True)
+        path.write_text("\n".join(json.dumps(message) for message in messages) + "\n", encoding="utf-8")
+        return config
+
+    @staticmethod
+    def transcript_message(ident, timestamp, input_tokens, output_tokens, cached, created, model="claude-sonnet-5-5"):
+        return {"type": "assistant", "timestamp": timestamp,
+                "message": {"id": ident, "model": model,
+                            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                                      "cache_read_input_tokens": cached, "cache_creation_input_tokens": created}}}
+
+    def test_claude_transcript_usage_deduplicates_and_estimates_cost(self):
+        job = self.job(cwd=str(self.code), session_id="transcript", run_started_at="2026-11-17T10:00:00+00:00")
+        config = self.transcript(job, [
+            self.transcript_message("one", "2026-11-17T10:00:01Z", 100, 10, 20, 30),
+            self.transcript_message("two", "2026-11-17T10:00:02Z", 200, 20, 40, 60),
+            self.transcript_message("one", "2026-11-17T10:00:03Z", 1000, 100, 200, 300),
+        ])
+        prior = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+        try:
+            self.write_events(job, [{"type": "system", "session_id": "transcript"}])
+            self.m._parse_events(job)
+        finally:
+            if prior is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = prior
+        self.assertEqual(job["usage"], {"input": 390, "output": 30, "cached": 60, "cost_usd": 0.0017055,
+                                        "model": "claude-sonnet-5-5", "cost_source": "transcript"})
+
+    def test_claude_transcript_takes_larger_usage_field_by_field(self):
+        job = self.job(cwd=str(self.code), session_id="larger", run_started_at="2026-11-17T10:00:00+00:00")
+        config = self.transcript(job, [self.transcript_message("one", "2026-11-17T10:00:01Z", 100, 100, 100, 100)])
+        prior = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+        try:
+            less = {"type": "result", "session_id": "larger", "total_cost_usd": 9,
+                    "usage": {"input_tokens": 10, "output_tokens": 200, "cache_read_input_tokens": 10,
+                              "cache_creation_input_tokens": 10}}
+            self.write_events(job, [less])
+            self.m._parse_events(job)
+            self.assertEqual((job["usage"]["input"], job["usage"]["output"], job["usage"]["cached"]), (200, 200, 100))
+            more = {"type": "result", "session_id": "larger", "total_cost_usd": 9,
+                    "usage": {"input_tokens": 300, "output_tokens": 50, "cache_read_input_tokens": 300,
+                              "cache_creation_input_tokens": 100}}
+            self.write_events(job, [more])
+            self.m._parse_events(job)
+        finally:
+            if prior is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = prior
+        self.assertEqual((job["usage"]["input"], job["usage"]["output"], job["usage"]["cached"]), (400, 100, 300))
+
+    def test_claude_transcript_excludes_messages_before_run_start(self):
+        job = self.job(cwd=str(self.code), session_id="resumed", run_started_at="2026-11-17T10:00:00+00:00")
+        config = self.transcript(job, [
+            self.transcript_message("old", "2026-11-17T09:59:59Z", 1000, 1000, 1000, 1000),
+            self.transcript_message("new", "2026-11-17T10:00:01Z", 1, 2, 3, 4),
+        ])
+        prior = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(config)
+        try:
+            self.write_events(job, [{"type": "system", "session_id": "resumed"}])
+            self.m._parse_events(job)
+        finally:
+            if prior is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = prior
+        self.assertEqual((job["usage"]["input"], job["usage"]["output"], job["usage"]["cached"]), (5, 2, 3))
+
+    def test_missing_claude_transcript_uses_result_and_neither_records_usage(self):
+        job = self.job(cwd=str(self.code), session_id="missing", run_started_at="2026-11-17T10:00:00+00:00")
+        self.write_events(job, [{"type": "result", "session_id": "missing", "total_cost_usd": 1,
+                                 "usage": {"input_tokens": 1, "output_tokens": 2,
+                                           "cache_read_input_tokens": 3, "cache_creation_input_tokens": 4}}])
+        self.m._parse_events(job)
+        self.assertEqual(job["usage"]["cost_source"], "result")
+        empty = self.job(cwd=str(self.code), session_id="none", run_started_at="2026-11-17T10:00:00+00:00")
+        self.write_events(empty, [{"type": "system", "session_id": "none"}])
+        self.m._parse_events(empty)
+        self.assertEqual(empty["usage"], {"input": None, "output": None, "cached": None, "cost_usd": None, "model": None})
 
 
 CODEX_LIMIT_LINE = "error: You've hit your usage limit. Upgrade to Pro, or try again at 1:00 PM."

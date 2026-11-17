@@ -608,10 +608,11 @@ def task_diff(task_id: str) -> str:
 
 
 @mcp.tool()
-def message_task(task_id: str, text: str) -> str:
+def message_task(task_id: str, text: str, full: bool = False) -> str:
     """Send follow-up instructions to a finished, failed, blocked or interrupted task; the agent resumes
-    its same session (keeps context)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/message", {"text": text})
+    its same session (keeps context). Returns a trimmed row; full=True for the raw record.
+    The row is the state right after the message is queued; call wait_tasks (or task_status) for the agent's reply."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/message", {"text": text}), not full)
 
 
 @mcp.tool()

@@ -245,16 +245,20 @@ class Launch(Base):
         return cmd, flagged, repo, wt
 
     def test_codex_workspace_write_gets_worktree_git_dir_writable(self):
-        for resume in (False, True):
-            cmd, flagged, repo, wt = self.codex_git_roots("auto-edit", resume)
-            self.assertEqual(len(flagged), 1)
-            self.assertIn(json.dumps(str(repo / ".git" / "worktrees" / "wt")), flagged[0])
-            self.assertIn(json.dumps(str(repo / ".git")), flagged[0])
+        cmd, flagged, repo, wt = self.codex_git_roots("auto-edit")  # fresh run: --add-dir per git root
+        dirs = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--add-dir"]
+        self.assertEqual(dirs, [str(repo / ".git" / "worktrees" / "wt"), str(repo / ".git")])
+        self.assertEqual(flagged, [])
+        cmd, flagged, repo, wt = self.codex_git_roots("auto-edit", resume=True)  # resume has no --add-dir
+        self.assertNotIn("--add-dir", cmd)
+        self.assertEqual(len(flagged), 1)
+        self.assertIn(json.dumps(str(repo / ".git" / "worktrees" / "wt")), flagged[0])
 
     def test_codex_read_only_and_supervised_get_no_writable_roots(self):
         for mode in ("read-only", "supervised"):
             cmd, flagged, _, _ = self.codex_git_roots(mode)
             self.assertEqual(flagged, [])
+            self.assertNotIn("--add-dir", cmd)
 
     def test_bash_rules_have_local_git_and_runners_but_no_push_or_rm(self):
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nodes"))

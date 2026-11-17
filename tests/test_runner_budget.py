@@ -145,7 +145,7 @@ class UsageParsing(Base):
 
     def transcript(self, job, messages):
         config = self.base / "claude"
-        slug = job["cwd"].replace("/", "-").replace(".", "-")
+        slug = runner.re.sub(r"[^A-Za-z0-9]", "-", job["cwd"])
         path = config / "projects" / slug / (job["session_id"] + ".jsonl")
         path.parent.mkdir(parents=True)
         path.write_text("\n".join(json.dumps(message) for message in messages) + "\n", encoding="utf-8")
@@ -175,8 +175,24 @@ class UsageParsing(Base):
                 os.environ.pop("CLAUDE_CONFIG_DIR", None)
             else:
                 os.environ["CLAUDE_CONFIG_DIR"] = prior
-        self.assertEqual(job["usage"], {"input": 390, "output": 30, "cached": 60, "cost_usd": 0.0017055,
+        self.assertEqual(job["usage"], {"input": 1560, "output": 120, "cached": 240, "cost_usd": 0.006822,
                                         "model": "claude-sonnet-5-5", "cost_source": "transcript"})
+
+    def test_claude_transcript_uses_named_profile_and_safe_slug(self):
+        job = self.job(cwd=str(self.base / "code_with_underscore"), session_id="named",
+                       profile="named", run_started_at="2026-11-17T10:00:00+00:00")
+        config = self.transcript(job, [
+            self.transcript_message("one", "2026-11-17T10:00:01", 1, 2, 3, 4),
+            {"type": "assistant", "timestamp": "999999-01-01T00:00:00Z",
+             "message": {"id": "bad-time", "model": "claude-sonnet-5-5", "usage": {}}},
+            {"type": "assistant", "timestamp": "2026-11-17T10:00:02Z",
+             "message": {"id": "missing-usage", "model": "claude-sonnet-5-5", "usage": {"output_tokens": 3}}},
+        ])
+        self.m.profile_config = {"claude": [{"id": "fleet", "dir": None, "label": None},
+                                             {"id": "named", "dir": str(config), "label": "named"}]}
+        self.write_events(job, [{"type": "system", "session_id": "named"}])
+        self.m._parse_events(job)
+        self.assertEqual((job["usage"]["input"], job["usage"]["output"], job["usage"]["cached"]), (5, 5, 3))
 
     def test_claude_transcript_takes_larger_usage_field_by_field(self):
         job = self.job(cwd=str(self.code), session_id="larger", run_started_at="2026-11-17T10:00:00+00:00")

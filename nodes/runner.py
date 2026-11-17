@@ -2007,44 +2007,55 @@ class JobManager:
         cwd = job.get("cwd")
         if not isinstance(session_id, str) or not session_id or started is None or not isinstance(cwd, str):
             return None
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-        slug = cwd.replace("/", "-").replace(".", "-")
+        config = self._agent_env("claude", os.environ, job.get("profile")).get("CLAUDE_CONFIG_DIR")
+        config = config or str(Path.home() / ".claude")
+        slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
         path = Path(os.path.expanduser(config)) / "projects" / slug / (session_id + ".jsonl")
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):
             return None
         totals = {"input": 0, "output": 0, "cached": 0, "cache_creation": 0}
-        models, seen, found = {}, set(), False
+        messages = {}
         for line in lines:
             try:
                 event = json.loads(line)
                 stamp = event.get("timestamp") if isinstance(event, dict) else None
-                when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if isinstance(stamp, str) else None
-            except (ValueError, TypeError):
+                parsed = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")) if isinstance(stamp, str) else None
+                if parsed is not None and parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                when = parsed.timestamp() if parsed is not None else None
+            except (OverflowError, ValueError, TypeError):
                 continue
             if when is None or when < started or event.get("type") != "assistant":
                 continue
             message = event.get("message")
-            if not isinstance(message, dict) or not isinstance(message.get("id"), str) or message["id"] in seen:
+            if not isinstance(message, dict) or not isinstance(message.get("id"), str):
                 continue
-            seen.add(message["id"])
             values = message.get("usage")
-            if not isinstance(values, dict):
-                continue
-            numbers = [values.get(name) for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
-            if not all(isinstance(value, int) and not isinstance(value, bool) for value in numbers):
-                continue
-            found = True
+            values = values if isinstance(values, dict) else {}
+            numbers = tuple(value if isinstance(value, int) and not isinstance(value, bool) else 0
+                            for value in (values.get("input_tokens"), values.get("output_tokens"),
+                                          values.get("cache_read_input_tokens"), values.get("cache_creation_input_tokens")))
+            model = message.get("model")
+            previous = messages.get(message["id"])
+            if previous is None:
+                messages[message["id"]] = {"numbers": numbers, "model": model}
+            else:
+                merged = tuple(max(old, new) for old, new in zip(previous["numbers"], numbers))
+                messages[message["id"]] = {"numbers": merged,
+                                             "model": model if numbers[1] >= previous["numbers"][1] else previous["model"]}
+        if not messages:
+            return None
+        models = {}
+        for message in messages.values():
+            numbers = message["numbers"]
             totals["input"] += numbers[0] + numbers[3]
             totals["output"] += numbers[1]
             totals["cached"] += numbers[2]
             totals["cache_creation"] += numbers[3]
-            model = message.get("model")
-            if isinstance(model, str):
-                models[model] = models.get(model, 0) + numbers[1]
-        if not found:
-            return None
+            if isinstance(message["model"], str):
+                models[message["model"]] = models.get(message["model"], 0) + numbers[1]
         model = max(models, key=models.get) if models else None
         price = self._claude_price(model)
         cost = None if price is None else ((totals["input"] - totals["cache_creation"]) * price[0] +

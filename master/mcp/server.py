@@ -671,5 +671,36 @@ def pipeline_status(pipeline_id: str) -> str:
     return _controller("GET", f"/api/pipelines/{_q(pipeline_id)}")
 
 
+@mcp.tool()
+def run_batch(items: list[dict], policy: dict | None = None) -> str:
+    """Run a whole batch in the controller with one call. Each item: id, title, spec or spec_path, repo (absolute),
+    gate, optional files, builder (auto|claude|codex), builder_model, security_sensitive, depends_on, spec_sections.
+    policy (all optional): max_fix_rounds=3, gate_bounces=3, on_limit=wait|escalate, limit_wait_max=21600.
+    The controller builds, gates, reviews and fixes every item, then runs one Codex final review. It never merges,
+    pushes, approves or unblocks. Returns the batch id and one row per item; then call wait_batch."""
+    return _controller("POST", "/api/batches", {"items": items, "policy": policy or {}})
+
+
+@mcp.tool()
+def batch_status(batch_id: str, full: bool = False) -> str:
+    """The batch's trimmed record: per item state, branch, rounds, verdict, up to 5 open findings, models, spend and
+    escalation reason; batch state and final review. full=True: the whole record incl. gate output tail."""
+    return _controller("GET", f"/api/batches/{_q(batch_id)}?full={'true' if full else 'false'}")
+
+
+@mcp.tool()
+def wait_batch(batch_id: str, timeout_seconds: int = 1800) -> str:
+    """Block until every item and the final review are settled (one long-poll, no looping), or until the timeout
+    with the current state. Max 1800s. Returns the trimmed batch record."""
+    try:
+        url = f"{CONTROLLER}/api/batches/{_q(batch_id)}/wait?timeout={timeout_seconds}"
+        r = httpx.get(url, headers=_headers(), timeout=timeout_seconds + 30)
+    except httpx.HTTPError as e:
+        return f"controller unreachable ({e.__class__.__name__})"
+    if r.is_error:
+        return f"error {r.status_code}: {r.json().get('detail', r.text) if r.content else ''}"
+    return json.dumps(r.json(), indent=2)
+
+
 if __name__ == "__main__":
     mcp.run()

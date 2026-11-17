@@ -9,6 +9,10 @@ import grounding
 TERMINAL = {"ready", "failed", "escalated", "cancelled"}
 
 
+EFFORTS = ("low", "medium", "high")
+APPROVAL_WAIT_MAX = 30 * 60  # seconds a blocked builder may wait for the controller's auto-approve
+
+
 GATE_BOUNCES = 3  # automatic gate-failure rounds back to the builder (pipeline step 4)
 
 
@@ -31,6 +35,10 @@ def new(spec: dict) -> dict:
     if builder_model is not None and not isinstance(builder_model, str):
         raise ValueError("builder model must be a non-empty string")
     builder_model = builder_model.strip() if builder_model else None
+    if builder.get("effort") is not None and builder["effort"] not in EFFORTS:
+        raise ValueError("builder effort must be low, medium or high")
+    if builder.get("effort") is None:
+        builder.pop("effort", None)
     if builder_model:
         builder["model"] = builder_model
     else:
@@ -56,7 +64,11 @@ def new(spec: dict) -> dict:
         # the reviewer's named model differs from the node default (accepted risk, orchestrator decision).
         if field == "agent" and name == builder["agent"] and (model is None or model == builder_model):
             raise ValueError("builder cannot review itself: a reviewer must differ in agent or model")
-        clean_reviewers.append({"kind": field, field: name} | ({"model": model} if model else {}))
+        effort = reviewer.get("effort")
+        if effort is not None and (field != "agent" or effort not in EFFORTS):
+            raise ValueError("reviewer effort must be low, medium or high and only applies to agent reviewers")
+        clean_reviewers.append({"kind": field, field: name} | ({"model": model} if model else {})
+                               | ({"effort": effort} if effort else {}))
     maximum = spec.get("max_rounds", 3)
     if not isinstance(maximum, int) or isinstance(maximum, bool) or not 1 <= maximum <= 20:
         raise ValueError("max_rounds must be between 1 and 20")
@@ -242,6 +254,35 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         if p.get("state") != "building":
             return p, []
         state = event.get("state")
+        budget = p.setdefault("budget", {})
+        if state != "blocked":
+            budget.pop("waiting_approval", None)  # the task left blocked
+            budget.pop("waiting_since", None)  # the task left blocked: the controller's auto-approve resumed it
+        if state == "awaiting_approval":
+            p["state"] = "escalated"
+            _history(p, "escalated", note="owner approval needed: the builder task is awaiting approval")
+            return p, []
+        if state == "blocked":
+            # The pipeline never approves anything. While the controller's own auto-approve may still resume the
+            # task, wait; once it has finished (held, exhausted, or no policy), the owner has to act.
+            if event.get("auto_approve") == "pending":
+                if budget.get("waiting_approval") != p.get("build_task"):
+                    budget["waiting_approval"] = p.get("build_task")
+                    budget["waiting_since"] = _now()
+                    _history(p, "building", note="waiting for controller auto-approve")
+                    return p, []
+                if _now() - budget.get("waiting_since", _now()) <= APPROVAL_WAIT_MAX:
+                    return p, []
+                budget.pop("waiting_approval", None)
+                budget.pop("waiting_since", None)
+                p["state"] = "escalated"
+                _history(p, "escalated", note="owner approval needed: auto-approve still pending after 30 minutes")
+                return p, []
+            budget.pop("waiting_approval", None)
+            budget.pop("waiting_since", None)
+            p["state"] = "escalated"
+            _history(p, "escalated", note="owner approval needed: the builder task stayed blocked")
+            return p, []
         if state == "review":
             p["state"] = "reviewing"
             p["reviews"] = {str(i): {"status": "pending"} for i in range(len(p["reviewers"]))}

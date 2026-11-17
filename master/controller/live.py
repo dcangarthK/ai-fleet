@@ -229,6 +229,13 @@ def set_chain(root_id: str, body: ChainIn) -> dict:
     return {"root_id": root_id, "chain": chain}
 
 
+def batch_item_chain(root_id: str, build: dict, review: dict) -> dict:
+    """Live label for one batch item, through the existing chain writer. Descriptive only (spec batch 9)."""
+    return set_chain(root_id, ChainIn(stages=[
+        {"stage": "build", "agent": build["agent"], "model": build.get("model")},
+        {"stage": "review", "agent": review["agent"], "model": review.get("model")}]))
+
+
 def attempt_state(t: dict) -> str:
     if t.get("resolution"):
         return "superseded"

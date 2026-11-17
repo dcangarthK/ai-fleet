@@ -81,40 +81,57 @@ def git_kind(cmd):
     return None
 
 
-HEREDOC_RE = re.compile(r"(?:^|[;&|]|&&)\s*cat\s+>>?\s*\S+\s*<<")
-CD_RE = re.compile(r"^\s*cd\s+(\S+|'[^']*'|\"[^\"]*\")\s*(&&|;)\s*(.+)$", re.S)
+_SEG = r"(?:^|[;&|(\n`]|\$\()\s*"
+HEREDOC_RES = (
+    re.compile(_SEG + r"cat\s*>>?\s*[^\s<]+\s*<<"),                      # cat > f <<EOF, cat>f<<EOF
+    re.compile(_SEG + r"cat\s+<<-?\s*\S+\s*>>?\s*[^\s<]"),                 # cat <<EOF > f
+    re.compile(_SEG + r"tee\s+(?:-\w+\s+)*[^\s<]+\s*<<"),                  # tee f <<EOF
+)
+CD_WORD_RE = re.compile(_SEG + r"(?:cd|pushd)(?=\s|$)")
+# unquoted dir stops at whitespace and shell separators; a quoted dir is taken whole
+CD_RE = re.compile(r"^\s*cd\s+('[^']*'|\"[^\"]*\"|[^\s;&|'\"]+)[ \t]*(&&|;)[ \t]*(.+)$", re.S)
+CD_UNSAFE = set("~$`*?[\\\n\r{}!<>()")
+CD_ASK = {"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+    "permissionDecisionReason": "cd to a directory outside the task worktree (or one that can't be resolved safely)"}}
 
 
 def is_heredoc_write(cmd):
-    return bool(HEREDOC_RE.search(cmd or ""))
+    return any(r.search(cmd or "") for r in HEREDOC_RES)
 
 
 def worktree_root(payload):
     return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd())
 
 
-def strip_cd(cmd, root):
-    """G2: rewrite a single leading `cd <dir> &&|;` whose dir is inside the worktree. The rest runs from the root,
-    prefixed with `cd <rel> && ` only when <dir> is not the root. None = leave the command alone (no cd, an
-    out-of-tree dir, or two or more cds)."""
-    m = CD_RE.match(cmd or "")
+def cd_decision(cmd, payload):
+    """G2: how to treat `cd`. Returns (None, None) when the command has no cd; ("rewrite", new_command) for a single
+    leading `cd <dir> &&|;` whose dir resolves (symlinks included) inside the worktree; ("ask", None) for any other cd
+    (outside the tree, unresolvable, several cds, not leading), because Bash(cd:*) would otherwise auto-run it."""
+    n = len(CD_WORD_RE.findall(cmd or ""))
+    if n == 0:
+        return None, None
+    if n != 1:
+        return "ask", None
+    m = CD_RE.match(cmd)
     if not m:
-        return None
-    if sum(1 for seg in split_segments(cmd) if re.match(r"\s*cd(\s|$)", seg)) != 1:
-        return None
-    try:
-        toks = shlex.split(m.group(1))
-    except ValueError:
-        return None
-    if len(toks) != 1 or any(c in toks[0] for c in "$`~"):
-        return None
-    target = os.path.realpath(os.path.join(root, toks[0]))
+        return "ask", None
+    raw = m.group(1)
+    if raw[0] in "'\"":
+        raw = raw[1:-1]
+    if not raw or raw.startswith("-") or any(c in CD_UNSAFE for c in raw):
+        return "ask", None
+    cwd = os.path.realpath(payload.get("cwd") or os.getcwd())
+    root = worktree_root(payload)
+    target = os.path.realpath(os.path.join(cwd, raw))
     if target != root and not target.startswith(root + os.sep):
-        return None
+        return "ask", None
+    if not os.path.isdir(target):
+        return None, None  # a cd that will just fail: leave it alone
     rest = m.group(3).strip()
-    if target == root:
-        return rest
-    return "cd %s && %s" % (shlex.quote(os.path.relpath(target, root)), rest)
+    if target == cwd:
+        return "rewrite", rest
+    return "rewrite", "cd %s %s %s" % (shlex.quote(target), m.group(2), rest)
 
 
 def job_dir():
@@ -291,8 +308,10 @@ def hook_output(payload):
             "hookEventName": "PreToolUse", "permissionDecision": "deny",
             "permissionDecisionReason": "use the Write/Edit tool, not a heredoc"}}
     new = dict(ti)
-    stripped = strip_cd(cmd, worktree_root(payload))
-    if stripped is not None:
+    action, stripped = cd_decision(cmd, payload)
+    if action == "ask":
+        return CD_ASK
+    if action == "rewrite":
         cmd = new["command"] = stripped
     gk = git_kind(cmd)
     if gk == "log":
@@ -303,7 +322,7 @@ def hook_output(payload):
         if repeat_count(cmd) > MAX_TEST_RUNS:
             return deny_repeat()
         new["command"] = rewrite_command(cmd, new_log_path())
-    elif stripped is None:
+    elif action != "rewrite":
         return None
     # updatedInput only: no permissionDecision, so normal permission rules still apply
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": new}}

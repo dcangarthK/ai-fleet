@@ -48,7 +48,7 @@ export function Table<T>({ columns, rows, rowKey, onRowClick, selectedKey, capti
                 key={key}
                 className={cx(onRowClick && "click", selectedKey === key && "selected")}
                 tabIndex={onRowClick ? 0 : undefined}
-                aria-selected={onRowClick ? selectedKey === key : undefined}
+                aria-current={onRowClick && selectedKey === key ? "true" : undefined}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 onKeyDown={onRowClick ? (e) => {
                   if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {

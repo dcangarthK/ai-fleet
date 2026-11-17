@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentRows, buildNarrative, criticalPath, findAnomalies, findBottleneck, flagMap, layoutRiver, layoutTrace, marksFor,
-  focusSet, layoutGraph, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
+  focusSet, gateLabel, layoutGraph, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
   type LEvent, type LNode,
 } from "./lineageGraph";
 
@@ -339,5 +339,21 @@ describe("time view", () => {
     expect(ticks.length).toBeGreaterThan(2);
     expect(ticks.length).toBeLessThanOrEqual(9);
     expect(ticks.every((t) => t.ts >= T0 && t.ts <= T0 + 3600)).toBe(true);
+  });
+});
+
+describe("gateLabel (detail panel)", () => {
+  const gate = (passed: boolean | null) => ({ passed, tail: "" });
+  it("shows the gate only for finished attempts", () => {
+    expect(gateLabel(node({ id: "a", state: "done", gate: gate(true) }))).toBe("Passed");
+    expect(gateLabel(node({ id: "b", state: "review", gate: gate(true) }))).toBe("Passed");
+    expect(gateLabel(node({ id: "c", state: "failed", gate: gate(false) }))).toBe("Failed");
+    expect(gateLabel(node({ id: "d", state: "done", gate: null }))).toBe("No gate");
+  });
+  it("shows a dash for cancelled, running and queued attempts, whatever the gate says", () => {
+    for (const state of ["cancelled", "working", "starting", "queued"]) {
+      expect(gateLabel(node({ id: state, state, gate: gate(null) }))).toBe("—");
+      expect(gateLabel(node({ id: `${state}-2`, state, gate: null }))).toBe("—");
+    }
   });
 });

@@ -52,7 +52,7 @@ export function WorkDetailPage() {
         intro={<><Truncate text={d.root_id} className="mono" /> · {chainSummary(chain)}</>}
         actions={<Link className="button-link" to={`/lineage/${d.root_id}`}>Open trace</Link>}
       />
-      <div className="stack" style={{ gap: 16 }}>
+      <div className="stack stack-lg">
         {warn && <div role="alert"><Badge tone="warn">Same model</Badge> {warn}</div>}
         <Card><ChainStrip chain={chain} selected={current?.id ?? null} onSelect={setSel} /></Card>
         <Card>

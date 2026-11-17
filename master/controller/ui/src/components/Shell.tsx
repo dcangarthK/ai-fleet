@@ -6,7 +6,7 @@ import { breadcrumbs, NAV_GROUPS } from "../lib/nav";
 import { HelpDialog, Palette, useShortcuts } from "./Palette";
 import { NewTask } from "./NewTask";
 import { Icon } from "./icons";
-import { Button, IconButton } from "./ui";
+import { Button, IconButton, ProgressBar } from "./ui";
 
 export function Shell() {
   const live = useLiveUpdates();
@@ -20,6 +20,7 @@ export function Shell() {
   const [spawning, setSpawning] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const railRef = useRef<HTMLElement>(null);
+  const mainColRef = useRef<HTMLDivElement>(null);
 
   const waiting = (tasks.data ?? []).filter(needsYou).length;
   const crumbs = breadcrumbs(loc.pathname);
@@ -40,13 +41,19 @@ export function Shell() {
     return () => window.removeEventListener("keydown", on);
   }, [drawer]);
 
+  // While the drawer is open nothing behind it can take focus.
+  useEffect(() => {
+    const col = mainColRef.current;
+    if (col) col.inert = drawer;
+  }, [drawer]);
+
   return (
     <div className="shell">
       <a className="skip-link" href="#main">Skip to content</a>
 
       <aside className={`side${drawer ? " open" : ""}`} id="rail" ref={railRef} aria-label="Primary">
         <div className="brand"><i /><span className="brand-text">Fleet console</span></div>
-        <nav aria-label="Pages" style={{ display: "flex", flexDirection: "column", gap: "var(--s5)" }}>
+        <nav aria-label="Pages" className="side-nav">
           {NAV_GROUPS.map((g) => (
             <div className="group" key={g.id} role="group" aria-label={g.label}>
               <h3>{g.label}</h3>
@@ -73,7 +80,7 @@ export function Shell() {
       </aside>
       <div className={`scrim${drawer ? " open" : ""}`} onClick={() => setDrawer(false)} aria-hidden="true" />
 
-      <div className="main-col">
+      <div className="main-col" ref={mainColRef}>
         <header className="top">
           <IconButton ref={toggleRef} className="menu-btn" label={drawer ? "Close navigation" : "Open navigation"} aria-expanded={drawer} aria-controls="rail" onClick={() => setDrawer((d) => !d)}>
             <Icon name="menu" />
@@ -97,7 +104,7 @@ export function Shell() {
               <span className="live-text">{live ? "live" : "offline"}</span>
             </span>
             {waiting > 0 && <Link className="needs-you" to="/">{waiting} need you</Link>}
-            <button type="button" className="cmdk" aria-label="Open command palette" onClick={openPalette}>
+            <button type="button" className="cmdk" aria-label="Search pages, tasks, actions" aria-keyshortcuts="Meta+K Control+K" onClick={openPalette}>
               <Icon name="search" className="ico cmdk-icon" />
               <span className="cmdk-text">Search pages, tasks, actions</span>
               <kbd>⌘K</kbd>
@@ -132,13 +139,14 @@ function InstallStrip() {
   if (!ops.length) return null;
   const name = (id: string) => fleet.data?.nodes.find((x) => x.id === id)?.name ?? id;
   return (
-    <div className="ops" role="status" aria-live="polite">
+    <div className="install-strip" role="status" aria-live="polite">
       {ops.map(({ m, node, n }) => {
         const frac = progressFraction(n.progress);
+        const what = `${INSTALL_LABEL[n.state ?? "pending"].label} ${m.display_name || m.reference} on ${name(node)}`;
         return (
-          <Link key={m.id + node} to="/models" className="op" style={{ color: "inherit", textDecoration: "none" }}>
+          <Link key={m.id + node} to="/models" className="op">
             <span>{INSTALL_LABEL[n.state ?? "pending"].label} <b>{m.display_name || m.reference}</b> on {name(node)}</span>
-            <span className="bar"><span style={{ width: frac == null ? "30%" : `${Math.round(frac * 100)}%` }} className={frac == null ? "indeterminate" : ""} /></span>
+            <ProgressBar value={frac} label={what} />
           </Link>
         );
       })}

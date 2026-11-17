@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { Link } from "react-router-dom";
 import { STATE } from "../../lib/format";
 import {
-  focusSet, fmtClock, fmtDur, fmtTokens, kindGlyph, layoutRiver, MARK_LABEL, marksFor, niceTicks, spanOf, tickLabel, tokenTotal,
+  focusSet, fmtClock, fmtDur, fmtTokens, gateLabel, kindGlyph, layoutRiver, MARK_LABEL, marksFor, niceTicks, spanOf, tickLabel, tokenTotal,
   waitReason, GROUP_H, ROW_H, type AnomalyKind, type LEdge, type LEvent, type LLane, type LNode, type TimeView,
 } from "../../lib/lineageGraph";
 import { useMedia, usePanZoom, useWidth } from "./hooks";
@@ -276,11 +276,11 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
 export function RiverPanel({ node: n, now, onClose }: { node: LNode; now: number; onClose: () => void }) {
   const s = spanOf(n, now);
   return <aside className="lin-river-panel" aria-label="Selected attempt details">
-    <div className="lin-panel-head"><div><h2 className="mono">{n.id}</h2><p className="quiet">{n.title ?? n.kind ?? "Task attempt"}</p></div><button className="icon ghost" aria-label="Close details" onClick={onClose}>×</button></div>
+    <div className="lin-panel-head"><div><h2 className="mono">{n.id}</h2><p className="quiet">{n.title ?? n.kind ?? "Task attempt"}</p></div><button type="button" className="icon ghost" aria-label="Close details" onClick={onClose}>×</button></div>
     <dl className="kv">
       <dt>Model</dt><dd>{n.model ?? n.agent ?? "—"}</dd><dt>Account</dt><dd>{n.account}</dd><dt>Kind / stage</dt><dd>{n.kind ?? "task"}{n.stage ? ` · ${n.stage}` : ""}</dd>
       <dt>State</dt><dd>{STATE[n.state as keyof typeof STATE]?.label ?? n.state}</dd><dt>Tokens</dt><dd>{fmtTokens(tokenTotal(n.tokens))}</dd><dt>Duration</dt><dd>{s.start === null ? `Queued ${fmtDur(s.wait)}` : `${fmtDur(s.end - s.start)}${s.live ? " so far" : ""}`}</dd>
-      <dt>Gate</dt><dd>{n.gate === null ? "No gate" : n.gate.passed === true ? "Passed" : n.gate.passed === false ? "Failed" : "Running"}</dd><dt>Verdict</dt><dd>{n.failure_reason ?? "—"}</dd>
+      <dt>Gate</dt><dd>{gateLabel(n)}</dd><dt>Verdict</dt><dd>{n.failure_reason ?? "—"}</dd>
     </dl>
     <div className="row"><Link className="button-link" to={`/work/${n.root_id}`}>Open work</Link><Link className="button-link" to={`/lineage/${n.root_id}?sel=${n.id}`}>Open trace</Link></div>
   </aside>;

@@ -97,7 +97,7 @@ export function LineagePage() {
         <Tabs tabs={LENSES.map((l) => ({ ...l, label: l.label, count: l.id === "agents" || !data ? undefined : l.id === "river" ? nodes.length : root ? nodes.length : roots.length }))}
           value={lens} onChange={onLens} label="Lineage lenses" idPrefix="lin" />
         {!root && (
-          <label className="lin-range">
+          <label className="lin-range-select">
             <span className="sr-only">Time range</span>
             <Select value={range.id} onChange={(e) => setParam("range", e.target.value === "6h" ? null : e.target.value)} aria-label="Time range">
               {RANGES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}

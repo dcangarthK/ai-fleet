@@ -32,6 +32,15 @@ export interface LNode {
   resets_at: number | null;
   tokens: LTokens | null;
 }
+/** States in which an attempt has stopped, so its gate result is final. */
+export const FINISHED_STATES: ReadonlySet<string> = new Set(["done", "review", "failed"]);
+
+/** Gate line for the detail panel: only finished attempts show a gate state; everything else (running, queued, cancelled) is "—". */
+export function gateLabel(n: Pick<LNode, "state" | "gate">): string {
+  if (!FINISHED_STATES.has(n.state)) return "—";
+  if (n.gate === null) return "No gate";
+  return n.gate.passed === true ? "Passed" : n.gate.passed === false ? "Failed" : "—";
+}
 export interface LEdge { from: string; to: string; link: string; reason: string | null }
 export interface LLane { id: string; node: string; account: string; agent: string | null }
 export interface LEvent { ts: number; task_id: string; type: string; event_id?: number; to?: string; from?: string; mark?: "limit" | "stall" | "gate" }

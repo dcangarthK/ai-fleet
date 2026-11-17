@@ -13,11 +13,12 @@ export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[
   const [view, setView] = useState({ x: 0, y: 0, z: 1 });
   const [offset, setOffset] = useState<Record<string, { x: number; y: number }>>({});
   const [hovered, setHovered] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const drag = useRef<{ x: number; y: number; view: typeof view; node?: string; base?: { x: number; y: number } } | null>(null);
   useEffect(() => { const clear = (e: KeyboardEvent) => { const t = e.target as HTMLElement; if (e.key === "Escape" && !t.closest("input,textarea,select,[role=dialog]")) onSelect(null); }; window.addEventListener("keydown", clear); return () => window.removeEventListener("keydown", clear); }, [onSelect]);
   const at = (id: string) => { const p = layout.place[id], block = blockByRoot.get(p.root)!; const o = offset[id] ?? { x: 0, y: 0 }; return { x: block.x + p.x + o.x, y: block.y + p.y + o.y }; };
   const onWheel = (e: WheelEvent<SVGSVGElement>) => { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); const ax = (e.clientX - r.left - view.x) / view.z, ay = (e.clientY - r.top - view.y) / view.z; const z = Math.max(.45, Math.min(2.4, view.z * Math.exp(-e.deltaY * .0015))); setView({ z, x: e.clientX - r.left - ax * z, y: e.clientY - r.top - ay * z }); };
-  const down = (e: PointerEvent<SVGElement>, node?: LNode) => { if (e.button !== 0) return; drag.current = { x: e.clientX, y: e.clientY, view, node: node?.id, base: node ? offset[node.id] ?? { x: 0, y: 0 } : undefined }; e.currentTarget.setPointerCapture(e.pointerId); };
+  const down = (e: PointerEvent<SVGElement>, node?: LNode) => { if (e.button !== 0) return; drag.current = { x: e.clientX, y: e.clientY, view, node: node?.id, base: node ? offset[node.id] ?? { x: 0, y: 0 } : undefined }; setDragging(true); e.currentTarget.setPointerCapture(e.pointerId); };
   const move = (e: PointerEvent<SVGElement>) => { const d = drag.current; if (!d) return; const dx = (e.clientX - d.x) / view.z, dy = (e.clientY - d.y) / view.z; if (d.node) setOffset((old) => ({ ...old, [d.node!]: { x: d.base!.x + dx, y: d.base!.y + dy } })); else setView({ ...d.view, x: d.view.x + e.clientX - d.x, y: d.view.y + e.clientY - d.y }); };
   const fit = () => { const z = Math.max(.7, Math.min(1, (VIEW_W - 40) / layout.width, (VIEW_H - 40) / layout.height)); setView({ x: 20, y: 20, z }); setOffset({}); };
   const panFromMini = (e: PointerEvent<SVGSVGElement>) => { const r = e.currentTarget.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * layout.width, y = (e.clientY - r.top) / r.height * layout.height; setView((old) => ({ ...old, x: VIEW_W / 2 - x * old.z, y: VIEW_H / 2 - y * old.z })); };
@@ -25,7 +26,7 @@ export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[
   const hoverNode = hovered ? byId.get(hovered) ?? null : null;
   return <div className="graph-wrap">
     <div className="graph-actions"><button onClick={fit}>Fit</button><span className="quiet">Scroll to zoom · drag to pan · select a card to focus</span></div>
-    <svg className="graph-svg" viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} onWheel={onWheel} onPointerDown={(e) => down(e)} onPointerMove={move} onPointerUp={() => { drag.current = null; }}>
+    <svg className={dragging ? "graph-svg dragging" : "graph-svg"} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} onWheel={onWheel} onPointerDown={(e) => down(e)} onPointerMove={move} onPointerUp={() => { drag.current = null; setDragging(false); }} onPointerCancel={() => { drag.current = null; setDragging(false); }}>
       <defs><pattern id="graph-dots" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" /></pattern>{["quiet", "bad", "accent"].map((t) => <marker id={`graph-arrow-${t}`} key={t} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" className={`graph-arrow ${t}`} /></marker>)}</defs>
       <rect width="100%" height="100%" className="graph-bg" /><g transform={`translate(${view.x} ${view.y}) scale(${view.z})`}>
         {layout.groups.map((g) => <g key={g.root}><rect x={g.x} y={g.y} width={g.w} height={g.h} rx="10" className="graph-band"/><text x={g.x + 16} y={g.y + 20} className="graph-band-label">{g.root}</text></g>)}

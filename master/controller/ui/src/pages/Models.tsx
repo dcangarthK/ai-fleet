@@ -5,7 +5,7 @@ import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
 import { describeRequest } from "../lib/request";
-import { Button, Empty, Panel, Table, useConfirm, type Column } from "../components/ui";
+import { Button, Empty, Panel, ProgressBar, Table, useConfirm, type Column } from "../components/ui";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
 
@@ -133,15 +133,6 @@ function scores(evals: Record<string, number> | null): ReactNode {
       {k} <b className={evals[k] >= 85 ? "tone-ok" : evals[k] < 60 ? "tone-bad" : ""}>{Math.round(evals[k])}</b>
     </span>
   ));
-}
-
-function ProgressBar({ value }: { value: number | null }) {
-  return (
-    <span className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100}
-          aria-valuenow={value == null ? undefined : Math.round(value * 100)}>
-      <span style={{ width: value == null ? "30%" : `${Math.round(value * 100)}%` }} className={value == null ? "indeterminate" : ""} />
-    </span>
-  );
 }
 
 function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {

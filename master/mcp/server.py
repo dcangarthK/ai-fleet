@@ -692,8 +692,8 @@ def wait_batch(batch_id: str, timeout_seconds: int = 1800) -> str:
     """Block until every item and the final review are settled (one long-poll, no looping), or until the timeout
     with the current state. Max 1800s. Returns the trimmed batch record."""
     try:
-        r = httpx.get(f"{CONTROLLER}/api/batches/{_q(batch_id)}/wait?timeout={timeout_seconds}",
-                      headers=_headers(), timeout=timeout_seconds + 30)
+        url = f"{CONTROLLER}/api/batches/{_q(batch_id)}/wait?timeout={timeout_seconds}"
+        r = httpx.get(url, headers=_headers(), timeout=timeout_seconds + 30)
     except httpx.HTTPError as e:
         return f"controller unreachable ({e.__class__.__name__})"
     if r.is_error:

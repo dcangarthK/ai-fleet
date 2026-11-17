@@ -214,11 +214,12 @@ class LifecycleTrim(unittest.TestCase):
             server._controller = saved
 
     def test_message_task_trimmed(self):
-        v = json.loads(self._msg(json.dumps(self.ROW)))
+        v = json.loads(self._msg(json.dumps({**self.ROW, "state": "working"})))
         self.assertEqual(set(v), set(server.ROW_KEYS))
+        self.assertEqual(v["state"], "working")
 
     def test_message_task_full(self):
-        raw = json.dumps(self.ROW)
+        raw = json.dumps({**self.ROW, "state": "working"})
         self.assertEqual(self._msg(raw, full=True), raw)
 
     def test_message_task_errors_pass_through(self):

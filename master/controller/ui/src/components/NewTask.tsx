@@ -3,6 +3,7 @@ import { post, type Mode, type Task } from "../lib/api";
 import { useFleet, useRun } from "../lib/data";
 import { ErrorBanner } from "./bits";
 import { SpawnPreview } from "./work/SpawnPreview";
+import { KINDS, type Kind } from "../lib/budget";
 
 type Agent = "codex" | "claude" | "ollama";
 
@@ -12,6 +13,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
   const fleet = useFleet();
   const { run, busy, error, clearError } = useRun();
   const [agent, setAgent] = useState<Agent>("codex");
+  const [kind, setKind] = useState<Kind>("build");
   const [mode, setMode] = useState<Mode>("auto-edit");
   const [node, setNode] = useState("");
   const [model, setModel] = useState("");
@@ -34,12 +36,12 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const body: Record<string, string | boolean> = { agent, mode, prompt };
+    const body: Record<string, string | boolean> = { agent, mode, prompt, kind };
     if (bypass && agent !== "ollama") body.trusted_bypass = true;
     if (node) body.node = node;
     if (repo.trim()) body.repo = repo.trim();
     if (gate.trim()) body.gate = gate.trim();
-    if (agent === "ollama" && model) body.model = model;
+    if (model && model !== "auto") body.model = model;
     const t = await run(() => post<Task>("/api/tasks", body));
     if (t) {
       setPrompt("");
@@ -52,10 +54,18 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
       <form onSubmit={submit}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 id="new-task-title">New task</h2>
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <button type="button" className="icon ghost" aria-label="Close dialog" onClick={onClose}>×</button>
         </div>
         <ErrorBanner error={error} onDismiss={clearError} />
+        <label className="field">What should the agent do?
+          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} required autoFocus />
+        </label>
         <div className="grid-form">
+          <label className="field">Kind
+            <select value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+              {KINDS.map((value) => <option key={value} value={value}>{value.replace(/_/g, " ")}</option>)}
+            </select>
+          </label>
           <label className="field">Agent
             <select value={agent} onChange={(e) => setAgent(e.target.value as Agent)}>
               <option value="codex">Codex</option>
@@ -74,14 +84,12 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
               {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
           </label>
-          {agent === "ollama" && (
-            <label className="field">Model
-              <select value={model} onChange={(e) => setModel(e.target.value)} required>
-                <option value="" disabled>Choose a model</option>
-                {ollamaModels.map((m) => <option key={m}>{m}</option>)}
-              </select>
-            </label>
-          )}
+          <label className="field">Model
+            <select value={model || "auto"} onChange={(e) => setModel(e.target.value)}>
+              <option value="auto">Auto</option>
+              {agent === "ollama" && ollamaModels.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
         </div>
         <div className="grid-form">
           <label className="field">Repository on the node (optional)
@@ -92,10 +100,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
             <datalist id="gate-profiles">{profiles.map((p) => <option key={p}>{p}</option>)}</datalist>
           </label>
         </div>
-        {agent !== "ollama" && <SpawnPreview kind="build" agent={agent} />}
-        <label className="field">What should the agent do?
-          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} required />
-        </label>
+        {agent !== "ollama" && <SpawnPreview kind={kind} agent={agent} />}
         {agent !== "ollama" && (
           <label className="row small" style={{ gap: 8 }}>
             <input type="checkbox" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />

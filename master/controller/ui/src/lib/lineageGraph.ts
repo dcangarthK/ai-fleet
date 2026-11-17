@@ -143,7 +143,7 @@ export interface RiverLayout {
 }
 
 /** Lanes grouped by node, each as tall as its packed rows. `gap` is the minimum clear time between bars on a row. */
-export function layoutRiver(nodes: LNode[], lanes: LLane[], now: number, gap = 0): RiverLayout {
+export function layoutRiver(nodes: LNode[], lanes: LLane[], now: number, gap = 0, showGroups = true): RiverLayout {
   const byLane = new Map<string, LNode[]>();
   for (const n of nodes) byLane.set(n.lane, [...(byLane.get(n.lane) ?? []), n]);
   const known = new Map(lanes.map((l) => [l.id, l]));
@@ -157,9 +157,9 @@ export function layoutRiver(nodes: LNode[], lanes: LLane[], now: number, gap = 0
   for (const lane of ordered) {
     let group = groups[groups.length - 1];
     if (!group || group.node !== lane.node) {
-      group = { node: lane.node, y, h: GROUP_H, lanes: [] };
+      group = { node: lane.node, y, h: showGroups ? GROUP_H : 0, lanes: [] };
       groups.push(group);
-      y += GROUP_H;
+      y += showGroups ? GROUP_H : 0;
     }
     const members = byLane.get(lane.id)!;
     const packed = packLane(members.map((n) => { const s = spanOf(n, now); return { id: n.id, from: s.created, to: s.end }; }), gap);
@@ -218,6 +218,28 @@ export function criticalPath(nodes: LNode[], now: number): string[] {
   return path;
 }
 export const edgeKey = (from: string, to: string): string => `${from}>${to}`;
+
+/** The focused attempt and its complete upstream/downstream dependency chain. */
+export function focusSet(nodes: LNode[], edges: LEdge[], focused: string | null): Set<string> {
+  if (!focused) return new Set(nodes.map((n) => n.id));
+  const parents = new Map<string, string[]>();
+  const children = new Map<string, string[]>();
+  const connect = (from: string, to: string) => {
+    parents.set(to, [...(parents.get(to) ?? []), from]);
+    children.set(from, [...(children.get(from) ?? []), to]);
+  };
+  for (const n of nodes) if (n.parent_id) connect(n.parent_id, n.id);
+  for (const e of edges) connect(e.from, e.to);
+  const out = new Set<string>();
+  const pending = [focused];
+  while (pending.length) {
+    const id = pending.pop()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    pending.push(...(parents.get(id) ?? []), ...(children.get(id) ?? []));
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------------------- trace layout
 

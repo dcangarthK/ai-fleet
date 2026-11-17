@@ -4,12 +4,12 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { get } from "../lib/api";
 import {
   buildNarrative, criticalPath, dataExtent, findAnomalies, findBottleneck, flagMap, fmtClock, rootsOf, snapshotAt,
-  stepTimes, fmtDur, type LineageData,
+  stepTimes, fmtDur, fmtTokens, spanOf, tokenTotal, type LineageData,
 } from "../lib/lineageGraph";
 import { STATE } from "../lib/format";
 import { PageHead } from "../components/bits";
 import { Button, Card, Empty, ErrorState, Loading, Select, TabPanel, Tabs } from "../components/ui";
-import { River } from "../components/lineage/River";
+import { River, RiverPanel } from "../components/lineage/River";
 import { TraceGraph, TracePanel } from "../components/lineage/Trace";
 import { Agents } from "../components/lineage/Agents";
 import { Intel } from "../components/lineage/Intel";
@@ -39,6 +39,7 @@ export function LineagePage() {
   const range = RANGES.find((r) => r.id === sp.get("range")) ?? RANGES[1];
   const sel = sp.get("sel");
   const [cursor, setCursor] = useState<number | null>(null);
+  const [grouped, setGrouped] = useState(true);
 
   const query = useQuery({
     queryKey: ["lineage", root ?? range.id],
@@ -127,14 +128,18 @@ export function LineagePage() {
               {lens !== "agents" && <Intel nodes={snap} bottleneck={bottleneck} anomalies={anomalies} narrative={narrative} />}
 
               <TabPanel id="river" value={lens} idPrefix="lin">
-                <Toolbar tv={tv} cursor={cursor} />
-                <Card className="lin-chart-card" bodyClassName="lin-chart-body">
-                  <River
-                    nodes={snap} edges={data.edges} lanes={data.lanes} events={events} now={now} view={tv.view} follow={tv.follow}
-                    cursor={cursor} flags={flags} selected={sel} zoom={tv.zoom} pan={tv.pan}
-                    onOpen={(n) => navigate(`/lineage/${n.root_id}?sel=${n.id}`)}
-                  />
-                </Card>
+                <LineageInsight nodes={snap} critical={critical} now={effNow} />
+                <Toolbar tv={tv} cursor={cursor} grouped={grouped} setGrouped={setGrouped} />
+                <div className="lin-river-layout">
+                  <Card className="lin-chart-card" bodyClassName="lin-chart-body">
+                    <River
+                      nodes={snap} edges={data.edges} lanes={data.lanes} events={events} now={now} view={tv.view} follow={tv.follow}
+                      cursor={cursor} flags={flags} selected={sel} grouped={grouped} zoom={tv.zoom} pan={tv.pan}
+                      onOpen={(n) => setParam("sel", n?.id ?? null)}
+                    />
+                  </Card>
+                  {selected && <RiverPanel node={selected} now={effNow} onClose={() => setParam("sel", null)} />}
+                </div>
                 <Legend />
               </TabPanel>
 
@@ -194,7 +199,7 @@ function Summary({ live, nodes, lanes, roots, cursor, root }: { live: number; no
   );
 }
 
-function Toolbar({ tv, cursor }: { tv: ReturnType<typeof useTimeView>; cursor: number | null }) {
+function Toolbar({ tv, cursor, grouped, setGrouped }: { tv: ReturnType<typeof useTimeView>; cursor: number | null; grouped?: boolean; setGrouped?: (grouped: boolean) => void }) {
   return (
     <div className="lin-toolbar row" role="toolbar" aria-label="Time axis">
       <Button size="sm" variant={tv.follow ? "primary" : "secondary"} aria-pressed={tv.follow} disabled={cursor !== null} onClick={() => tv.setFollow(!tv.follow)}>
@@ -205,9 +210,23 @@ function Toolbar({ tv, cursor }: { tv: ReturnType<typeof useTimeView>; cursor: n
       <Button size="sm" onClick={() => tv.fit()}>Fit all</Button>
       <Button size="sm" variant="ghost" onClick={() => tv.pan(-(tv.view.t1 - tv.view.t0) * 0.4)} aria-label="Pan earlier">‹ Earlier</Button>
       <Button size="sm" variant="ghost" onClick={() => tv.pan((tv.view.t1 - tv.view.t0) * 0.4)} aria-label="Pan later">Later ›</Button>
+      {setGrouped && <Button size="sm" variant={grouped ? "primary" : "secondary"} aria-pressed={grouped} onClick={() => setGrouped(!grouped)}>Group by work item</Button>}
       <span className="quiet lin-hint-inline">Drag to pan · Ctrl/⌘ + scroll or pinch to zoom · {fmtDur(tv.view.t1 - tv.view.t0)} in view</span>
     </div>
   );
+}
+
+function LineageInsight({ nodes, critical, now }: { nodes: import("../lib/lineageGraph").LNode[]; critical: string[]; now: number }) {
+  const gateNodes = nodes.filter((n) => n.gate !== null);
+  const passRate = gateNodes.length ? Math.round((gateNodes.filter((n) => n.gate?.passed).length / gateNodes.length) * 100) : null;
+  const retries = nodes.filter((n) => ["retry", "handoff", "resume"].includes(n.link ?? "")).length;
+  const slowest = [...nodes].sort((a, b) => {
+    const as = spanOf(a, now), bs = spanOf(b, now);
+    return (bs.start === null ? bs.wait : bs.end - bs.start) - (as.start === null ? as.wait : as.end - as.start);
+  })[0];
+  return <div className="lin-insight-strip" aria-label="Lineage insight">
+    <span><b>{critical.length}</b> critical steps</span><span><b>{retries}</b> retries</span><span><b>{passRate === null ? "—" : `${passRate}%`}</b> gate pass</span><span><b>{fmtTokens(nodes.reduce((sum, node) => sum + tokenTotal(node.tokens), 0))}</b> tokens</span><span><b>{slowest ? slowest.stage ?? slowest.kind ?? "task" : "—"}</b> slowest stage</span>
+  </div>;
 }
 
 function Legend() {

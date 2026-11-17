@@ -35,5 +35,23 @@ Append to the JSON files. For coder cases, add a reference solution to `REFERENC
 the tests check every case is solvable and has at least 3 test methods (so scores aren't all-or-nothing).
 Run `python3 -m unittest tests/test_evals.py`.
 
+## Harness-change benchmark
+
+`cases/harness.json` is a fixed six-case set for measuring changes to `CLAUDE.md`, fleet-batch skills, or brief
+templates. Each case is submitted through the normal controller task API as `kind=benchmark`, so the runner's gate
+and the controller's usage record remain the source of truth. Run a variant against a repository the target runner
+allows, then compare two saved JSON results:
+
+```bash
+FLEET_TOKEN=... python3 evals/harness_benchmark.py baseline --repo /abs/path/to/ai-fleet
+FLEET_TOKEN=... python3 evals/harness_benchmark.py revised --repo /abs/path/to/ai-fleet
+python3 evals/harness_benchmark.py --compare evals/results/harness-baseline-*.json evals/results/harness-revised-*.json
+```
+
+Each result records per case gate pass/fail, runner rounds (and derived fix rounds), plus input, output, and cache
+tokens. On a failed gate the runner resumes the same benchmark task in its existing worktree with a fix instruction,
+up to `--max-rounds 3` by default. The optional `--gate` selects another configured runner gate profile; cases default
+to `fleet-gate`.
+
 Model-written code runs on this machine (isolated temp dir, timeout, no extra environment). Only evaluate
 models you chose to install.

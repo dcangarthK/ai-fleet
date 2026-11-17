@@ -13,6 +13,9 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
   report; don't install it yourself. In a fleet task, if a claude-mem (or any) tool call is refused once, don't
   call it again: carry on without it and note it in your report. Retrying a refused tool only burns tokens.
 - Send less: point at files instead of pasting them; never paste generated files, lockfiles or large logs.
+- Every memory note and every rule added after an incident names its scope and its reason (with a date or doc
+  reference). At the start of a batch, delete or update notes whose reason no longer holds; contradictory notes are
+  a bug - fix them, don't add a third.
 - **Auto-compact at 200,000 tokens.** Every profile's settings.json sets `autoCompactWindow: 200000` and
   `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` (the documented minimum is 100,000).
 - **Orchestrator hygiene.** State lives in fleet.db and the stored plan, not in chat. Use a fresh session per batch,

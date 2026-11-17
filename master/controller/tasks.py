@@ -973,8 +973,8 @@ async def poll_task(task_id: str) -> None:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
         task = get_task(task_id)
-        if handoff.limit_failure(task) and _profile_is_pinned(task):
-            await requeue_limit_wait(task_id, "explicit profile is pinned; waiting for its reset")
+        if (handoff.limit_failure(task) and _profile_is_pinned(task)
+                and await requeue_limit_wait(task_id, "explicit profile is pinned; waiting for its reset")):
             return
         await handoff.after_settled(task_id)
         task = get_task(task_id)
@@ -997,10 +997,13 @@ def _profile_is_pinned(task: dict) -> bool:
 
 def _earliest_limit_reset(task: dict, now: float) -> float | None:
     """The earliest known future reset among usable accounts for this paid agent."""
-    accounts = accounts_of(placement(task["agent"], None), task["agent"])
-    if task.get("account"):
-        accounts.insert(0, task["account"])
-    accounts = list(dict.fromkeys(accounts))
+    if _profile_is_pinned(task) and task.get("account"):
+        accounts = [task["account"]]  # a pinned task can only use its own account's reset
+    else:
+        accounts = accounts_of(placement(task["agent"], None), task["agent"])
+        if task.get("account"):
+            accounts.insert(0, task["account"])
+        accounts = list(dict.fromkeys(accounts))
     rules = budget.current_rules()
     ident = task.get("budget_identity") or budget.identity(task["agent"], task.get("model"))
     key = task.get("budget_key")
@@ -1030,8 +1033,8 @@ async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None
             reset = task.get("resets_at")
         if reset is None or reset <= now:
             return False
-        if not transition(task, {"failed"}, "queued", not_before=reset, budget_wait="limit", error=reason,
-                          resolution=None):
+        if not transition(task, {"failed"}, "queued", not_before=reset, ended_at=None, budget_wait="limit",
+                          error=reason, resolution=None):
             return False
         # The legacy scheduled-resume path is no longer applicable once this task is a normal queued item.
         with db() as c:
@@ -1284,6 +1287,18 @@ async def auto_approve_denials(task: dict) -> None:
         update(task["id"], auto_approvals=rounds, error=str(exc.detail))
         emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
                                                     "reason": str(exc.detail)})
+        verdict = exc.verdict or {}
+        until = verdict.get("until")
+        # Only a provider usage limit ("... limited until T"); the daily hard token budget stays for the owner.
+        if (verdict.get("wait") == "limit" and "limited until" in str(verdict.get("reason"))
+                and until and until > time.time()):
+            # A usage limit never leaves the task blocked: keep it queued until the reset.
+            async with _locks[task["id"]]:
+                current = get_task(task["id"])
+                if transition(current, {"blocked"}, "queued", not_before=until, ended_at=None, budget_wait="limit",
+                              error=str(exc.detail), resolution=None):
+                    emit(task["id"], "task.rerouted", {"title": task["title"], "reason": str(exc.detail),
+                                                       "not_before": until})
         return
     emit(task["id"], "task.auto_approved", {"title": task["title"], "tools": tools, "agent": task["agent"]})
 

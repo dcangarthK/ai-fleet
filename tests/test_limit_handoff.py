@@ -623,7 +623,8 @@ class ContinuationTests(HandoffBase):
         self.c.portal.call(tasks.auto_approve_denials, task)
         self.assertFalse(self.posts(t["id"], "message"))
         got = self.get(t["id"])
-        self.assertEqual(got["state"], "blocked")  # left for the owner
+        self.assertEqual(got["state"], "queued")  # a usage limit keeps it queued until the reset
+        self.assertEqual(got["budget_wait"], "limit")
         self.assertIn("limited until", got["error"])
         self.assertEqual(got["auto_approvals"] or 0, 0)  # a refused round isn't spent
         self.settle_all()

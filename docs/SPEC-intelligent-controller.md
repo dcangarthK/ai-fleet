@@ -145,7 +145,7 @@ a `cleanup` decision per task. It never touches unmerged branches.
 
 `GET /api/intel/savings?since=&baseline_since=&baseline_until=` (defaults: since = 2026-11-16 20:00 SAST epoch
 `INTEL_EPOCH`, baseline = the 48 h before it). For each window returns:
-- `paid_tasks`, `paid_tokens` (input+output+cached over claude/codex), `tokens_per_task`
+- `paid_tasks`, `paid_tokens` (input+output over claude/codex, excluding cache reads), `tokens_per_task`
 - `wasted_tokens` and `wasted_share`: tokens of tasks ending `capped`, `failed` or `cancelled`
 - `final_reviews_on_codex`: share of `final_review` tasks whose agent is codex
 - `drafts_off_sonnet`: share of `draft` tasks not on Sonnet/Opus

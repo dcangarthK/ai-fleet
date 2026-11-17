@@ -294,6 +294,26 @@ class FixRound(unittest.TestCase):
         self.assertEqual(B._slots(b).get("codex"), 1)
 
 
+class PolicyLocks(unittest.TestCase):
+    def test_final_review_cannot_be_overridden(self):
+        for fr in ({"agent": "claude"}, {"model": "gpt-5.6-sol"}, {"effort": "low"}):
+            with self.assertRaises(ValueError):
+                make([item("a")], final_review=fr)
+        make([item("a")], final_review={"agent": "codex", "model": "gpt-5.6-terra", "effort": "high"})
+
+    def test_concurrency_validated(self):
+        for bad in ({"claude": 0}, {"claude": "2"}, {"codex": -1}, {"gemini": 1}, {"claude": True}, [1], 3):
+            with self.assertRaises(ValueError, msg=bad):
+                make([item("a")], concurrency=bad)
+        b = make([item("a")], concurrency={"claude": 3})
+        self.assertEqual(b["policy"]["concurrency"], {"codex": 1, "claude": 3})
+
+    def test_gate_bounces_fixed(self):
+        with self.assertRaises(ValueError):
+            make([item("a")], gate_bounces=5)
+        make([item("a")], gate_bounces=B.GATE_BOUNCES)
+
+
 class Persistence(unittest.TestCase):
     def test_t9_restart_no_duplicate_spawn(self):
         b = make([item("a"), item("b")], concurrency={"claude": 9, "codex": 9})

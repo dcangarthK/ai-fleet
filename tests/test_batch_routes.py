@@ -166,6 +166,38 @@ class FixRound3(unittest.TestCase):
             self.assertFalse(controller._batch_review_slot_full(p, "codex"))
 
 
+class AdoptAfterCrash(unittest.TestCase):
+    def _task(self, tid, **kw):
+        controller.init_db()
+        now = time.time()
+        row = {"id": tid, "title": "T", "kind": "build", "agent": "codex", "repo": "/adopt", "state": "done",
+               "created_at": now, "updated_at": now, "node_id": "n1"} | kw
+        with controller.db() as c:
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(tasks)")]
+            have = {k: v for k, v in row.items() if k in cols}
+            c.execute(f"INSERT INTO tasks ({','.join(have)}) VALUES ({','.join('?' * len(have))})", list(have.values()))
+        return now
+
+    def test_adopt_task_finds_unrecorded_task_only_after_marker(self):
+        before = time.time() - 100
+        self._task("t-old", created_at=before, title="adopt-me")
+        now = self._task("t-new", title="adopt-me")
+        self.assertEqual(controller._adopt_task(now - 1, title="adopt-me", kind="build", repo="/adopt"), "t-new")
+        self.assertIsNone(controller._adopt_task(now + 50, title="adopt-me", kind="build", repo="/adopt"))
+
+    def test_spawn_build_adopts_instead_of_duplicating(self):
+        from unittest import mock
+        p = {"id": "p-adopt", "state": "building", "title": "adopt-build", "repo": "/adopt", "mode": "auto-edit",
+             "builder": {"agent": "codex"}, "budget": {}, "spec": "s"}
+        p["budget"]["spawning"] = {"build": time.time() - 5}  # marker saved, then the crash
+        self._task("t-orphan", title="adopt-build")
+        with mock.patch.object(controller, "save_pipeline"), \
+                mock.patch.object(controller.tasks, "create_task", side_effect=AssertionError("duplicate")):
+            asyncio.run(controller._pipeline_actions(p, [{"do": "spawn_build"}]))
+        self.assertEqual(p["build_task"], "t-orphan")
+        self.assertNotIn("build", p["budget"]["spawning"])
+
+
 class AutoApproveStatus(unittest.TestCase):
     def task(self, **kw):
         base = {"id": "t-x", "agent": "claude", "mode": "auto-edit", "auto_approvals": 0,

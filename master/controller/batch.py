@@ -113,6 +113,14 @@ def _policy(raw) -> dict:
         raise ValueError("limit_wait_max must be a number of seconds")
     if policy["model"] != "auto":
         raise ValueError("only model auto is supported")
+    if policy["final_review"] != DEFAULT_POLICY["final_review"]:
+        raise ValueError("final_review is fixed: codex, gpt-5.6-terra, high, once")
+    if policy["gate_bounces"] != GATE_BOUNCES or isinstance(policy["gate_bounces"], bool):
+        raise ValueError(f"gate_bounces is fixed at {GATE_BOUNCES} (the pipeline's own constant)")
+    conc = policy["concurrency"]
+    if (not isinstance(conc, dict) or not set(conc) <= {"codex", "claude"}
+            or any(not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in conc.values())):
+        raise ValueError("concurrency must map codex and claude to integers of at least 1")
     return policy
 
 

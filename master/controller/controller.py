@@ -1845,6 +1845,26 @@ def _batch_review_slot_full(p: dict, agent: str) -> bool:
     return used >= b["policy"]["concurrency"].get(agent, 1)
 
 
+def _adopt_task(since: float, **where) -> str | None:
+    """Crash repair: a task of this stage created after the `spawning` marker was saved is the one a crash left
+    unrecorded. Adopt it instead of creating a duplicate. Matches on column values only."""
+    clause = " AND ".join(f"{k}=?" if v is not None else f"{k} IS NULL" for k, v in where.items())
+    args = [v for v in where.values() if v is not None]
+    with db() as c:
+        row = c.execute(f"SELECT id FROM tasks WHERE created_at>=? AND {clause} ORDER BY created_at LIMIT 1",
+                        (since, *args)).fetchone()
+    return row["id"] if row else None
+
+
+def _spawn_marker(p: dict, key: str) -> float:
+    """The time the first attempt at this stage started; saved before the task is created so a retry can adopt."""
+    marks = p.setdefault("budget", {}).setdefault("spawning", {})
+    if key not in marks:
+        marks[key] = time.time()
+        save_pipeline(p)
+    return marks[key]
+
+
 async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
     """One paid review task: kind, delta, caps and hints per the budget rules."""
     reviewer = p["reviewers"][index]
@@ -1925,7 +1945,14 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
         tree = await _runner_tree(build)
         if tree:
             trees[str(p["round"])] = tree
-    save_pipeline(p)
+    mark_key = f"review:{p['round']}:{index}"
+    since = _spawn_marker(p, mark_key)  # saves the pipeline
+    adopted = _adopt_task(since, parent_id=p["build_task"], link="review", review_of=p["build_task"])
+    if adopted and not p["reviews"][str(index)].get("task_id"):
+        p["reviews"][str(index)]["task_id"] = adopted
+        p["budget"]["spawning"].pop(mark_key, None)
+        save_pipeline(p)
+        return p
     try:
         review_task = await tasks.create_task(tasks.TaskIn(
             agent=reviewer["agent"], model=reviewer.get("model"),
@@ -1944,6 +1971,7 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
         if review_task["agent"] == "codex" and p["round"] not in codex_rounds:
             codex_rounds.append(p["round"])
         p["reviews"][str(index)]["task_id"] = review_task["id"]
+        p["budget"].get("spawning", {}).pop(mark_key, None)
         if review_task.get("split"):
             p["reviews"][str(index)]["task_ids"] = review_task["split"]
         save_pipeline(p)
@@ -1989,12 +2017,20 @@ async def _pipeline_actions(p: dict, actions: list[dict]) -> dict:
         if p["state"] in pipeline_machine.TERMINAL:
             break
         if action["do"] == "spawn_build":
+            since = _spawn_marker(p, "build")
+            adopted = _adopt_task(since, title=p["title"], kind="build", repo=p.get("repo"), parent_id=None)
+            if adopted:
+                p["build_task"] = adopted
+                p["budget"]["spawning"].pop("build", None)
+                save_pipeline(p)
+                continue
             task = await tasks.create_task(tasks.TaskIn(
                 agent=p["builder"]["agent"], model=p["builder"].get("model"), prompt=p["spec"], title=p["title"], mode=p["mode"],
                 repo=p.get("repo"), gate=p.get("gate"), node=p["builder"].get("node"), worktree=True,
                 trusted_bypass=bool(p.get("bypass")), kind="build", effort=p["builder"].get("effort"),
             ))
             p["build_task"] = task["id"]
+            p["budget"]["spawning"].pop("build", None)
             save_pipeline(p)
         elif action["do"] == "message_build":
             await _message_build(p, action["text"])

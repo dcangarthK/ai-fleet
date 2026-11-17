@@ -59,9 +59,10 @@ including the prompt echo, policy, placement and gate argv. Tool-result bytes ac
 | fleet_status | 10 KB | 32 KB |
 
 That is about 600 KB, roughly 150k tokens, of which perhaps 1% was used. A result stays in context until compaction,
-so it is re-read on every later turn. At around 100 later turns, that comes to roughly 10M cache reads per chat,
-about half of each chat's total. The trimming already applied to `wait_tasks` and `task_status`
-(SPEC-token-budget 3.11) was never applied to these lifecycle tools.
+so it is re-read on every later turn; compaction caps how long, so the true cost is a few million cache reads per
+chat, not the whole. Correction after review: `spawn_task` is already trimmed in code (`master/mcp/server.py`
+`_trim_on`), but the MCP server running that night predated the change, so it was not live. The remaining gap is
+`complete_task`, `cleanup_task` and `cancel_task`, which still return raw rows, plus restarting the MCP server.
 
 ### 2.3 Browser screenshots in the orchestrator
 
@@ -74,10 +75,10 @@ Failed, cancelled and capped tasks used **7.1M** cache reads and cost **$4.35**:
 
 - t-596eae55: cancelled after 3.5M
 - t-e2c61590: failed after 2.0M
-- t-bbee3b06: failed
-- t-7a72dbf3: hit its cap
-- t-a724a961: rejected
-- t-70fc7b86: cancelled
+- t-bbee3b06: failed after 0.8M
+- t-a724a961: rejected after 0.4M
+- t-7a72dbf3: hit its cap after 0.3M
+- t-70fc7b86: cancelled after 0.1M
 
 Most were cancelled for a reroute or a re-scope after the run had already started. Three Codex builds were cancelled
 while still waiting for a Codex slot. Those cost no worker tokens but added orchestrator turns.
@@ -106,7 +107,7 @@ and `modelUsage` reports Fable separately. One trial on a trivial prompt:
 | Fable (advisor) | 50.3k **uncached** input + 293 output | **$0.41** |
 
 The advisor receives the whole transcript at full input price on every call. On a build with 150k of context, one
-call costs about $1.20 of Fable. Advisor mode therefore pays only when the context is still small and the advice
+call costs about $1.20 of Fable (extrapolated from one trial, not measured). Advisor mode therefore pays only when the context is still small and the advice
 changes the outcome.
 
 Use it for:
@@ -124,29 +125,30 @@ measured per task. Section 4 #4 adds that measurement.
 
 **1. Widen `BASH_RULES`.**
 
-- Pre-approve read-only shell commands: `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `sed -n`, `diff`,
-  `pwd`, `echo`, `test`.
-- Pre-approve `npm ci`, `npm run`, `npx tsc` and `npx vite`.
-- Tell workers in the worker instructions not to prefix commands with `cd … &&`.
+- Pre-approve read-only shell commands: `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `sed -n` (never `sed:*`),
+  `diff`, `pwd`. Not `echo`, `test` or `find` (workers use Glob instead).
+- Pre-approve only `npm ci --ignore-scripts` and `npm run build`, never `npm run:*` (arbitrary scripts).
+- Tell workers in the worker instructions that their cwd is already the worktree, so no `cd … &&` prefix.
+- Re-running the denied command inside the same resume is deferred.
 - Re-embed the runner.
 - Where: `nodes/worker/profile.py`, plus the `nodes/runner.py` re-embed.
 - Expected saving: about 8.6M cache reads per batch, and 30 block-and-resume cycles.
 
 **2. Trim the lifecycle MCP results.**
 
-- `spawn_task`, `complete_task`, `cleanup_task` and `cancel_task` return only `{id, state, branch, account, model, error}`,
-  unless called with `full=True`.
+- `complete_task`, `cleanup_task` and `cancel_task` reuse `spawn_task`'s key set and `_trim_on`, unless called with
+  `full=True`. Errors pass through untrimmed (tested). Then restart the MCP server so `spawn_task`'s trim goes live.
 - Where: `master/mcp/server.py`.
-- Expected saving: about 150k tokens of results per chat, and about 10M cache reads per long chat.
+- Expected saving: roughly 100k tokens of results per chat, a few million cache reads per long chat.
 
 **3. Enforce draft routing.**
 
-- An explicit Sonnet or Opus model on `kind=draft` or `summary` is downgraded to Haiku, unless `budget_override` is
-  set. Admission records `routed_from`.
+- An explicit Sonnet or Opus model on `kind=draft` is downgraded to Haiku (`summary` is not a budget kind), unless
+  `budget_override` is set, which stays an admin-only field. Admission records `routed_from`.
 - Where: `master/controller/budget.py` or `intel.py`.
 - Expected saving: about $4.5 per UI batch.
 
-**4. Support advisor mode in the runner and record its usage.**
+**4. Support advisor mode in the runner and record its usage (last, behind a flag).**
 
 - A job field `advisor` (a model id) adds `--advisor` to the run.
 - The advisor's usage is recorded from `modelUsage` as a second `agent_usage` row with model `claude-fable-5-2`.

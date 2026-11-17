@@ -82,6 +82,57 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.c.get("/api/batches/b-nope", headers=W).status_code, 404)
 
 
+class FixRoundController(unittest.TestCase):
+    """Controller-side fix round: idempotent start by tag (AC12) and the final-review spawn."""
+
+    def _batch(self):
+        b = controller.batch_machine.new_batch({"items": [item("a")]})
+        b["id"] = "b-fix"
+        it = b["items"][0]
+        it["build"] = {"agent": "codex", "model": "gpt-5.6-terra", "effort": "medium"}
+        it["review"] = {"agent": "claude", "model": "claude-fable-5-2", "effort": "medium"}
+        return b, it
+
+    def test_start_item_adopts_tagged_pipeline(self):
+        from unittest import mock
+        b, it = self._batch()
+        with mock.patch.object(controller, "_batch_pipeline_by_tag", return_value="p-old"), \
+                mock.patch.object(controller, "create_pipeline", side_effect=AssertionError("duplicate")):
+            asyncio.run(controller._batch_start_item(b, it))
+        self.assertEqual(it["pipeline_id"], "p-old")
+
+    def test_spawn_final_is_read_only_worktree_and_adopts_existing(self):
+        from unittest import mock
+        b, it = self._batch()
+        it.update(state="ready", pipeline_id="p1", branch="fleet/t-1")
+        b["final"] = {"state": "spawned", "ids": ["a"], "agent": "codex", "model": "gpt-5.6-terra", "effort": "high"}
+        action = dict(b["final"], do="spawn_final_review")
+        made = {}
+
+        async def fake_create(t):
+            made["t"] = t
+            return {"id": "t-final"}
+
+        async def fake_diff(_id):
+            return {"diff": "d" * 100_000}
+
+        with mock.patch.object(controller.tasks, "create_task", fake_create), \
+                mock.patch.object(controller.tasks, "task_diff", fake_diff), \
+                mock.patch.object(controller, "get_pipeline", return_value={"build_task": "t-b"}), \
+                mock.patch.object(controller, "_find_final_task", return_value=None):
+            asyncio.run(controller._batch_spawn_final(b, action))
+        t = made["t"]
+        self.assertEqual((t.mode, t.worktree, t.kind, t.effort), ("read-only", True, "final_review", "high"))
+        self.assertLess(len(t.prompt), controller.FINAL_REVIEW_MAX_CHARS + 2000)
+        self.assertIn("git diff main...fleet/t-1", t.prompt)
+        self.assertEqual(b["final"]["task_id"], "t-final")
+        b["final"].pop("task_id")
+        with mock.patch.object(controller.tasks, "create_task", side_effect=AssertionError("duplicate")), \
+                mock.patch.object(controller, "_find_final_task", return_value="t-final"):
+            asyncio.run(controller._batch_spawn_final(b, action))
+        self.assertEqual(b["final"]["task_id"], "t-final")
+
+
 class AutoApproveStatus(unittest.TestCase):
     def task(self, **kw):
         base = {"id": "t-x", "agent": "claude", "mode": "auto-edit", "auto_approvals": 0,

@@ -3545,6 +3545,29 @@ class JobManager:
             tools = [item for item in tools if item in names]
         return tools or None
 
+    @staticmethod
+    def _git_writable_roots(job, mode, sandbox):
+        """Codex workspace-write: a linked worktree's git dir (<repo>/.git/worktrees/<id>) lives outside the cwd, so
+        `git commit` fails creating index.lock there. Add that dir and the common dir as writable roots. Never for
+        read-only, full (no sandbox) or when cwd is not a git checkout. UNVERIFIED against `codex exec --help`."""
+        if sandbox != "workspace-write" or mode == "full" or not job.get("cwd"):
+            return []
+        roots = []
+        for opt in ("--absolute-git-dir", "--git-common-dir"):
+            try:
+                done = subprocess.run(["git", "-C", job["cwd"], "rev-parse", opt], capture_output=True, text=True,
+                                      timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            path = done.stdout.strip() if done.returncode == 0 else ""
+            if path:
+                path = str((Path(job["cwd"]) / path).resolve())  # --git-common-dir may be relative to cwd
+                if path not in roots:
+                    roots.append(path)
+        if not roots:
+            return []
+        return ["-c", "sandbox_workspace_write.writable_roots=[%s]" % ",".join(json.dumps(r) for r in roots)]
+
     def _command(self, job, prompt, allowed_tools, resume):
         agent = job["agent"]
         mode = job["mode"]
@@ -3618,6 +3641,7 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                cmd += self._git_writable_roots(job, mode, sandbox)
                 if job.get("effort"):
                     cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd += [job["session_id"], "-"]  # "-": prompt from stdin
@@ -3631,6 +3655,7 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                cmd += self._git_writable_roots(job, mode, sandbox)
                 if job.get("effort"):
                     cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd.append("-")  # "-": prompt from stdin

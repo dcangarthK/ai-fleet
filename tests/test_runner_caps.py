@@ -229,6 +229,46 @@ class Launch(Base):
             os.environ["FLEET_LEAN_PROFILE"] = self.saved
         super().tearDown()
 
+    def codex_git_roots(self, mode, resume=False):
+        """A real linked worktree, so --absolute-git-dir sits under <repo>/.git/worktrees/."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo, wt = Path(tmp.name).resolve() / "repo", Path(tmp.name).resolve() / "wt"
+        repo.mkdir()
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"],
+                     ["worktree", "add", "-q", "-b", "b", str(wt)]):
+            subprocess.run(["git", "-C", str(repo)] + args, check=True, env=env, capture_output=True)
+        cmd = self.m._command(self.job(agent="codex", mode=mode, cwd=str(wt)), "p", [], resume)
+        flagged = [c for c in cmd if c.startswith("sandbox_workspace_write.writable_roots=")]
+        return cmd, flagged, repo, wt
+
+    def test_codex_workspace_write_gets_worktree_git_dir_writable(self):
+        for resume in (False, True):
+            cmd, flagged, repo, wt = self.codex_git_roots("auto-edit", resume)
+            self.assertEqual(len(flagged), 1)
+            self.assertIn(json.dumps(str(repo / ".git" / "worktrees" / "wt")), flagged[0])
+            self.assertIn(json.dumps(str(repo / ".git")), flagged[0])
+
+    def test_codex_read_only_and_supervised_get_no_writable_roots(self):
+        for mode in ("read-only", "supervised"):
+            cmd, flagged, _, _ = self.codex_git_roots(mode)
+            self.assertEqual(flagged, [])
+
+    def test_bash_rules_have_local_git_and_runners_but_no_push_or_rm(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "nodes"))
+        from worker import profile
+        rules = set(profile.BASH_RULES)
+        for r in ("git status", "git diff", "git log", "git add", "git commit", "python3 -m unittest",
+                  "scripts/gate.sh", "npx vitest"):
+            self.assertTrue(any(x.startswith("Bash(" + r) for x in rules), r)
+        self.assertIn("Bash(npm test)", rules)
+        for x in rules:
+            self.assertNotIn("push", x)
+            self.assertFalse(x.startswith("Bash(rm"), x)
+        self.assertNotIn("Bash(git:*)", rules)
+
     def test_lean_flags_per_kind(self):
         os.environ.pop("FLEET_LEAN_PROFILE", None)
         expect = {"build": "build", "fix": "fix", "review": "review", "re_review": "review",
@@ -264,7 +304,8 @@ class Launch(Base):
     def test_settings_allow_lets_build_and_test_run_python_and_git_scoped(self):
         build = self.settings_allow(kind="build")
         self.assertIn("Bash(python3:*)", build)
-        self.assertIn("Bash(git:*)", build)
+        self.assertIn("Bash(git commit:*)", build)
+        self.assertNotIn("Bash(git:*)", build)
         self.assertNotIn("Bash", build)  # H1: no plain Bash
         self.assertEqual(self.settings_allow(kind="test"), SCOPED_BASH.split(","))
         self.assertEqual(self.settings_allow(kind="review"), ["Read", "Grep", "Glob"])
@@ -291,9 +332,8 @@ class Launch(Base):
         self.assertNotIn("Bash", allow)  # N1
         allow = self.m._command(self.job(agent="claude", mode="auto-edit", policy={"tools": {"claude_allow": ["Bash"]}}),
                                 "p", [], False)  # no kind: the old launch, policy list only
-        self.assertEqual(flag(allow, "--allowedTools"), "Bash(python3:*),Bash(git:*),Bash(uv run:*),"
-                         "Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*)"
-                         ",Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)")
+        self.assertEqual(flag(allow, "--allowedTools"), NEW_HEAD +
+                         "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)")
 
     def test_mode_filter_applies_to_explicit_tool_lists(self):
         self.assertEqual(self.settings_allow(kind="re_review", mode="read-only", tools=["Read", "Bash", "Edit"]),
@@ -361,8 +401,8 @@ class Launch(Base):
                 os.environ["FLEET_TOKEN_CAPS"] = saved
 
 
-SCOPED_BASH = "Bash(python3:*),Bash(git:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*)," \
-              "Bash(npx vitest:*),Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*)," \
+NEW_HEAD = "Bash(python3:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*),Bash(python3 -m unittest:*),Bash(npm test),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),"
+SCOPED_BASH = NEW_HEAD + "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*)," \
               "Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)"
 SCOPED_BUILD = "Read,Edit,Write," + SCOPED_BASH + ",Grep,Glob"
 

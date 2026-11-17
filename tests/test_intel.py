@@ -151,12 +151,13 @@ class EstimateTests(unittest.TestCase):
 
     def test_6_same_kind_median(self):  # criterion 6
         r = intel.estimate("build", SONNET, self.HIST)
-        self.assertEqual(r["tokens"], 400)  # median of 200, 500, 400
+        self.assertEqual(r["tokens"], 300)  # median of 150, 400, 300 (input+output only)
+        self.assertEqual(r["cached_tokens"], 100)
         self.assertEqual(r["usd"], 2.0)
         self.assertEqual(r["samples"], 3)
 
     def test_6_prompt_bytes_add_quarter_tokens(self):
-        self.assertEqual(intel.estimate("build", SONNET, self.HIST, prompt_bytes=400)["tokens"], 500)
+        self.assertEqual(intel.estimate("build", SONNET, self.HIST, prompt_bytes=400)["tokens"], 400)
 
     def test_6_falls_back_to_model_then_default(self):
         self.assertEqual(intel.estimate("fix", SONNET, self.HIST)["basis"], "model")
@@ -165,10 +166,16 @@ class EstimateTests(unittest.TestCase):
         self.assertIsNone(r["usd"])
         self.assertGreater(r["tokens"], 0)
 
+    def test_6_tokens_exclude_cache_reads(self):
+        hist = [row("build", SONNET, 100, 50, 5_000_000, 1.0), row("build", SONNET, 120, 80, 9_000_000, 2.0)]
+        r = intel.estimate("build", SONNET, hist)
+        self.assertEqual(r["tokens"], 175)
+        self.assertEqual(r["cached_tokens"], 7_000_000)
+
     def test_6_codex_usd_always_none(self):
         r = intel.estimate("final_review", "codex", self.HIST)
         self.assertIsNone(r["usd"])
-        self.assertEqual(r["tokens"], 2000)
+        self.assertEqual(r["tokens"], 1500)
 
 
 class ForecastTests(unittest.TestCase):

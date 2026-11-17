@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { post, type Mode, type Task } from "../lib/api";
 import { useFleet, useRun } from "../lib/data";
 import { ErrorBanner } from "./bits";
+import { SpawnPreview } from "./work/SpawnPreview";
 
 type Agent = "codex" | "claude" | "ollama";
 
@@ -91,6 +92,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
             <datalist id="gate-profiles">{profiles.map((p) => <option key={p}>{p}</option>)}</datalist>
           </label>
         </div>
+        {agent !== "ollama" && <SpawnPreview kind="build" agent={agent} />}
         <label className="field">What should the agent do?
           <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} required />
         </label>

@@ -5,6 +5,7 @@ import { get, post, type Pipeline, type PipelineState } from "../lib/api";
 import { useCan, useFleet, useRun } from "../lib/data";
 import { ago, trustReason, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import { useConfirm } from "../components/ui";
 
 const STATE: Record<PipelineState, { tone: string; label: string }> = {
   building: { tone: "accent", label: "Building" },
@@ -64,6 +65,7 @@ export function PipelinesPage() {
 }
 
 function PipelineDetail({ p }: { p: Pipeline }) {
+  const confirm = useConfirm();
   const { run, busy, error, clearError } = useRun();
   const can = useCan();
   const active = can.operate && ["building", "reviewing", "resolving"].includes(p.state);
@@ -132,7 +134,7 @@ function PipelineDetail({ p }: { p: Pipeline }) {
         )}
         {active && (
           <div className="row" style={{ marginTop: 10 }}>
-            <button className="danger" disabled={busy} onClick={() => confirm("Cancel this pipeline? Its tasks are cancelled; branches are kept.") && run(() => post(`/api/pipelines/${p.id}/cancel`))}>Cancel pipeline</button>
+            <button className="danger" disabled={busy} onClick={async () => (await confirm({ title: "Cancel this pipeline?", message: "Its tasks are cancelled; branches are kept.", confirmLabel: "Cancel pipeline", cancelLabel: "Keep running", danger: true })) && run(() => post(`/api/pipelines/${p.id}/cancel`))}>Cancel pipeline</button>
           </div>
         )}
       </div>

@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet console - C2 Now with intelligence layer mock</title>
+<style>
+:root{
+  --bg:#fafaf8;--surface:#fff;--sunken:#f2f2ee;--line:#e3e3dc;--line-strong:#c9c9c0;
+  --ink:#1b1d1f;--ink-2:#46494d;--ink-3:#5f6368;
+  --accent:#1459b3;--accent-ink:#fff;--accent-soft:#e6eef9;
+  --ok:#17663a;--ok-soft:#e4f2e9;--warn:#8a5300;--warn-soft:#faf0dc;--bad:#b3261e;--bad-soft:#fbe9e7;
+  --focus:#1459b3;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --r:6px;
+}
+[data-theme=dark]{
+  --bg:#141517;--surface:#1b1d20;--sunken:#101113;--line:#2b2e32;--line-strong:#42464c;
+  --ink:#ececea;--ink-2:#b8bbbf;--ink-3:#9a9ea4;
+  --accent:#6ea8f0;--accent-ink:#0b1626;--accent-soft:#1c2a3f;
+  --ok:#5fcf8b;--ok-soft:#17291f;--warn:#e6b052;--warn-soft:#2e2412;--bad:#ff8a80;--bad-soft:#331a18;
+  --focus:#8dbcf5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--accent)}
+h1,h2,h3,p{margin:0}
+h1{font-size:26px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:650}
+h3{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.sub{color:var(--ink-2)}
+.muted{color:var(--ink-3)}
+
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.rail{border-right:1px solid var(--line);background:var(--surface);padding:var(--s4) var(--s3);display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;padding:0 var(--s2)}
+.brand i{width:12px;height:12px;background:var(--accent);border-radius:3px;display:block}
+.rail h3{padding:0 var(--s2);margin-bottom:var(--s1)}
+.rail button.nav{all:unset;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px var(--s2);border-radius:var(--r);color:var(--ink-2);cursor:pointer}
+.rail button.nav:hover{background:var(--sunken);color:var(--ink)}
+.rail button.nav[aria-current=page]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.rail button.nav:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.badge{font-size:11px;min-width:20px;text-align:center;padding:0 6px;border-radius:10px;background:var(--bad);color:#fff;font-weight:600}
+[data-theme=dark] .badge{color:#2a0b08}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--s2);padding:0 var(--s2)}
+.rail .kbd-row{display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+
+.main{min-width:0}
+.top{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s6);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:2}
+.crumbs{color:var(--ink-3);font-size:13px;flex:1}
+.crumbs b{color:var(--ink);font-weight:600}
+.cmdk{display:flex;align-items:center;gap:var(--s3);min-width:320px;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:var(--r);background:var(--bg);color:var(--ink-3);text-align:left}
+.cmdk span:first-child{flex:1}
+kbd{font:12px var(--mono);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink-2);background:var(--surface)}
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:6px var(--s3);font-weight:550}
+.btn:hover{background:var(--sunken)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:3px var(--s2);font-size:13px}
+.page{padding:var(--s6) var(--s6) var(--s7);max-width:1360px}
+.view{display:none}.view.on{display:block}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s6)}
+.head .sub{margin-top:var(--s1);max-width:62ch}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.card .body{padding:var(--s4) var(--s5)}
+.stack{display:flex;flex-direction:column;gap:var(--s5)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:var(--s5)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-soft)}
+.p-warn{color:var(--warn);background:var(--warn-soft)}
+.p-bad{color:var(--bad);background:var(--bad-soft)}
+.p-run{color:var(--accent);background:var(--accent-soft)}
+.p-idle{color:var(--ink-3);background:var(--sunken)}
+table{width:100%;border-collapse:collapse}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);text-align:left;font-weight:650;padding:var(--s2) var(--s5);border-bottom:1px solid var(--line)}
+td{padding:var(--s3) var(--s5);border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunken)}
+td.n,th.n{text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar.warn i{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--s2) var(--s4)}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0;text-align:right}
+.inbox{list-style:none;margin:0;padding:0}
+.inbox li{display:grid;grid-template-columns:72px 1fr auto;gap:var(--s4);align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.inbox li:last-child{border-bottom:0}
+.inbox .t{font-weight:600}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .v{font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.01em}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--ink-3)}
+.empty b{display:block;color:var(--ink);font-size:15px;margin-bottom:var(--s1)}
+.err{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--bad);background:var(--bad-soft);border-radius:var(--r);color:var(--ink)}
+.err b{color:var(--bad)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--line);padding:0 var(--s5)}
+.tabs button{all:unset;padding:var(--s3) 0;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+
+.chain{display:grid;grid-template-columns:repeat(7,1fr);padding:var(--s5)}
+.stg{position:relative;padding-right:var(--s2)}
+.stg::before{content:"";position:absolute;top:11px;left:28px;right:4px;height:2px;background:var(--line-strong)}
+.stg:last-child::before{display:none}
+.stg.done::before{background:var(--ok)}
+.dot{position:relative;width:24px;height:24px;border-radius:50%;border:2px solid var(--line-strong);background:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink-3)}
+.stg.done .dot{border-color:var(--ok);background:var(--ok);color:#fff}
+[data-theme=dark] .stg.done .dot{color:#0c2015}
+.stg.now .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.stg.bad .dot{border-color:var(--bad);background:var(--bad);color:#fff}
+[data-theme=dark] .stg.bad .dot{color:#2a0b08}
+.stg.plan .dot{border-style:dashed}
+.stg .nm{margin-top:var(--s2);font-weight:650}
+.stg .md{font-size:12px;color:var(--ink-2);line-height:1.4;word-break:break-all}
+.stg .ac{font-size:12px;color:var(--ink-3)}
+.stg .at{font-size:12px;margin-top:2px;color:var(--ink-2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.actions .sp{flex:1}
+.msg{flex:1;min-width:200px;border:1px solid var(--line-strong);border-radius:var(--r);padding:6px var(--s3);background:var(--surface);color:var(--ink);font:inherit}
+.msg::placeholder{color:var(--ink-3)}
+pre.log,pre.diff{margin:0;padding:var(--s3) var(--s5);font:12.5px/1.6 var(--mono);overflow:auto;background:var(--sunken)}
+.log .t{color:var(--ink-3)}.log .w{color:var(--warn)}
+.diff span{display:block}
+.diff .a{color:var(--ok);background:var(--ok-soft)}
+.diff .d{color:var(--bad);background:var(--bad-soft)}
+.diff .h{color:var(--ink-3)}
+.files{list-style:none;margin:0;padding:var(--s2) 0;font:12.5px var(--mono)}
+.files li{display:flex;justify-content:space-between;gap:var(--s2);padding:3px var(--s4)}
+.files li.sel{background:var(--accent-soft);color:var(--accent)}
+.find{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{font:700 11px var(--mono);padding:1px 6px;border-radius:4px;height:fit-content;margin-top:2px;text-align:center}
+.s-h{background:var(--bad);color:#fff}
+[data-theme=dark] .s-h{color:#2a0b08}
+.s-m{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn)}
+.s-l{background:var(--sunken);color:var(--ink-2);border:1px solid var(--line-strong)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s5);align-items:start}
+.ctx{display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:76px}
+.ctx .card .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sw{display:flex;gap:var(--s2);align-items:center;color:var(--ink-2);font-size:13px}
+.sw input{accent-color:var(--accent)}
+.wiz{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);padding:var(--s4) var(--s5)}
+.wiz div{border-top:3px solid var(--line-strong);padding-top:var(--s2);color:var(--ink-3);font-size:13px}
+.wiz div.on{border-color:var(--accent)}
+.wiz b{display:block;color:var(--ink)}
+.cmd{display:block;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px var(--mono);overflow-x:auto;white-space:nowrap}
+@media(max-width:1100px){.split,.grid2{grid-template-columns:1fr}.ctx{position:static}.chain{grid-template-columns:repeat(4,1fr);row-gap:var(--s5)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.rail{position:static;height:auto}.page{padding:var(--s4)}.cmdk{min-width:0}}
+/* ---- C2 extensions: intelligence layer ---- */
+.brief p{font-size:15px;line-height:1.65;max-width:80ch}
+.ev{font:11.5px var(--mono);color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+.prov{display:flex;gap:var(--s4);flex-wrap:wrap;align-items:center;color:var(--ink-3);font-size:12px;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.prov .sp{flex:1}
+.conf{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.conf .bar{width:44px;height:5px}
+.conf.low .bar i{background:var(--warn)}
+.acts{list-style:none;margin:0;padding:0}
+.acts>li{display:grid;grid-template-columns:28px 1fr auto;gap:var(--s4);align-items:start;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.acts>li:last-child{border-bottom:0}
+.rank{font:700 12px var(--mono);width:24px;height:24px;border:1px solid var(--line-strong);border-radius:50%;display:grid;place-items:center;color:var(--ink-2);margin-top:2px}
+.acts .t{font-weight:600}
+.meta{display:flex;gap:var(--s4);flex-wrap:wrap;margin-top:var(--s1);font-size:12.5px;color:var(--ink-2)}
+details.why{margin-top:var(--s1)}
+details.why>summary{cursor:pointer;color:var(--accent);font-size:12.5px;font-weight:600;list-style:none;display:inline-block}
+details.why>summary::-webkit-details-marker{display:none}
+details.why>summary::after{content:" +"}
+details.why[open]>summary::after{content:" -"}
+.whybox{margin-top:var(--s2);padding:var(--s2) var(--s3);border-left:3px solid var(--accent);background:var(--sunken);font-size:13px;color:var(--ink-2);max-width:74ch}
+.confirm{grid-column:2/-1;display:none;padding:var(--s3) var(--s4);border:1px solid var(--accent);background:var(--accent-soft);border-radius:var(--r)}
+.confirm.on{display:block}
+.confirm .row{display:flex;gap:var(--s2);margin-top:var(--s2);align-items:center}
+.fcs{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--s4)}
+.fc{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:var(--s4);display:flex;flex-direction:column;gap:var(--s2);min-width:0}
+.fc .big{font-size:20px;font-weight:650;line-height:1.2}
+.fc .nm{font-weight:600;word-break:break-all}
+.skel{display:block;height:12px;border-radius:3px;background:var(--line);margin:6px 0}
+.skel.w6{width:60%}.skel.w8{width:80%}.skel.big{height:22px;width:50%}
+@keyframes pulse{50%{opacity:.45}}
+.skel{animation:pulse 1.2s ease-in-out infinite}
+@media(prefers-reduced-motion:reduce){.skel{animation:none}}
+.ldonly{display:none}.loading .ldonly{display:block}.loading .real{display:none}
+.an{list-style:none;margin:0;padding:0}
+.an li{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.an li:last-child{border-bottom:0}
+.scrim{position:fixed;inset:0;background:rgba(10,12,14,.5);display:none;z-index:20}
+.scrim.on{display:block}
+.pal{position:fixed;left:50%;top:64px;transform:translateX(-50%);width:min(780px,calc(100vw - 32px));max-height:calc(100vh - 128px);overflow:auto;background:var(--surface);border:1px solid var(--line-strong);border-radius:10px;z-index:21;display:none}
+.pal.on{display:block}
+.pin{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.pin input{all:unset;flex:1;font-size:16px;color:var(--ink)}
+.pin input:focus-visible{outline:2px solid var(--focus);outline-offset:4px}
+.pal .sec{padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.pal .sec>h3{margin-bottom:var(--s2)}
+.chip{font:12px var(--mono);padding:1px 8px;border:1px solid var(--line-strong);border-radius:4px;background:var(--sunken);color:var(--ink-2)}
+.chip.amb{border-color:var(--warn);background:var(--warn-soft);color:var(--warn)}
+.chips{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+.pkv{display:grid;grid-template-columns:120px 1fr;gap:6px var(--s4);margin:0}
+.pkv dt{color:var(--ink-3)}.pkv dd{margin:0}
+.warnbox{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--warn);background:var(--warn-soft);border-radius:var(--r);margin-top:var(--s3)}
+.warnbox b{color:var(--warn)}
+.res{list-style:none;margin:0;padding:0}
+.res li{display:grid;grid-template-columns:76px 1fr auto;gap:var(--s3);align-items:center;padding:var(--s2);border-radius:var(--r)}
+.res li:hover{background:var(--sunken)}
+.res .k{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);font-weight:650}
+.pfoot{display:flex;gap:var(--s4);padding:var(--s3) var(--s5);color:var(--ink-3);font-size:12px;align-items:center}
+.pfoot .sp{flex:1}
+.opt{display:grid;grid-template-columns:20px 1fr auto;gap:var(--s3);align-items:start;padding:var(--s3) var(--s4);border:1px solid var(--line);border-radius:var(--r);cursor:pointer;margin-bottom:var(--s2)}
+.opt:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.opt input{accent-color:var(--accent);margin-top:4px}
+.demo{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:30;display:flex;gap:var(--s2);align-items:center;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);font-size:13px}
+.demo button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.cl{display:none}.cl.on{display:block}
+@media(max-width:1100px){.fcs{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.fcs{grid-template-columns:1fr}.acts>li{grid-template-columns:28px 1fr}.acts>li>.btn{grid-column:2}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand"><i></i>Fleet console</div>
+  <div>
+    <h3>Operate</h3>
+    <button class="nav" data-go="now" aria-current="page">Now <span class="badge" aria-label="3 need attention">3</span></button>
+    <button class="nav" data-go="work">Work <span class="muted">14</span></button>
+    <button class="nav" data-go="plan">Plan</button>
+  </div>
+  <div>
+    <h3>Spend</h3>
+    <button class="nav" data-go="budget">Budget</button>
+  </div>
+  <div>
+    <h3>Fleet</h3>
+    <button class="nav" data-go="nodes">Nodes <span class="muted">3</span></button>
+    <button class="nav" data-go="models">Models</button>
+    <button class="nav" data-go="roles">Roles</button>
+  </div>
+  <div>
+    <h3>Configure</h3>
+    <button class="nav" data-go="cfg1">Policies</button>
+    <button class="nav" data-go="cfg2">Skills</button>
+    <button class="nav" data-go="cfg3">Evals runs</button>
+    <button class="nav" data-go="cfg4">Activity</button>
+    <button class="nav" data-go="cfg5">Settings</button>
+  </div>
+  <div class="foot">
+    <div class="kbd-row"><span>Jump</span><span><kbd>g</kbd> <kbd>n</kbd> <kbd>g</kbd> <kbd>w</kbd> <kbd>g</kbd> <kbd>b</kbd></span></div>
+    <div class="kbd-row"><span>Help</span><kbd>?</kbd></div>
+    <button class="btn sm" id="theme" aria-pressed="false">Dark theme</button>
+    <div class="muted" style="font-size:12px">Signed in as owner (operate)</div>
+  </div>
+</nav>
+<div class="main">
+<div class="top">
+  <div class="crumbs" id="crumbs"><b>Now</b></div>
+  <button class="cmdk" id="open-k" aria-label="Open command palette"><span>Search pages, tasks, nodes, actions</span><kbd>⌘K</kbd></button>
+  <button class="btn primary">Spawn task</button>
+</div>
+<main class="page">
+
+<!-- VIEW 1: NOW -->
+<section class="view on" id="v-now" aria-labelledby="h-now" data-crumb="Now">
+  <div class="head">
+    <div><h1 id="h-now">Now</h1><p class="sub">Monday 16 November, 14:32. 5 tasks running, 3 items need you.</p></div>
+    <div class="stat" style="text-align:right"><span class="muted">Spend today</span><span class="v">$41.20</span></div>
+  </div>
+
+  <div class="stack" id="now-stack">
+
+    <div class="card brief" id="briefing">
+      <header><h2>Briefing</h2><span class="muted">Computed in your browser from controller data</span></header>
+      <div class="body">
+        <div class="real">
+          <p>3 items need you. <span class="mono">t-3f9a12c0</span> is blocked on a scope approval for <span class="mono">nodes/onboard.sh</span>, which the builder checklist requires <a class="ev" href="#">ev-4431</a>. Codex <span class="mono">gpt-5.6-terra</span> is at 83% of its weekly limit; at the current burn it hits the limit Tuesday 11:10, about 46 h before it resets Thursday 09:00 <a class="ev" href="#">ev-rl-codex</a>. The spare account is at 88% of its 5 h window and may limit around 14:48 <a class="ev" href="#">ev-rl-spare</a>. <span class="mono">laptop-0ir6d81o</span> has been offline for 3 h and 2 queued tasks are still pinned to it <a class="ev" href="#">ev-4402</a>.</p>
+        </div>
+        <div class="ldonly" aria-live="polite" role="status"><span class="sr" style="position:absolute;left:-9999px">Loading briefing</span><span class="skel"></span><span class="skel w8"></span><span class="skel w6"></span></div>
+      </div>
+      <div class="prov"><span>Sources: /api/live, /api/budget/status, /api/fleet</span><span>As of 14:32:07</span><span>No model called</span><span class="sp"></span><button class="btn sm" id="refresh">Refresh</button><button class="btn sm">Rewrite with local fast role</button></div>
+    </div>
+
+    <div class="card">
+      <header><h2>Next best actions</h2><span class="muted">Ranked by urgency and cost. Nothing runs until you confirm.</span></header>
+      <ul class="acts">
+        <li>
+          <span class="rank">1</span>
+          <div>
+            <div class="t">Approve <span class="mono">t-3f9a12c0</span> to edit <span class="mono">nodes/onboard.sh</span></div>
+            <div class="meta"><span>Expected cost: $0.00, unblocks a $0.58 fix round</span><span>Waiting 12 min</span><span class="conf"><span class="bar" role="img" aria-label="confidence 92 percent"><i style="width:92%"></i></span>Confidence 92%</span></div>
+            <details class="why"><summary>Why?</summary><div class="whybox">Builder checklist: a change to <span class="mono">nodes/runner.py</span> must re-embed it in <span class="mono">onboard.sh</span> and <span class="mono">onboard.ps1</span>, or <span class="mono">test_onboard</span> fails again (attempt a1 failed this way). The file is inside the task's scope. Rule <span class="mono">scope-ask-reembed</span>. Evidence: <a class="ev" href="#">ev-4431</a> <a class="ev" href="#">a1 gate log</a></div></details>
+          </div>
+          <button class="btn primary sm" data-confirm="c1">Approve</button>
+          <div class="confirm" id="c1" role="group" aria-label="Confirm approve"><b>Approve scope for t-3f9a12c0?</b> Allows edits to <span class="mono">nodes/onboard.sh</span> only. Recorded in Activity as owner.<div class="row"><button class="btn primary sm" data-do>Confirm approve</button><button class="btn sm" data-cancel>Cancel</button></div></div>
+        </li>
+        <li>
+          <span class="rank">2</span>
+          <div>
+            <div class="t">Hold new Codex jobs except final reviews</div>
+            <div class="meta"><span>Expected cost: saves about $6 of weekly budget</span><span>Applies now, until Thu 09:00</span><span class="conf low"><span class="bar" role="img" aria-label="confidence 78 percent"><i style="width:78%"></i></span>Confidence 78%</span></div>
+            <details class="why"><summary>Why?</summary><div class="whybox">Weekly usage 83%, burn 19.8 points/day over 4.2 days of samples. Limit projected Tue 11:10, before the Thu reset, so a final review on Wednesday would be refused. Budget rule v3 already keeps Codex to final and security reviews; the hold stops routine jobs that slip through. Evidence: <a class="ev" href="#">ev-rl-codex</a> <a class="ev" href="#">decisions v3</a></div></details>
+          </div>
+          <button class="btn sm" data-confirm="c2">Turn hold on</button>
+          <div class="confirm" id="c2" role="group" aria-label="Confirm hold"><b>Turn on budget hold?</b> New jobs on codex gpt-5.6-terra queue unless kind is final_review or security_review. Running jobs are not touched. Turn off any time in Budget.<div class="row"><button class="btn primary sm" data-do>Confirm hold</button><button class="btn sm" data-cancel>Cancel</button></div></div>
+        </li>
+        <li>
+          <span class="rank">3</span>
+          <div>
+            <div class="t">Re-run gate on <span class="mono">t-9c1e07b2</span> after <span class="mono">python3 nodes/build.py</span></div>
+            <div class="meta"><span>Expected cost: about $0.20 on claude-haiku-5-5 / fleet</span><span class="conf"><span class="bar" role="img" aria-label="confidence 94 percent"><i style="width:94%"></i></span>Confidence 94%</span></div>
+            <details class="why"><summary>Why?</summary><div class="whybox">Gate failed twice on <span class="mono">test_onboard</span> with the same diff signature: embedded runner not regenerated. A third failure would hit the 3-round cap and escalate to you. Evidence: <a class="ev" href="#">ev-4412</a> <a class="ev" href="#">ev-4419</a></div></details>
+          </div>
+          <button class="btn sm" data-confirm="c3">Spawn fix</button>
+          <div class="confirm" id="c3" role="group" aria-label="Confirm spawn"><b>Spawn 1 fix task?</b> kind=fix, parent <span class="mono">t-9c1e07b2</span>, claude-haiku-5-5 / fleet, mode auto-edit. The runner then runs the gate once.<div class="row"><button class="btn primary sm" data-do>Confirm spawn</button><button class="btn sm" data-cancel>Cancel</button></div></div>
+        </li>
+        <li>
+          <span class="rank">4</span>
+          <div>
+            <div class="t">Drain <span class="mono">laptop-0ir6d81o</span> and move its 2 queued tasks to master</div>
+            <div class="meta"><span>Expected cost: $0.00, master is 4 / 4 so both wait about 9 min</span><span class="conf low"><span class="bar" role="img" aria-label="confidence 65 percent"><i style="width:65%"></i></span>Confidence 65%</span></div>
+            <details class="why"><summary>Why?</summary><div class="whybox">Offline since 11:32, longer than the 2 h rule. Both queued tasks are pinned to it and cannot start. Lower confidence: the node has gone offline and returned twice this week, so it may come back by itself. Evidence: <a class="ev" href="#">ev-4402</a> <a class="ev" href="#">node history</a></div></details>
+          </div>
+          <button class="btn sm" data-confirm="c4">Drain node</button>
+          <div class="confirm" id="c4" role="group" aria-label="Confirm drain"><b>Drain laptop-0ir6d81o?</b> Moves <span class="mono">t-6e20b9d4</span> and <span class="mono">t-d1a84c37</span> to master. Undo by undraining; moved tasks are not moved back.<div class="row"><button class="btn primary sm" data-do>Confirm drain</button><button class="btn sm" data-cancel>Cancel</button></div></div>
+        </li>
+      </ul>
+    </div>
+
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:var(--s3)"><h2>Forecasts</h2><span class="muted">Time to limit at the current burn rate, from /api/tokens/summary and rate_limits</span></div>
+      <div class="fcs">
+        <div class="fc"><span class="nm mono">codex gpt-5.6-terra</span><span class="muted">fleet, weekly</span>
+          <div class="bar warn" role="img" aria-label="83 percent"><i style="width:83%"></i></div>
+          <span class="big">Limit Tue 11:10</span><span class="sub">Soft 90% about Mon 23:00. Resets Thu 09:00, 46 h later.</span>
+          <span class="conf"><span class="bar" role="img" aria-label="confidence 78 percent"><i style="width:78%"></i></span>78% &middot; <a class="ev" href="#">ev-rl-codex</a></span></div>
+        <div class="fc"><span class="nm mono">claude-sonnet-5-5</span><span class="muted">fleet, 5 h window</span>
+          <div class="bar" role="img" aria-label="62 percent"><i style="width:62%"></i></div>
+          <span class="big">Resets first, 16:20</span><span class="sub">Limit would land 16:29 at 19%/h. Margin 9 min.</span>
+          <span class="conf low"><span class="bar" role="img" aria-label="confidence 55 percent"><i style="width:55%"></i></span>55%, thin margin &middot; <a class="ev" href="#">ev-rl-fleet</a></span></div>
+        <div class="fc"><span class="nm mono">claude-fable-5-2</span><span class="muted">spare, 5 h window (shared with opus)</span>
+          <div class="bar warn" role="img" aria-label="88 percent"><i style="width:88%"></i></div>
+          <span class="big">Limit about 14:48</span><span class="sub">In 16 min. Resets 17:37, so up to 2 h 49 m locked out.</span>
+          <span class="conf"><span class="bar" role="img" aria-label="confidence 81 percent"><i style="width:81%"></i></span>81% &middot; <a class="ev" href="#">ev-rl-spare</a></span></div>
+        <div class="fc"><span class="nm mono">claude-opus-5-5</span><span class="muted">spare, 5 h window</span>
+          <div class="err" role="alert"><div><b>Forecast unavailable.</b> No rate_limits sample since 13:58; session of <span class="mono">t-a07c55f1</span> is not reporting.</div></div>
+          <div><button class="btn sm">Retry</button> <button class="btn sm">Use account estimate</button></div></div>
+        <div class="fc"><span class="nm mono">claude-haiku-5-5</span><span class="muted">fleet, 5 h window</span>
+          <div class="empty" style="padding:var(--s3) 0"><b>No usage today</b>Nothing to forecast.</div></div>
+        <div class="fc" aria-busy="true"><span class="nm">Queue ETA</span><span class="muted">2 queued tasks</span>
+          <span class="skel big"></span><span class="skel w8"></span><span class="skel w6"></span>
+          <span class="muted" style="font-size:12px">Estimating from typical stage cost. Loading.</span></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Anomalies</h2><span class="muted">4 found, 5 rules checked</span></header>
+        <ul class="an">
+          <li><span class="sev s-h">HIGH</span><div><b>Same gate failure twice on <span class="mono">t-9c1e07b2</span></b><div class="sub">Both runs: <span class="mono">test_onboard</span>, runner not re-embedded.</div><div class="meta"><span class="conf"><span class="bar"><i style="width:94%"></i></span>94%</span><a class="ev" href="#">ev-4412</a><a class="ev" href="#">ev-4419</a></div></div></li>
+          <li><span class="sev s-m">MED</span><div><b>Token spike on <span class="mono">t-a07c55f1</span></b><div class="sub">claude-opus-5-5 build is at 3.1x the median tokens for this stage after 48 min.</div><div class="meta"><span class="conf low"><span class="bar"><i style="width:71%"></i></span>71%</span><a class="ev" href="#">tokens/summary</a><details class="why" style="margin:0"><summary>Why?</summary><div class="whybox">Median of 11 prior builds: 118k tokens. This one: 366k. Large task or a loop; the log shows 3 identical reads of the same file.</div></details></div></div></li>
+          <li><span class="sev s-m">MED</span><div><b>Independence waived on <span class="mono">t-77be0c19</span></b><div class="sub">claude-sonnet-5-5 built and reviewed. Waiver reason: spare limited.</div><div class="meta"><span class="conf"><span class="bar"><i style="width:99%"></i></span>99%</span><a class="ev" href="#">ev-4377</a></div></div></li>
+          <li><span class="sev s-l">LOW</span><div><b>duncan's macbook m1 pro near memory limit</b><div class="sub">15 / 16 GB; <span class="mono">glm-4.7-flash</span> failed to load twice in 20 min.</div><div class="meta"><span class="conf"><span class="bar"><i style="width:88%"></i></span>88%</span><a class="ev" href="#">ev-4440</a></div></div></li>
+        </ul>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <header><h2>Alerts</h2></header>
+          <div class="body"><div class="err" role="alert"><div><b>glm-4.7-flash failed to load on duncan's macbook m1 pro.</b><div class="sub">Needs 17.2 GB, 9.8 GB free. Role reviewer is served by master instead.</div><div style="margin-top:var(--s2)"><button class="btn sm">Retry load</button> <button class="btn sm">Unload other model</button></div></div></div></div>
+        </div>
+        <div class="card">
+          <header><h2>Awaiting merge</h2></header>
+          <div class="empty"><b>Nothing waiting to merge</b>Passed branches appear here once review is green.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <header><h2>Running work</h2><span class="muted">5 tasks</span></header>
+        <table>
+          <thead><tr><th>Task</th><th>Stage</th><th>Model / account</th><th>Node</th><th class="n">Elapsed</th></tr></thead>
+          <tbody>
+            <tr><td><b>t-3f9a12c0</b><div class="muted">Windows enrollment tags</div><details class="why"><summary>Why here?</summary><div class="whybox">Routed to Sonnet: Codex at 83% weekly; rule v3 "fixes go to Sonnet". Node master had a free slot.</div></details></td><td><span class="pill p-warn">fix, blocked</span></td><td class="mono">claude-sonnet-5-5 / fleet</td><td>master</td><td class="n">06:41</td></tr>
+            <tr><td><b>t-8b41d7e2</b><div class="muted">Budget hold toggle</div></td><td><span class="pill p-run">review</span></td><td class="mono">claude-fable-5-2 / spare</td><td>master</td><td class="n">02:10</td></tr>
+            <tr><td><b>t-a07c55f1</b><div class="muted">Plan item editor</div></td><td><span class="pill p-run">build</span></td><td class="mono">claude-opus-5-5 / spare</td><td>master</td><td class="n">00:48</td></tr>
+            <tr><td><b>t-c92e0b64</b><div class="muted">Commit message drafts</div><details class="why"><summary>Why here?</summary><div class="whybox">Drafts go to local coder, never paid. Master's local slot was busy, so placed on the macbook (qwen2.5-coder:14b loaded).</div></details></td><td><span class="pill p-run">draft</span></td><td class="mono">qwen2.5-coder:14b</td><td>duncan's macbook m1 pro</td><td class="n">00:19</td></tr>
+            <tr><td><b>t-5d3318aa</b><div class="muted">Final review, batch 14</div></td><td><span class="pill p-run">final</span></td><td class="mono">codex gpt-5.6-terra / fleet</td><td>master</td><td class="n">11:02</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <header><h2>Machines</h2></header>
+        <table><tbody>
+          <tr><td>master<div class="muted">darwin</div></td><td><span class="pill p-ok">Healthy</span></td><td class="n">4 / 4</td></tr>
+          <tr><td>duncan's macbook m1 pro<div class="muted">macOS</div></td><td><span class="pill p-ok">Healthy</span></td><td class="n">1 / 1</td></tr>
+          <tr><td>laptop-0ir6d81o<div class="muted">windows, offline 3h, 2 queued</div></td><td><span class="pill p-idle">Offline</span></td><td class="n">0 / 1</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="view" id="v-other" aria-labelledby="h-other" data-crumb="Not mocked">
+  <div class="head"><div><h1 id="h-other">Not part of this mock</h1><p class="sub">This mock covers Now and the intent bar. Other pages are in c-workbench.html.</p></div></div>
+  <div class="card"><div class="empty"><b>Open Now</b>Use the rail or the mock view switcher.</div></div>
+</section>
+
+</main>
+</div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+
+<!-- VIEW 2: INTENT, review -->
+<div class="pal" id="pal-a" role="dialog" aria-modal="true" aria-label="Intent bar: review t-3f9a12c0 with fable">
+  <div class="pin"><kbd>⌘K</kbd><input value="review t-3f9a12c0 with fable" aria-label="Command or intent"><kbd>Esc</kbd></div>
+  <div class="sec">
+    <div class="chips" style="margin-bottom:var(--s3)"><span class="chip">verb: review</span><span class="chip">task: t-3f9a12c0</span><span class="chip">model: fable</span><span class="muted" style="font-size:12px">Parsed by rules. No model called. Parse confidence 97%.</span></div>
+    <h3 style="margin-bottom:var(--s2)">Request preview</h3>
+    <dl class="pkv">
+      <dt>Action</dt><dd>Spawn task</dd>
+      <dt>Agent</dt><dd class="mono">claude</dd>
+      <dt>Model</dt><dd class="mono">claude-fable-5-2</dd>
+      <dt>Kind</dt><dd class="mono">review</dd>
+      <dt>Parent</dt><dd><a class="mono" href="#">t-3f9a12c0</a> Windows enrollment tags</dd>
+      <dt>Stage</dt><dd>review (stage 5 of 7)</dd>
+      <dt>Account</dt><dd class="mono">spare</dd>
+      <dt>Mode / effort</dt><dd>read-only / medium</dd>
+      <dt>Budget rule</dt><dd>v3 "one reviewer per round, differs from builder": <span class="pill p-ok">Allowed</span></dd>
+      <dt>Independence</dt><dd>Builder was claude-sonnet-5-5, so this reviewer differs. OK.</dd>
+      <dt>Est. tokens</dt><dd>61,000 in / 5,500 out, about $0.88, 3% of spare's 5 h window <span class="conf low" style="margin-left:var(--s2)"><span class="bar"><i style="width:68%"></i></span>68%, median of 9 similar reviews</span></dd>
+      <dt>Queue</dt><dd>spare has 2 of 2 Claude slots in use; this will wait for <span class="mono">t-8b41d7e2</span>, about 4 min.</dd>
+    </dl>
+    <div class="warnbox" role="note"><b>Check first</b><div>The latest gate on <span class="mono">t-3f9a12c0</span> failed (attempt a1) and fix a2 is still running, so this review would read a failing diff. Suggest waiting for the a2 gate. <a class="ev" href="#">ev-4431</a></div></div>
+    <details class="why" style="margin-top:var(--s3)"><summary>Why this account and model?</summary><div class="whybox">Fable is bound to account spare. Rule v3, line "review of a round": one paid reviewer, different from the builder. Fable never builds, so a review is in its allowed kinds. <a class="ev" href="#">budget rule v3</a> <a class="ev" href="#">attempts a0-a2</a></div></details>
+    <div class="actions" style="margin:var(--s4) calc(-1*var(--s5)) calc(-1*var(--s4));border-radius:0;flex-wrap:wrap">
+      <span class="muted" id="runnote" aria-live="polite">Nothing runs until you confirm.</span><span class="sp"></span>
+      <button class="btn sm" id="edit-a">Edit</button>
+      <button class="btn sm primary" id="run-a">Run</button>
+    </div>
+    <div class="confirm on" id="conf-a" style="display:none;margin-top:var(--s3)" role="group" aria-label="Confirm spawn"><b>Spawn 1 review on claude-fable-5-2 / spare for t-3f9a12c0?</b> It queues behind t-8b41d7e2 and may start after spare's projected limit at 14:48.<div class="row"><button class="btn primary sm" data-do>Confirm spawn</button><button class="btn sm" data-cancel>Back</button></div></div>
+  </div>
+  <div class="sec">
+    <h3>Matching results</h3>
+    <ul class="res">
+      <li><span class="k">Action</span><span>Spawn review on <span class="mono">claude-fable-5-2</span> for t-3f9a12c0</span><span class="muted">Enter</span></li>
+      <li><span class="k">Action</span><span>Spawn review on <span class="mono">claude-sonnet-5-5</span> (cheaper, but it built this) <span class="pill p-warn">needs waiver</span></span><span class="muted">Tab</span></li>
+      <li><span class="k">Task</span><span><b>t-3f9a12c0</b> Windows enrollment tags <span class="pill p-warn">fix, blocked</span></span><span class="muted">Open</span></li>
+      <li><span class="k">Task</span><span><b>t-8b41d7e2</b> Budget hold toggle <span class="muted">review on claude-fable-5-2</span> <span class="pill p-run">running</span></span><span class="muted">Open</span></li>
+      <li><span class="k">Model</span><span class="mono">claude-fable-5-2 <span class="muted">spare, 88% of 5 h</span></span><span class="muted">Open</span></li>
+    </ul>
+  </div>
+  <div class="pfoot"><span><kbd>Enter</kbd> run</span><span><kbd>Tab</kbd> edit</span><span class="sp"></span><span>Every result is a proposal. Nothing auto-executes.</span></div>
+</div>
+
+<!-- VIEW 3: INTENT, drain -->
+<div class="pal" id="pal-b" role="dialog" aria-modal="true" aria-label="Intent bar: drain the laptop">
+  <div class="pin"><kbd>⌘K</kbd><input value="drain the laptop" aria-label="Command or intent"><kbd>Esc</kbd></div>
+  <div class="sec">
+    <div class="chips" style="margin-bottom:var(--s3)"><span class="chip">verb: drain</span><span class="chip amb">target "laptop": 2 matches</span><span class="muted" style="font-size:12px">Parsed by rules. No model called. Pick the node to continue.</span></div>
+    <h3 style="margin-bottom:var(--s2)">Which node?</h3>
+    <label class="opt"><input type="radio" name="node" value="a" checked><div><b>laptop-0ir6d81o</b> <span class="muted">windows, 32 GB</span><div class="sub">Name prefix match. Offline since 11:32; 2 queued tasks pinned to it.</div></div><span class="conf"><span class="bar"><i style="width:91%"></i></span>Best match 91%</span></label>
+    <label class="opt"><input type="radio" name="node" value="b"><div><b>duncan's macbook m1 pro</b> <span class="muted">macOS, 16 GB</span><div class="sub">Matches "laptop" by device class. Healthy; 1 task running.</div></div><span class="conf low"><span class="bar"><i style="width:34%"></i></span>34%</span></label>
+    <details class="why"><summary>Why is this ambiguous?</summary><div class="whybox">"laptop" matches the name prefix of laptop-0ir6d81o and the device class of duncan's macbook m1 pro. The offline node ranks first because draining an offline node has the most effect, but you must choose. <a class="ev" href="#">/api/fleet</a></div></details>
+  </div>
+  <div class="sec cl on" id="cl-a">
+    <h3 style="margin-bottom:var(--s2)">Confirm</h3>
+    <p><b>Drain node <span class="mono">laptop-0ir6d81o</span></b> (windows, offline 3h). It stops accepting tasks. These 2 queued tasks move to master:</p>
+    <table style="margin:var(--s3) 0;border:1px solid var(--line);border-radius:var(--r)">
+      <thead><tr><th>Task</th><th>Kind / model</th><th class="n">Waits on master</th></tr></thead>
+      <tbody>
+        <tr><td><b>t-6e20b9d4</b><div class="muted">Windows gate run for onboard.ps1</div></td><td class="mono">test, claude-haiku-5-5 / fleet</td><td class="n">about 9 min</td></tr>
+        <tr><td><b>t-d1a84c37</b><div class="muted">Windows runner smoke test</div></td><td class="mono">test, claude-haiku-5-5 / fleet</td><td class="n">about 14 min</td></tr>
+      </tbody>
+    </table>
+    <div class="warnbox" role="note"><b>Check</b><div>master is 4 / 4, so both wait for a slot. Windows-specific tests on darwin may fail; both tasks target the Windows runner. <a class="ev" href="#">ev-4402</a></div></div>
+    <p class="muted" style="margin-top:var(--s2)">Undo: undrain from Nodes. Moved tasks are not moved back.</p>
+    <div class="row" style="display:flex;gap:var(--s2);margin-top:var(--s3);align-items:center"><button class="btn danger sm" data-do2>Confirm drain: laptop-0ir6d81o</button><button class="btn sm" data-close>Cancel</button><span class="muted" id="drainnote" aria-live="polite"></span></div>
+  </div>
+  <div class="sec cl" id="cl-b">
+    <h3 style="margin-bottom:var(--s2)">Confirm</h3>
+    <p><b>Drain node <span class="mono">duncan's macbook m1 pro</span></b> (macOS, 1 of 1 slots used). It stops accepting new tasks. 0 queued tasks to move.</p>
+    <div class="warnbox" role="note"><b>Check</b><div>Running <span class="mono">t-c92e0b64</span> (qwen2.5-coder:14b, 00:19) finishes on this node. Role fast then has no local node besides master.</div></div>
+    <div style="display:flex;gap:var(--s2);margin-top:var(--s3);align-items:center"><button class="btn danger sm" data-do2>Confirm drain: duncan's macbook m1 pro</button><button class="btn sm" data-close>Cancel</button></div>
+  </div>
+  <div class="sec">
+    <h3>Matching results</h3>
+    <ul class="res">
+      <li><span class="k">Node</span><span><b>laptop-0ir6d81o</b> <span class="pill p-idle">Offline</span></span><span class="muted">Open</span></li>
+      <li><span class="k">Node</span><span><b>duncan's macbook m1 pro</b> <span class="pill p-ok">Healthy</span></span><span class="muted">Open</span></li>
+      <li><span class="k">Page</span><span>Fleet / Nodes</span><span class="muted">g n</span></li>
+    </ul>
+  </div>
+  <div class="pfoot"><span><kbd>Esc</kbd> close</span><span class="sp"></span><span>Nothing auto-executes. Drain needs the confirm button.</span></div>
+</div>
+
+<div class="demo" role="group" aria-label="Mock view switcher"><span class="muted">Mock view</span>
+  <button class="btn sm" data-v="1" aria-pressed="true">1 Now</button>
+  <button class="btn sm" data-v="2" aria-pressed="false">2 Intent: review</button>
+  <button class="btn sm" data-v="3" aria-pressed="false">3 Intent: drain</button>
+</div>
+
+<script>
+(function(){
+  var $=function(s,r){return (r||document).querySelector(s)},$$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+  var root=document.documentElement,scrim=$('#scrim'),pa=$('#pal-a'),pb=$('#pal-b'),last=null;
+  function setView(n){
+    scrim.classList.toggle('on',n>1);pa.classList.toggle('on',n===2);pb.classList.toggle('on',n===3);
+    $$('.demo [data-v]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.v==n))});
+    if(n>1){last=document.activeElement;var i=$('input',n===2?pa:pb);i.focus();}
+    else if(last&&last.focus){last.focus();}
+  }
+  $$('.demo [data-v]').forEach(function(b){b.addEventListener('click',function(){setView(+b.dataset.v)})});
+  $('#open-k').addEventListener('click',function(){setView(2)});
+  scrim.addEventListener('click',function(){setView(1)});
+  $$('[data-close]').forEach(function(b){b.addEventListener('click',function(){setView(1)})});
+  document.addEventListener('keydown',function(e){
+    if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();setView(2)}
+    else if(e.key==='Escape'){setView(1)}
+  });
+  /* rail */
+  $$('.rail [data-go]').forEach(function(b){b.addEventListener('click',function(){
+    var now=b.dataset.go==='now';
+    $('#v-now').classList.toggle('on',now);$('#v-other').classList.toggle('on',!now);
+    $$('.rail .nav').forEach(function(x){if(x===b){x.setAttribute('aria-current','page')}else{x.removeAttribute('aria-current')}});
+    $('#crumbs').innerHTML='<b>'+(now?'Now':'Not mocked')+'</b>';
+  })});
+  /* theme */
+  var tb=$('#theme');
+  tb.addEventListener('click',function(){var d=root.dataset.theme!=='dark';root.dataset.theme=d?'dark':'light';tb.setAttribute('aria-pressed',d);tb.textContent=d?'Light theme':'Dark theme'});
+  /* next-action confirm steps */
+  $$('[data-confirm]').forEach(function(b){b.addEventListener('click',function(){
+    $$('.acts .confirm').forEach(function(c){c.classList.remove('on')});
+    $('#'+b.dataset.confirm).classList.add('on');
+  })});
+  $$('.acts .confirm').forEach(function(c){
+    $('[data-cancel]',c).addEventListener('click',function(){c.classList.remove('on')});
+    $('[data-do]',c).addEventListener('click',function(){c.innerHTML='<b>Sent.</b> Recorded in Activity as owner (mock, nothing really ran).'});
+  });
+  /* briefing refresh loading state */
+  $('#refresh').addEventListener('click',function(){
+    var c=$('#briefing');c.classList.add('loading');c.setAttribute('aria-busy','true');
+    setTimeout(function(){c.classList.remove('loading');c.removeAttribute('aria-busy')},1400);
+  });
+  /* intent A */
+  var ca=$('#conf-a');
+  $('#run-a').addEventListener('click',function(){ca.style.display='block'});
+  $('[data-cancel]',ca).addEventListener('click',function(){ca.style.display='none'});
+  $('[data-do]',ca).addEventListener('click',function(){ca.innerHTML='<b>Queued (mock).</b> Nothing really ran.';$('#runnote').textContent='Spawned.'});
+  $('#edit-a').addEventListener('click',function(){$('#runnote').textContent='Opens the Spawn form prefilled with these values.'});
+  /* intent B */
+  $$('input[name=node]').forEach(function(r){r.addEventListener('change',function(){
+    $('#cl-a').classList.toggle('on',r.value==='a');$('#cl-b').classList.toggle('on',r.value==='b');
+  })});
+  $$('[data-do2]').forEach(function(b){b.addEventListener('click',function(){var n=$('#drainnote');if(n){n.textContent='Drain requested (mock).'}b.disabled=true})});
+})();
+</script>
+</body>
+</html>

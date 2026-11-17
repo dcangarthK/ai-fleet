@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet console - C Workbench mock</title>
+<style>
+:root{
+  --bg:#fafaf8;--surface:#fff;--sunken:#f2f2ee;--line:#e3e3dc;--line-strong:#c9c9c0;
+  --ink:#1b1d1f;--ink-2:#46494d;--ink-3:#5f6368;
+  --accent:#1459b3;--accent-ink:#fff;--accent-soft:#e6eef9;
+  --ok:#17663a;--ok-soft:#e4f2e9;--warn:#8a5300;--warn-soft:#faf0dc;--bad:#b3261e;--bad-soft:#fbe9e7;
+  --focus:#1459b3;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;
+  --r:6px;
+}
+[data-theme=dark]{
+  --bg:#141517;--surface:#1b1d20;--sunken:#101113;--line:#2b2e32;--line-strong:#42464c;
+  --ink:#ececea;--ink-2:#b8bbbf;--ink-3:#9a9ea4;
+  --accent:#6ea8f0;--accent-ink:#0b1626;--accent-soft:#1c2a3f;
+  --ok:#5fcf8b;--ok-soft:#17291f;--warn:#e6b052;--warn-soft:#2e2412;--bad:#ff8a80;--bad-soft:#331a18;
+  --focus:#8dbcf5;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:3px}
+button{font:inherit;color:inherit;cursor:pointer}
+a{color:var(--accent)}
+h1,h2,h3,p{margin:0}
+h1{font-size:26px;line-height:1.2;font-weight:650;letter-spacing:-.01em}
+h2{font-size:16px;font-weight:650}
+h3{font-size:11.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.sub{color:var(--ink-2)}
+.muted{color:var(--ink-3)}
+
+.app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+.rail{border-right:1px solid var(--line);background:var(--surface);padding:var(--s4) var(--s3);display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:var(--s2);font-weight:650;padding:0 var(--s2)}
+.brand i{width:12px;height:12px;background:var(--accent);border-radius:3px;display:block}
+.rail h3{padding:0 var(--s2);margin-bottom:var(--s1)}
+.rail button.nav{all:unset;box-sizing:border-box;display:flex;justify-content:space-between;align-items:center;width:100%;padding:6px var(--s2);border-radius:var(--r);color:var(--ink-2);cursor:pointer}
+.rail button.nav:hover{background:var(--sunken);color:var(--ink)}
+.rail button.nav[aria-current=page]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.rail button.nav:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.badge{font-size:11px;min-width:20px;text-align:center;padding:0 6px;border-radius:10px;background:var(--bad);color:#fff;font-weight:600}
+[data-theme=dark] .badge{color:#2a0b08}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--s2);padding:0 var(--s2)}
+.rail .kbd-row{display:flex;justify-content:space-between;color:var(--ink-3);font-size:12px}
+
+.main{min-width:0}
+.top{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s6);border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:2}
+.crumbs{color:var(--ink-3);font-size:13px;flex:1}
+.crumbs b{color:var(--ink);font-weight:600}
+.cmdk{display:flex;align-items:center;gap:var(--s3);min-width:320px;padding:6px var(--s3);border:1px solid var(--line-strong);border-radius:var(--r);background:var(--bg);color:var(--ink-3);text-align:left}
+.cmdk span:first-child{flex:1}
+kbd{font:12px var(--mono);border:1px solid var(--line-strong);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--ink-2);background:var(--surface)}
+.btn{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r);padding:6px var(--s3);font-weight:550}
+.btn:hover{background:var(--sunken)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);opacity:.9}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:3px var(--s2);font-size:13px}
+.page{padding:var(--s6) var(--s6) var(--s7);max-width:1360px}
+.view{display:none}.view.on{display:block}
+.head{display:flex;justify-content:space-between;align-items:flex-end;gap:var(--s4);margin-bottom:var(--s6)}
+.head .sub{margin-top:var(--s1);max-width:62ch}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.card .body{padding:var(--s4) var(--s5)}
+.stack{display:flex;flex-direction:column;gap:var(--s5)}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:var(--s5)}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-soft)}
+.p-warn{color:var(--warn);background:var(--warn-soft)}
+.p-bad{color:var(--bad);background:var(--bad-soft)}
+.p-run{color:var(--accent);background:var(--accent-soft)}
+.p-idle{color:var(--ink-3);background:var(--sunken)}
+table{width:100%;border-collapse:collapse}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3);text-align:left;font-weight:650;padding:var(--s2) var(--s5);border-bottom:1px solid var(--line)}
+td{padding:var(--s3) var(--s5);border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--sunken)}
+td.n,th.n{text-align:right}
+.bar{height:6px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar.warn i{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:var(--s2) var(--s4)}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0;text-align:right}
+.inbox{list-style:none;margin:0;padding:0}
+.inbox li{display:grid;grid-template-columns:72px 1fr auto;gap:var(--s4);align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.inbox li:last-child{border-bottom:0}
+.inbox .t{font-weight:600}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat .v{font-size:26px;font-weight:650;line-height:1.15;letter-spacing:-.01em}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--ink-3)}
+.empty b{display:block;color:var(--ink);font-size:15px;margin-bottom:var(--s1)}
+.err{display:flex;gap:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--bad);background:var(--bad-soft);border-radius:var(--r);color:var(--ink)}
+.err b{color:var(--bad)}
+.tabs{display:flex;gap:var(--s5);border-bottom:1px solid var(--line);padding:0 var(--s5)}
+.tabs button{all:unset;padding:var(--s3) 0;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--ink);border-color:var(--accent);font-weight:600}
+.tabs button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.panel{display:none}.panel.on{display:block}
+
+.chain{display:grid;grid-template-columns:repeat(7,1fr);padding:var(--s5)}
+.stg{position:relative;padding-right:var(--s2)}
+.stg::before{content:"";position:absolute;top:11px;left:28px;right:4px;height:2px;background:var(--line-strong)}
+.stg:last-child::before{display:none}
+.stg.done::before{background:var(--ok)}
+.dot{position:relative;width:24px;height:24px;border-radius:50%;border:2px solid var(--line-strong);background:var(--surface);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--ink-3)}
+.stg.done .dot{border-color:var(--ok);background:var(--ok);color:#fff}
+[data-theme=dark] .stg.done .dot{color:#0c2015}
+.stg.now .dot{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.stg.bad .dot{border-color:var(--bad);background:var(--bad);color:#fff}
+[data-theme=dark] .stg.bad .dot{color:#2a0b08}
+.stg.plan .dot{border-style:dashed}
+.stg .nm{margin-top:var(--s2);font-weight:650}
+.stg .md{font-size:12px;color:var(--ink-2);line-height:1.4;word-break:break-all}
+.stg .ac{font-size:12px;color:var(--ink-3)}
+.stg .at{font-size:12px;margin-top:2px;color:var(--ink-2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.actions .sp{flex:1}
+.msg{flex:1;min-width:200px;border:1px solid var(--line-strong);border-radius:var(--r);padding:6px var(--s3);background:var(--surface);color:var(--ink);font:inherit}
+.msg::placeholder{color:var(--ink-3)}
+pre.log,pre.diff{margin:0;padding:var(--s3) var(--s5);font:12.5px/1.6 var(--mono);overflow:auto;background:var(--sunken)}
+.log .t{color:var(--ink-3)}.log .w{color:var(--warn)}
+.diff span{display:block}
+.diff .a{color:var(--ok);background:var(--ok-soft)}
+.diff .d{color:var(--bad);background:var(--bad-soft)}
+.diff .h{color:var(--ink-3)}
+.files{list-style:none;margin:0;padding:var(--s2) 0;font:12.5px var(--mono)}
+.files li{display:flex;justify-content:space-between;gap:var(--s2);padding:3px var(--s4)}
+.files li.sel{background:var(--accent-soft);color:var(--accent)}
+.find{display:grid;grid-template-columns:48px 1fr;gap:var(--s3);padding:var(--s3) var(--s5);border-bottom:1px solid var(--line)}
+.find:last-child{border-bottom:0}
+.sev{font:700 11px var(--mono);padding:1px 6px;border-radius:4px;height:fit-content;margin-top:2px;text-align:center}
+.s-h{background:var(--bad);color:#fff}
+[data-theme=dark] .s-h{color:#2a0b08}
+.s-m{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn)}
+.s-l{background:var(--sunken);color:var(--ink-2);border:1px solid var(--line-strong)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:var(--s5);align-items:start}
+.ctx{display:flex;flex-direction:column;gap:var(--s5);position:sticky;top:76px}
+.ctx .card .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sw{display:flex;gap:var(--s2);align-items:center;color:var(--ink-2);font-size:13px}
+.sw input{accent-color:var(--accent)}
+.wiz{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s3);padding:var(--s4) var(--s5)}
+.wiz div{border-top:3px solid var(--line-strong);padding-top:var(--s2);color:var(--ink-3);font-size:13px}
+.wiz div.on{border-color:var(--accent)}
+.wiz b{display:block;color:var(--ink)}
+.cmd{display:block;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px var(--mono);overflow-x:auto;white-space:nowrap}
+@media(max-width:1100px){.split,.grid2{grid-template-columns:1fr}.ctx{position:static}.chain{grid-template-columns:repeat(4,1fr);row-gap:var(--s5)}}
+@media(max-width:760px){.app{grid-template-columns:1fr}.rail{position:static;height:auto}.page{padding:var(--s4)}.cmdk{min-width:0}}
+
+/* ---- c2 extensions: intelligence layer ---- */
+.split{grid-template-columns:minmax(0,1fr) 340px}
+.chips{display:flex;gap:var(--s2);flex-wrap:wrap}
+.chip{border:1px solid var(--line-strong);background:var(--surface);border-radius:14px;padding:2px var(--s3);font-size:13px;color:var(--ink-2)}
+.chip:hover{background:var(--sunken)}
+.chip[aria-pressed=true]{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);font-weight:600}
+.chip b{font-weight:650;margin-left:4px}
+.filters{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+.filters select,.filters input,.fld select,.fld input,.fld textarea{border:1px solid var(--line-strong);border-radius:var(--r);background:var(--surface);color:var(--ink);font:inherit;padding:5px var(--s2)}
+.filters input{min-width:200px}
+.fld{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--ink-3)}
+.fld input[readonly]{background:var(--sunken);font:12.5px var(--mono)}
+.fld textarea{width:100%;font:12.5px/1.5 var(--mono);resize:vertical}
+.mini{display:inline-flex;gap:2px;vertical-align:middle}
+.mini i{width:14px;height:6px;border-radius:2px;background:var(--line-strong);display:block}
+.mini .d{background:var(--ok)}.mini .n{background:var(--accent)}.mini .b{background:var(--bad)}
+.mini .p{background:transparent;border:1px dashed var(--line-strong)}
+.sm{font-size:12px}
+.fc{font-weight:600}
+.conf{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.conf i{display:block;width:40px;height:4px;border-radius:2px;background:var(--line-strong);position:relative;overflow:hidden}
+.conf i b{position:absolute;left:0;top:0;bottom:0;background:var(--ok)}
+.conf.m i b{background:var(--warn)}.conf.l i b{background:var(--bad)}
+.ins{display:grid;grid-template-columns:1fr auto;gap:var(--s3) var(--s5);padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.ins:last-child{border-bottom:0}
+.ins .t{font-weight:600}
+.ins .meta{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:center;margin-top:var(--s2);font-size:12px;color:var(--ink-3)}
+.ev{font:12px var(--mono)}
+.kind{font:700 11px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--ink-3)}
+.cf{display:none;grid-column:1/-1;border:1px solid var(--accent);background:var(--accent-soft);border-radius:var(--r);padding:var(--s3)}
+.cf.on{display:block}
+.cf code{display:block;font:12.5px/1.5 var(--mono);white-space:pre-wrap;margin:var(--s2) 0}
+.cf .row{display:flex;gap:var(--s2);align-items:center}
+.done-note{grid-column:1/-1;color:var(--ok);font-weight:600}
+.skel{display:block;height:12px;border-radius:3px;background:var(--sunken);border:1px solid var(--line);margin:var(--s3) var(--s5);animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.45}}
+@media(prefers-reduced-motion:reduce){.skel{animation:none}}
+.state-demo{display:flex;gap:var(--s2);align-items:center;color:var(--ink-3);font-size:12px}
+.stg{padding-bottom:var(--s2)}
+.why{all:unset;cursor:pointer;margin-top:var(--s2);color:var(--accent);font-size:12px;font-weight:600;text-decoration:underline;text-underline-offset:2px}
+.why:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.pop{display:none;position:absolute;top:100%;left:0;z-index:5;width:288px;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;padding:var(--s3);font-size:13px;line-height:1.5;color:var(--ink);margin-top:var(--s1)}
+.pop.on{display:block}
+.stg:nth-child(n+5) .pop{left:auto;right:0}
+.pop h4{margin:0 0 var(--s1);font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.pop p{margin:0 0 var(--s2)}
+.pop .src{font:12px var(--mono);color:var(--ink-3)}
+.sugg{border-color:var(--accent)}
+.sugg>header{background:var(--accent-soft);border-radius:8px 8px 0 0}
+.sugg .body{display:flex;flex-direction:column;gap:var(--s3)}
+.sugg textarea{min-height:120px}
+.cite{all:unset;cursor:pointer;font:12px var(--mono);color:var(--accent);text-decoration:underline;padding:0 2px}
+.cite:focus-visible{outline:2px solid var(--focus)}
+.logv{padding:var(--s3) 0;font:12.5px/1.6 var(--mono);background:var(--sunken);overflow:auto}
+.ln{display:block;white-space:pre;padding:0 var(--s5)}
+.ln i{display:inline-block;width:28px;color:var(--ink-3);font-style:normal;user-select:none}
+.ln.hl{background:var(--accent-soft);color:var(--accent)}
+.ln .w{color:var(--warn)}
+.ans{border-left:3px solid var(--accent);padding-left:var(--s3);font-size:13px}
+.local{font-size:12px;color:var(--ink-2)}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:10;padding:var(--s4)}
+.scrim.on{display:flex}
+.dlg{background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;width:min(980px,100%);max-height:calc(100vh - 32px);overflow:auto}
+.dlg>header{display:flex;justify-content:space-between;align-items:center;padding:var(--s4) var(--s5);border-bottom:1px solid var(--line)}
+.dlg .cols{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:var(--s5);padding:var(--s4) var(--s5)}
+.dlg footer{display:flex;gap:var(--s2);justify-content:flex-end;align-items:center;padding:var(--s3) var(--s5);border-top:1px solid var(--line);background:var(--sunken);border-radius:0 0 8px 8px}
+.seg{display:flex;gap:var(--s2)}
+.seg label{border:1px solid var(--line-strong);border-radius:var(--r);padding:4px var(--s3);cursor:pointer;display:flex;gap:6px;align-items:center}
+.seg input{accent-color:var(--accent)}
+.seg label:has(input:checked){border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600}
+.mrow{display:grid;grid-template-columns:20px 1fr auto;gap:var(--s2);align-items:start;padding:var(--s2) var(--s3);border:1px solid var(--line);border-radius:var(--r);cursor:pointer}
+.mrow:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.mrow input{margin-top:4px;accent-color:var(--accent)}
+.mrow .sub{font-size:12px}
+.mrow .pills{display:flex;flex-direction:column;gap:2px;align-items:flex-end}
+.verdict{border:1px solid var(--line-strong);border-radius:var(--r);padding:var(--s3)}
+.verdict.ok{border-color:var(--ok);background:var(--ok-soft)}
+.verdict.warn{border-color:var(--warn);background:var(--warn-soft)}
+.verdict.no{border-color:var(--bad);background:var(--bad-soft)}
+pre.req{margin:0;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r);background:var(--sunken);font:12.5px/1.6 var(--mono);overflow:auto;white-space:pre-wrap;word-break:break-all}
+@media(max-width:900px){.dlg .cols{grid-template-columns:1fr}.ins{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="rail" aria-label="Primary">
+  <div class="brand"><i></i>Fleet console</div>
+  <div>
+    <h3>Operate</h3>
+    <button class="nav" data-go="other">Now <span class="badge" aria-label="3 need attention">3</span></button>
+    <button class="nav" data-go="list" aria-current="page">Work <span class="muted">14</span></button>
+    <button class="nav" data-go="other">Plan</button>
+  </div>
+  <div>
+    <h3>Spend</h3>
+    <button class="nav" data-go="other">Budget</button>
+  </div>
+  <div>
+    <h3>Fleet</h3>
+    <button class="nav" data-go="other">Nodes <span class="muted">3</span></button>
+    <button class="nav" data-go="other">Models</button>
+    <button class="nav" data-go="other">Roles</button>
+  </div>
+  <div>
+    <h3>Configure</h3>
+    <button class="nav" data-go="other">Policies</button>
+    <button class="nav" data-go="other">Skills</button>
+    <button class="nav" data-go="other">Evals runs</button>
+    <button class="nav" data-go="other">Activity</button>
+    <button class="nav" data-go="other">Settings</button>
+  </div>
+  <div class="foot">
+    <div class="kbd-row"><span>Jump</span><span><kbd>g</kbd> <kbd>n</kbd> <kbd>g</kbd> <kbd>w</kbd> <kbd>g</kbd> <kbd>b</kbd></span></div>
+    <div class="kbd-row"><span>Help</span><kbd>?</kbd></div>
+    <button class="btn sm" id="theme" aria-pressed="false">Dark theme</button>
+    <div class="muted" style="font-size:12px">Signed in as owner (operate)</div>
+  </div>
+</nav>
+
+<div class="main">
+<div class="top">
+  <div class="crumbs" id="crumbs"><b>Work</b></div>
+  <button class="cmdk" aria-label="Open command palette"><span>Search pages, tasks, nodes, actions</span><kbd>⌘K</kbd></button>
+  <button class="btn primary" id="spawn-top">Spawn task</button>
+</div>
+
+<main class="page">
+
+<!-- VIEW 1: WORK LIST -->
+<section class="view on" id="v-list" aria-labelledby="h-list" data-crumb="Work">
+  <div class="head">
+    <div><h1 id="h-list">Work</h1><p class="sub">14 work items. 2 need you, 4 are running, 2 are ready to merge. About $9.28 more to finish everything in flight (medium confidence).</p></div>
+    <div class="state-demo"><label for="demo">Mock state</label>
+      <select id="demo" class="btn sm"><option value="ok">Loaded</option><option value="load">Loading</option><option value="empty">Empty (no match)</option><option value="err">Error</option></select></div>
+  </div>
+
+  <div class="stack">
+    <div class="card">
+      <header><h2>Suggested next steps</h2><span class="muted">Derived from task, gate, review and budget state. Nothing runs until you confirm.</span></header>
+      <div>
+        <div class="ins">
+          <div>
+            <span class="kind">Merge</span>
+            <div class="t">Merge t-7e20b9d3: gate green, Fable approved, no open HIGH or MED findings</div>
+            <div class="meta"><span class="conf" aria-label="Confidence 94 percent, high"><i><b style="width:94%"></b></i>94% high</span><span>Cost about $0.04 on claude-haiku-5-5</span><span class="ev">Evidence: <a href="#">gate summary</a> <a href="#">review a3 verdict</a> <a href="#">findings (0 open)</a></span></div>
+          </div>
+          <button class="btn sm primary" data-spawn="merge|claude-haiku-5-5|t-7e20b9d3">Review merge request</button>
+        </div>
+        <div class="ins">
+          <div>
+            <span class="kind">Forecast</span>
+            <div class="t">codex gpt-5.6-terra reaches its weekly soft limit about Wed 21:40, 11 h before reset</div>
+            <div class="meta"><span class="conf m" aria-label="Confidence 63 percent, medium"><i><b style="width:63%"></b></i>63% medium</span><span>Burn 6.1% per day over 7 days; batch 14 final review adds about 4%</span><span class="ev">Evidence: <a href="#">7d token summary</a> <a href="#">rate_limits, fleet</a></span></div>
+          </div>
+          <button class="btn sm act" data-req="PUT /api/budget/rules/hold&#10;scope: codex, kinds: all except final_review, security_review&#10;until: Thu 09:00 (reset)">Hold non-final Codex jobs</button>
+          <div class="cf"></div>
+        </div>
+        <div class="ins">
+          <div>
+            <span class="kind">Anomaly</span>
+            <div class="t">laptop-0ir6d81o dropped offline 3 times in 24 h and has been down 3 h</div>
+            <div class="meta"><span class="conf m" aria-label="Confidence 71 percent, medium"><i><b style="width:71%"></b></i>71% medium</span><span>Cause unknown: heartbeats stop with no shutdown event</span><span class="ev">Evidence: <a href="#">node events</a> <a href="#">2 tasks rerouted to master</a></span></div>
+          </div>
+          <button class="btn sm act" data-req="POST /api/nodes/laptop-0ir6d81o/drain&#10;effect: no new placements until you re-enable it. Running jobs: 0.">Drain node</button>
+          <div class="cf"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack" style="gap:var(--s3)">
+      <div class="chips" role="group" aria-label="Saved views">
+        <button class="chip" aria-pressed="true">All work <b>14</b></button>
+        <button class="chip" aria-pressed="false">Needs me <b>2</b></button>
+        <button class="chip" aria-pressed="false">Codex-bound <b>3</b></button>
+        <button class="chip" aria-pressed="false">Over forecast <b>1</b></button>
+        <button class="chip" aria-pressed="false">Stale over 2 h <b>0</b></button>
+        <button class="chip">+ Save current filters</button>
+      </div>
+      <div class="filters">
+        <input type="search" aria-label="Filter work items" placeholder="Filter by id, title, branch">
+        <select aria-label="Model"><option>Any model</option><option>claude-sonnet-5-5</option><option>claude-fable-5-2</option><option>claude-opus-5-5</option><option>claude-haiku-5-5</option><option>codex gpt-5.6-terra</option><option>qwen2.5-coder:14b</option><option>glm-4.7-flash</option></select>
+        <select aria-label="Account"><option>Any account</option><option>fleet</option><option>spare</option></select>
+        <select aria-label="Node"><option>Any node</option><option>master</option><option>duncan's macbook m1 pro</option><option>laptop-0ir6d81o</option></select>
+        <select aria-label="Kind"><option>Any kind</option><option>build</option><option>fix</option><option>review</option><option>merge</option></select>
+      </div>
+    </div>
+
+    <div id="groups" class="stack" aria-live="polite"></div>
+  </div>
+</section>
+
+<!-- VIEW 2: WORK DETAIL -->
+<section class="view" id="v-detail" aria-labelledby="h-detail" data-crumb="Work / t-3f9a12c0">
+  <div class="head">
+    <div>
+      <p class="muted" style="margin-bottom:var(--s2)"><a href="#" data-go="list">Work</a> / <span class="mono">t-3f9a12c0</span> &middot; branch <span class="mono">fleet/t-3f9a12c0</span></p>
+      <h1 id="h-detail">Windows onboarding: set worker tag via tailscale up</h1>
+      <p class="sub">Fix round 2 of 3. Gate failed on <span class="mono">test_onboard</span>; the builder is re-embedding the runner.</p>
+    </div>
+    <span class="pill p-warn">Blocked, needs you</span>
+  </div>
+
+  <div class="split">
+    <div class="stack">
+      <div class="card sugg">
+        <header><h2>Suggested next step</h2><span class="conf" aria-label="Confidence 88 percent, high"><i><b style="width:88%"></b></i>88% high</span></header>
+        <div class="body">
+          <div><b>Gate failed on a known trap: runner not re-embedded.</b> Message the builder with a fix hint.</div>
+          <p class="sub">Why: gate a1 failed on <span class="mono">test_onboard</span>. The same failure matched builder checklist item 1 on <a href="#" class="mono">t-6e2f1d90</a>. In a2, <button class="cite" data-l="5">L5</button> shows build.py found no embed marker in onboard.ps1 and <button class="cite" data-l="6">L6</button> edits only onboard.sh, so the ps1 copy is likely still stale. Extra cost: about $0.02 of session context.</p>
+          <div class="fld"><label for="hint">Message to builder (editable, same session)</label>
+          <textarea id="hint">Gate failed on a known trap: nodes/runner.py changed but the runner embedded in onboard.ps1 was not re-embedded. build.py warned at L5 that onboard.ps1 had no embed marker. Check the marker block in onboard.ps1, re-run python3 nodes/build.py, and commit nodes/onboard.sh and nodes/onboard.ps1 together. Do not run the gate yourself.</textarea></div>
+          <div class="ev" style="display:flex;gap:var(--s3);flex-wrap:wrap">Evidence: <a href="#">gate tail a1</a> <a href="#">CLAUDE.md builder checklist</a> <a href="#">t-6e2f1d90 gate</a></div>
+          <div class="row" style="display:flex;gap:var(--s2)"><button class="btn sm primary act" id="send-hint" data-req="">Send to builder</button><button class="btn sm">Dismiss</button></div>
+          <div class="cf"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <header><h2>Chain</h2><button class="btn sm">Edit planned stages</button></header>
+        <div class="chain" role="list" id="chain"></div>
+        <div class="actions" role="toolbar" aria-label="Work item actions">
+          <input class="msg" aria-label="Message the builder" placeholder="Message the builder (same session)">
+          <button class="btn sm">Send</button>
+          <span class="sp"></span>
+          <button class="btn sm primary">Approve</button>
+          <button class="btn sm">Reject</button>
+          <button class="btn sm">Resolve</button>
+          <button class="btn sm" data-spawn="review|claude-fable-5-2|t-3f9a12c0">Spawn follow-up</button>
+          <button class="btn sm">Handoff</button>
+          <button class="btn sm danger">Cancel</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tabs" role="tablist" aria-label="Work item detail">
+          <button role="tab" aria-selected="true" data-p="p-log">Log</button>
+          <button role="tab" aria-selected="false" data-p="p-find">Findings (3)</button>
+        </div>
+        <div class="panel on" id="p-log" role="tabpanel">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:var(--s3) var(--s5)"><span class="muted">a2 &middot; claude-sonnet-5-5 &middot; master</span><label class="sw"><input type="checkbox" checked> Follow</label></div>
+          <div class="logv" tabindex="0" aria-label="Live log">
+            <span class="ln" id="L1"><i>1</i>14:25:59 read gate tail from a1</span>
+            <span class="ln" id="L2"><i>2</i>14:26:03 read nodes/runner.py</span>
+            <span class="ln" id="L3"><i>3</i>14:26:09 edit nodes/runner.py  (+4 -2)</span>
+            <span class="ln" id="L4"><i>4</i>14:26:31 run python3 nodes/build.py</span>
+            <span class="ln" id="L5"><i>5</i>14:26:33 <span class="w">warn</span> onboard.ps1: no embed marker found, skipped</span>
+            <span class="ln" id="L6"><i>6</i>14:26:40 edit nodes/onboard.sh  (re-embed)</span>
+            <span class="ln" id="L7"><i>7</i>14:27:02 git commit -m "Re-embed runner in onboard scripts"</span>
+            <span class="ln" id="L8"><i>8</i>14:27:05 waiting for gate...</span>
+          </div>
+        </div>
+        <div class="panel" id="p-find" role="tabpanel">
+          <div class="find"><span class="sev s-h">HIGH</span><div><b>Embedded runner out of sync</b><div class="sub">onboard.ps1 still carries the old runner, so Windows nodes would enroll with the old tag logic.</div><div class="ev muted" style="margin-top:4px">glm-4.7-flash &middot; confidence 90% &middot; <button class="cite" data-l="5">L5</button> <button class="cite" data-l="6">L6</button></div></div></div>
+          <div class="find"><span class="sev s-m">MED</span><div><b>--reset=false not covered by a test</b><div class="sub">Add a runner test case so a later change cannot drop it silently.</div><div class="ev muted" style="margin-top:4px">glm-4.7-flash &middot; confidence 66% &middot; <button class="cite" data-l="3">L3</button></div></div></div>
+          <div class="find"><span class="sev s-l">LOW</span><div><b>Comment wording</b><div class="sub">Name the Tailscale version where <span class="mono">set</span> changed behaviour.</div><div class="ev muted" style="margin-top:4px">glm-4.7-flash &middot; confidence 41% &middot; <button class="cite" data-l="3">L3</button></div></div></div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="ctx" aria-label="Context">
+      <div class="card">
+        <header><h2>Ask the fleet</h2><span class="pill p-idle">local, no paid cost</span></header>
+        <div class="body">
+          <p class="local">Answered by role <span class="mono">fast</span> (qwen2.5-coder:14b on master) from this item's log, diff and findings. Redacted first. No paid model is called.</p>
+          <div class="chips"><button class="chip" data-q="gate">Why did the gate fail?</button><button class="chip" data-q="a2">What did a2 change?</button></div>
+          <div class="fld"><label for="q">Question</label><input id="q" value="Why did the gate fail?"></div>
+          <div><button class="btn sm primary" id="ask">Ask</button></div>
+          <div id="answer" aria-live="polite"></div>
+        </div>
+      </div>
+      <div class="card"><header><h2>Forecast to finish</h2><span class="conf m" aria-label="Confidence 68 percent, medium"><i><b style="width:68%"></b></i>68% medium</span></header><div class="body">
+        <dl class="kv" style="margin:0">
+          <dt>Fix a2 (rest)</dt><dd>$0.40</dd>
+          <dt>Review, fable</dt><dd>$0.90</dd>
+          <dt>Final, codex</dt><dd>$1.60 (about 1.2% weekly)</dd>
+          <dt>Merge, haiku</dt><dd>$0.04</dd>
+          <dt><b>Expected</b></dt><dd><b>$2.94</b> ($2.10 to $3.80)</dd>
+          <dt>ETA</dt><dd>about 38 min</dd>
+        </dl>
+        <p class="muted" style="font-size:12px">Remaining stages times median cost of 11 similar fix items. A third gate failure would add about $1.20.</p>
+      </div></div>
+    </aside>
+  </div>
+</section>
+
+<section class="view" id="v-other" aria-labelledby="h-other" data-crumb="Not mocked">
+  <div class="head"><div><h1 id="h-other">Not part of this mock</h1><p class="sub">This mock covers the Work list, Work detail and the spawn dialog.</p></div></div>
+  <div class="card"><div class="empty"><b>Open Work</b><button class="btn sm" data-go="list">Go to Work</button></div></div>
+</section>
+
+</main>
+</div>
+</div>
+
+<!-- VIEW 3: SPAWN DIALOG -->
+<div class="scrim" id="scrim">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="h-dlg">
+    <header><h2 id="h-dlg">Spawn follow-up</h2><button class="btn sm" id="dlg-x" aria-label="Close dialog">Close</button></header>
+    <div class="cols">
+      <div class="stack" style="gap:var(--s4)">
+        <div class="fld"><span>Kind</span>
+          <div class="seg" id="kinds" role="radiogroup" aria-label="Kind">
+            <label><input type="radio" name="kind" value="review"> review</label>
+            <label><input type="radio" name="kind" value="fix"> fix</label>
+            <label><input type="radio" name="kind" value="merge"> merge</label>
+          </div></div>
+        <div class="fld"><span>Model and account (budget state is live)</span>
+          <div class="stack" style="gap:var(--s2)" id="models" role="radiogroup" aria-label="Model"></div></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)">
+          <div class="fld"><label for="f-parent">parent_id</label><input id="f-parent" readonly></div>
+          <div class="fld"><label for="f-link">link</label><input id="f-link" readonly></div>
+          <div class="fld"><label for="f-stage">stage</label><input id="f-stage" readonly></div>
+          <div class="fld"><label for="f-eff">effort</label><input id="f-eff" readonly></div>
+        </div>
+      </div>
+      <div class="stack" style="gap:var(--s4)">
+        <div><h3 style="margin-bottom:var(--s2)">Budget rule that applies</h3><div class="verdict" id="verdict" aria-live="polite"></div></div>
+        <div><h3 style="margin-bottom:var(--s2)">Request preview</h3><pre class="req" id="req"></pre></div>
+      </div>
+    </div>
+    <div class="cf" id="dlg-cf" style="margin:0 var(--s5) var(--s4)"><b>Confirm start.</b> <span id="dlg-cf-t"></span><div class="row" style="margin-top:var(--s2)"><button class="btn sm primary" id="dlg-go">Confirm and start</button><button class="btn sm" id="dlg-back">Back</button></div></div>
+    <div class="done-note" id="dlg-done" style="display:none;padding:0 var(--s5) var(--s4)"></div>
+    <footer><span class="muted" style="flex:1;font-size:12px">Dry check against /api/budget/status. Nothing starts until you confirm.</span><button class="btn" id="dlg-cancel">Cancel</button><button class="btn primary" id="dlg-start">Start</button></footer>
+  </div>
+</div>
+
+<script>
+(function(){
+  var $=function(s,r){return (r||document).querySelector(s)},$$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+  var crumbs=$('#crumbs'),cur='list';
+  var ids={list:'v-list',detail:'v-detail'};
+  function show(k){
+    cur=k;var id=ids[k]||'v-other';
+    $$('.view').forEach(function(v){v.classList.toggle('on',v.id===id)});
+    $$('.rail .nav').forEach(function(b){if(k!=='other'&&b.dataset.go==='list'){b.setAttribute('aria-current','page')}else{b.removeAttribute('aria-current')}});
+    crumbs.innerHTML='<b>'+$('#'+id).dataset.crumb+'</b>';window.scrollTo(0,0);
+  }
+  document.addEventListener('click',function(e){
+    var g=e.target.closest('[data-go]');if(g){e.preventDefault();show(g.dataset.go)}
+  });
+
+  /* theme */
+  var tb=$('#theme'),root=document.documentElement;
+  tb.addEventListener('click',function(){var d=root.dataset.theme!=='dark';root.dataset.theme=d?'dark':'light';tb.setAttribute('aria-pressed',d);tb.textContent=d?'Light theme':'Dark theme'});
+
+  /* tabs and log citations */
+  function tab(p){
+    $$('.tabs button').forEach(function(x){x.setAttribute('aria-selected',x.dataset.p===p)});
+    $$('#v-detail .panel').forEach(function(x){x.classList.toggle('on',x.id===p)});
+  }
+  $$('.tabs button').forEach(function(t){t.addEventListener('click',function(){tab(t.dataset.p)})});
+  document.addEventListener('click',function(e){
+    var c=e.target.closest('.cite');if(!c)return;
+    tab('p-log');$$('.ln').forEach(function(l){l.classList.remove('hl')});
+    var l=$('#L'+c.dataset.l);l.classList.add('hl');l.scrollIntoView({block:'center'});
+  });
+
+  /* saved views */
+  $$('.chips .chip[aria-pressed]').forEach(function(c){c.addEventListener('click',function(){
+    $$('.chip[aria-pressed]',c.parentNode).forEach(function(x){x.setAttribute('aria-pressed',x===c)});
+  })});
+
+  /* work list */
+  var G=[
+   ['Needs you','+$6.04',[
+    ['t-3f9a12c0','Windows onboarding: set worker tag via tailscale up','ddbnppp','Fix a2, blocked on approval','p-warn','claude-fable-5-2, claude-sonnet-5-5','322k / 38k','$2.64','+$2.94','38 min','m'],
+    ['t-9c1e07b2','Node posture checks','ddbbppp','Gate failed, round 2 of 3','p-bad','claude-sonnet-5-5','281k / 33k','$1.71','+$3.10','55 min','l']]],
+   ['Running','+$9.20',[
+    ['t-a07c55f1','Plan item editor','dnppppp','Build','p-run','claude-opus-5-5','412k / 51k','$4.20','+$5.40','1 h 20 min','m'],
+    ['t-8b41d7e2','Budget hold toggle','dddnppp','Review','p-run','claude-sonnet-5-5, claude-fable-5-2','188k / 9k','$1.30','+$2.20','24 min','h'],
+    ['t-c92e0b64','Commit message drafts','np','Draft','p-run','qwen2.5-coder:14b','14k / 3k','$0.00','+$0.00','4 min','h'],
+    ['t-5d3318aa','Final review, batch 14','dddddnp','Final','p-run','codex gpt-5.6-terra','96k / 7k','$1.10','+$1.60','12 min','h']]],
+   ['Waiting merge','+$0.08',[
+    ['t-7e20b9d3','Roles leaderboard inline','dddddp','Ready to merge','p-ok','claude-sonnet-5-5, claude-fable-5-2','240k / 29k','$1.88','+$0.04','2 min','h'],
+    ['t-61b4c8f9','Models: delete catalog entry','dddddp','Ready to merge','p-ok','claude-sonnet-5-5, claude-fable-5-2, codex gpt-5.6-terra','305k / 36k','$3.02','+$0.04','2 min','h']]],
+   ['Done','',[
+    ['t-2c8f4a10','SPEC-ui-revamp draft','ddddd','Merged 11:20','p-idle','claude-fable-5-2, claude-sonnet-5-5','150k / 21k','$1.40','',null,null],
+    ['t-0b93a5ce','onboard.sh tag fix','dddd','Merged 09:15','p-idle','claude-sonnet-5-5','77k / 8k','$0.52','',null,null]]]
+  ];
+  var CL={h:['high',90,''],m:['medium',60,'m'],l:['low',30,'l']};
+  var WORD={d:'done',b:'failed',n:'current',p:'planned'};
+  function strip(s){return '<span class="mini" role="img" aria-label="Chain: '+s.split('').map(function(c){return WORD[c]}).join(', ')+'">'+s.split('').map(function(c){return '<i class="'+c+'"></i>'}).join('')+'</span>'}
+  function row(r){
+    var c=CL[r[10]],fc=c?'<span class="fc">'+r[8]+'</span><div class="muted sm">ETA '+r[9]+'</div><span class="conf '+c[2]+' sm"><i><b style="width:'+c[1]+'%"></b></i>'+c[0]+'</span>':'<span class="muted">none</span>';
+    return '<tr><td><a href="#" data-go="detail"><b class="mono">'+r[0]+'</b></a><div>'+r[1]+'</div></td><td>'+strip(r[2])+'</td><td><span class="pill '+r[4]+'">'+r[3]+'</span></td><td class="mono sm">'+r[5]+'</td><td class="n mono sm">'+r[6]+'<div class="muted">'+r[7]+'</div></td><td class="n">'+fc+'</td></tr>';
+  }
+  function render(st){
+    var h='';
+    if(st==='load'){
+      ['Needs you','Running','Waiting merge','Done'].forEach(function(n){h+='<div class="card" aria-busy="true"><header><h2>'+n+'</h2><span class="muted">Loading from /api/work</span></header><span class="skel" style="width:80%"></span><span class="skel" style="width:64%"></span><span class="skel" style="width:72%"></span></div>'});
+    }else if(st==='empty'){
+      h='<div class="card"><div class="empty"><b>No work items match these filters</b>Account spare, node laptop-0ir6d81o and kind merge match nothing. laptop-0ir6d81o has been offline for 3 h.<div style="margin-top:var(--s3)"><button class="btn sm" id="clr">Clear filters</button></div></div></div>';
+    }else if(st==='err'){
+      h='<div class="err" role="alert"><div><b>Could not load work items.</b> GET /api/work returned 503 from master (controller restarting, retry in 10 s). Showing nothing rather than stale data. Forecasts need this call too.<div style="margin-top:var(--s2)"><button class="btn sm" id="retry">Retry</button> <a href="#">Open Activity</a></div></div></div>';
+    }else{
+      G.forEach(function(g,i){
+        h+='<div class="card"><header><h2>'+g[0]+' <span class="muted" style="font-weight:400">'+(i===3?'6':g[2].length)+'</span></h2><span class="muted">'+(g[1]?'Forecast remaining '+g[1]:'Last 24 h')+'</span></header><table><thead><tr><th>Work item</th><th>Chain</th><th>Stage</th><th>Models used</th><th class="n">Tokens in / out, cost</th><th class="n">Forecast to finish</th></tr></thead><tbody>'+g[2].map(row).join('')+'</tbody></table>'+(i===3?'<div class="actions"><button class="btn sm">Show 4 more</button></div>':'')+'</div>';
+      });
+    }
+    var gr=$('#groups');gr.innerHTML=h;gr.setAttribute('aria-busy',st==='load');
+    var c=$('#clr');if(c)c.onclick=function(){$('#demo').value='ok';render('ok')};
+    var r=$('#retry');if(r)r.onclick=function(){$('#demo').value='load';render('load');setTimeout(function(){$('#demo').value='ok';render('ok')},900)};
+  }
+  $('#demo').addEventListener('change',function(){render(this.value)});
+  render('ok');
+
+  /* chain with Why? popovers */
+  var S=[
+   ['Spec','claude-fable-5-2','spare','1 attempt','done','Fable gives guidance only (specs, plans, reviews), so it takes spec work. Placed on spare: 31% of its 5 h window free.','rule v3 "spec to Fable", decision d-4412'],
+   ['Build','claude-sonnet-5-5','fleet','1 attempt','done','Routed to Sonnet: builds default to Sonnet; Opus and Codex are for hard or security-critical work. Placed on master, the least-busy eligible node (3 of 4 jobs).','rule v3 "builds to Sonnet", decision d-4419'],
+   ['Gate','fleet-gate','master','failed, 1 of 3','bad','The runner runs the gate once after a build. Round 1 of 3 failed, so the work goes back to the builder. After 3 failed rounds it escalates to you.','pipeline step 4, event ev-88213'],
+   ['Fix','claude-sonnet-5-5','fleet','attempt 2, running','now','Same model and session as the builder so context is kept. It waited 4 min first: 2 of 2 Claude jobs were in use on fleet (rule 8, at most two per account).','budget_wait 4m, decision d-4431'],
+   ['Review','claude-fable-5-2','spare','planned','plan','Reviewer must differ from the builder (Sonnet built it), so Fable. One paid reviewer per round; Codex is not used because the change is not security-sensitive.','pipeline step 5, plan item p-3'],
+   ['Final','codex gpt-5.6-terra','fleet','planned','plan','Final whole-branch review once per batch, medium effort. Codex is at 83% of weekly and limited to final reviews until Thu 09:00, which this is.','paid-model rule 1, budget status'],
+   ['Merge','claude-haiku-5-5','fleet','planned','plan','Merges are mechanical, so Haiku. Never Codex for merges. Runs only after review and final are green.','paid-model rule 1, plan item p-3']
+  ];
+  $('#chain').innerHTML=S.map(function(s,i){
+    return '<div class="stg '+s[4]+'" role="listitem"><div class="dot">'+(i+1)+'</div><div class="nm">'+s[0]+'</div><div class="md mono">'+s[1]+'</div><div class="ac">'+s[2]+'</div><div class="at">'+s[3]+'</div><button class="why" aria-expanded="false" aria-controls="pop'+i+'">Why?</button><div class="pop" id="pop'+i+'" role="region" aria-label="Why '+s[0]+'"><h4>Why: '+s[0].toLowerCase()+'</h4><p>'+s[5]+'</p><div class="src">Source: '+s[6]+'</div></div></div>';
+  }).join('');
+  function closePops(){$$('.pop.on').forEach(function(p){p.classList.remove('on');p.parentNode.querySelector('.why').setAttribute('aria-expanded','false')})}
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('.why');
+    if(!b){if(!e.target.closest('.pop'))closePops();return}
+    var p=b.parentNode.querySelector('.pop'),open=p.classList.contains('on');
+    closePops();if(!open){p.classList.add('on');b.setAttribute('aria-expanded','true')}
+  });
+
+  /* one-click actions always get a confirm step */
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('.act');if(!a)return;
+    var host=a.closest('.ins,.body'),box=host.querySelector('.cf');
+    var req=a.id==='send-hint'?'message_task(t-3f9a12c0, same session)\n"'+$('#hint').value+'"':a.dataset.req;
+    box.innerHTML='<b>Confirm.</b> This sends exactly:<code></code><div class="row"><button class="btn sm primary ok">Confirm</button><button class="btn sm no">Cancel</button></div>';
+    box.querySelector('code').textContent=req;box.classList.add('on');
+    box.querySelector('.no').onclick=function(){box.classList.remove('on')};
+    box.querySelector('.ok').onclick=function(){box.classList.remove('on');box.innerHTML='';a.disabled=true;a.textContent='Done (mock)';var n=document.createElement('div');n.className='done-note';n.textContent='Sent. Logged in Activity with the evidence above.';box.parentNode.appendChild(n)};
+  });
+
+  /* ask the fleet */
+  var QA={
+   gate:'<p>The gate failed because <span class="mono">test_onboard</span> found the runner embedded in onboard.ps1 different from nodes/runner.py (gate tail a1). In a2, build.py skipped onboard.ps1 because it found no embed marker <button class="cite" data-l="5">L5</button>, and only onboard.sh was edited <button class="cite" data-l="6">L6</button>. So the ps1 copy is probably still stale.</p>',
+   a2:'<p>a2 changed 4 lines and removed 2 in nodes/runner.py <button class="cite" data-l="3">L3</button>, ran build.py <button class="cite" data-l="4">L4</button>, re-embedded onboard.sh <button class="cite" data-l="6">L6</button> and committed <button class="cite" data-l="7">L7</button>. It is now waiting for the gate <button class="cite" data-l="8">L8</button>.</p>'
+  };
+  $$('[data-q]').forEach(function(b){b.addEventListener('click',function(){$('#q').value=b.textContent})});
+  $('#ask').addEventListener('click',function(){
+    var q=$('#q').value.toLowerCase(),out=$('#answer'),k=/gate|fail/.test(q)?'gate':/a2|change/.test(q)?'a2':null;
+    out.innerHTML='<span class="skel" style="margin:0 0 var(--s2);width:90%"></span><span class="skel" style="margin:0;width:70%"></span><div class="local" style="margin-top:var(--s2)">qwen2.5-coder:14b on master is reading 8 log lines...</div>';
+    setTimeout(function(){
+      out.innerHTML=k?'<div class="ans">'+QA[k]+'<div class="local">Answered by local fast role. $0.00. Confidence '+(k==='gate'?'84%':'79%')+'. Check the cited lines before acting.</div></div>':'<div class="err" role="alert"><div><b>No grounded answer.</b> The fast role found no log lines or findings that support one, so it returned nothing rather than guess. Try a narrower question about the gate, a2 or a finding.</div></div>';
+    },900);
+  });
+
+  /* spawn dialog */
+  var M=[
+   {id:'claude-sonnet-5-5',ag:'claude',acct:'fleet',st:['p-ok','OK'],note:'1 of 2 Claude jobs in use'},
+   {id:'claude-fable-5-2',ag:'claude',acct:'spare',st:['p-warn','Queues about 6 min'],note:'2 of 2 jobs in use on spare'},
+   {id:'claude-opus-5-5',ag:'claude',acct:'spare',st:['p-warn','At soft budget'],note:'spare at 88% of 5 h, resets in 3 h 05 m'},
+   {id:'claude-haiku-5-5',ag:'claude',acct:'fleet',st:['p-ok','OK'],note:'shares the fleet slots with Sonnet'},
+   {id:'codex gpt-5.6-terra',ag:'codex',acct:'fleet',st:['p-warn','Limited'],note:'83% of weekly, final and security reviews until Thu 09:00'},
+   {id:'qwen2.5-coder:14b',ag:'ollama',acct:'local',st:['p-idle','Local, free'],note:'roles coder and fast; both nodes full, queues about 3 min'},
+   {id:'glm-4.7-flash',ag:'ollama',acct:'local',st:['p-idle','Local, free'],note:'role reviewer, loaded on master'}
+  ];
+  var LOC='Local models get no tools or shell.',F='paid-model rule 0',C1='paid-model rule 1',SB='soft budget, spare';
+  var R={
+   review:{'claude-sonnet-5-5':['no','Sonnet built this work. A reviewer must differ from the builder; same-model review needs independence="waived" and a reason.','pipeline step 5'],
+     'claude-fable-5-2':['ok','Recommended. Fable reviews diffs and differs from the builder. It queues behind 2 spare jobs.','one reviewer per round'],
+     'claude-opus-5-5':['warn','Allowed, but spare is at 88% of its soft budget. Prefer Fable or Haiku.',SB],
+     'claude-haiku-5-5':['ok','Allowed. Cheap; fine for a delta re-review.','re-review: delta only'],
+     'codex gpt-5.6-terra':['no','Codex is for final and security reviews only; weekly is at 83%.',C1],
+     'qwen2.5-coder:14b':['ok','Advisory pre-review only. It does not replace the paid review.','local, no paid cost'],
+     'glm-4.7-flash':['ok','Advisory review via review_diff, read-only.','local, no paid cost']},
+   fix:{'claude-sonnet-5-5':['ok','Recommended. Fix rounds default to Sonnet, and it keeps the builder session.','rule v3 "builds, fixes to Sonnet"'],
+     'claude-fable-5-2':['no','Refused: Fable never builds, fixes or tests. It gives guidance only (reviews, plans, green lights). Pick Sonnet or Haiku.',F],
+     'claude-opus-5-5':['warn','Allowed, but Opus is for hard or security-critical builds, and spare is at its soft budget. Say why.',SB],
+     'claude-haiku-5-5':['ok','Allowed for small mechanical fixes. This one touches two scripts, so Sonnet is safer.','rule v3'],
+     'codex gpt-5.6-terra':['no','Codex is for final, security and hard builds only. This is a routine fix.',C1],
+     'qwen2.5-coder:14b':['no',LOC,'local models rule'],
+     'glm-4.7-flash':['no',LOC,'local models rule']},
+   merge:{'claude-sonnet-5-5':['ok','Allowed. Merges are mechanical: Sonnet or Haiku.','rule v3 "merges to Sonnet or Haiku"'],
+     'claude-fable-5-2':['no','Refused: Fable never builds, fixes or tests; merges go to the smaller models.',F],
+     'claude-opus-5-5':['warn','Allowed, but overkill for a merge, and spare is at its soft budget.',SB],
+     'claude-haiku-5-5':['ok','Recommended. Cheapest capable model (about $0.04).','rule v3 "merges to Sonnet or Haiku"'],
+     'codex gpt-5.6-terra':['no','Refused: never Codex for merges.',C1],
+     'qwen2.5-coder:14b':['no',LOC+' A merge needs git.','local models rule'],
+     'glm-4.7-flash':['no',LOC+' A merge needs git.','local models rule']}
+  };
+  var EFF={review:'medium',fix:'medium',merge:'low'},PILL={ok:['p-ok','Allowed'],warn:['p-warn','Allowed with warning'],no:['p-bad','Refused']};
+  var D={kind:'review',model:'claude-fable-5-2',parent:null};
+  var scrim=$('#scrim');
+  function mlist(){
+    $('#models').innerHTML=M.map(function(m){
+      var p=PILL[R[D.kind][m.id][0]];
+      return '<label class="mrow"><input type="radio" name="model" value="'+m.id+'"'+(D.model===m.id?' checked':'')+'><span><span class="mono">'+m.id+'</span> <span class="muted sm">'+m.acct+'</span><div class="sub muted">'+m.note+'</div></span><span class="pills"><span class="pill '+m.st[0]+'">'+m.st[1]+'</span><span class="pill '+p[0]+'">'+p[1]+'</span></span></label>';
+    }).join('');
+    $$('#models input').forEach(function(i){i.onchange=function(){D.model=i.value;upd()}});
+  }
+  function upd(){
+    $$('#kinds input').forEach(function(i){i.checked=i.value===D.kind});
+    mlist();
+    var m=M.filter(function(x){return x.id===D.model})[0],v=R[D.kind][D.model],par=D.parent;
+    $('#f-parent').value=par||'(none)';$('#f-link').value=par?'work:'+par:'(none)';$('#f-stage').value=D.kind;$('#f-eff').value=EFF[D.kind];
+    var vb=$('#verdict');vb.className='verdict '+v[0];
+    vb.innerHTML='<span class="pill '+PILL[v[0]][0]+'">'+PILL[v[0]][1]+'</span><p style="margin-top:var(--s2)"></p><div class="muted" style="font-size:12px;margin-top:var(--s2)"></div>';
+    vb.querySelector('p').textContent=v[1];vb.querySelector('.muted').textContent='Rule: '+v[2]+'. Account '+m.acct+': '+m.note+'.';
+    var o=['agent="'+m.ag+'"','model="'+(m.ag==='codex'?'gpt-5.6-terra':m.id)+'"','kind="'+D.kind+'"'];if(m.acct!=='local')o.push('profile="'+m.acct+'"');
+    o.push('stage="'+D.kind+'"');if(par){o.push('parent_id="'+par+'"');o.push('link="work:'+par+'"')}
+    o.push('gate="scripts/gate.sh"','mode="auto-edit"','effort="'+EFF[D.kind]+'"');
+    $('#req').textContent='spawn_task(\n  '+o.join(',\n  ')+'\n)';
+    $('#dlg-start').disabled=v[0]==='no';
+    $('#dlg-start').textContent=v[0]==='no'?'Refused by budget rule':'Start';
+    $('#dlg-cf').classList.remove('on');$('#dlg-done').style.display='none';
+  }
+  function openDlg(k,m,p){D.kind=k;D.model=m;D.parent=p||null;scrim.classList.add('on');upd();$('#dlg-cancel').focus()}
+  function closeDlg(){scrim.classList.remove('on')}
+  $$('#kinds input').forEach(function(i){i.onchange=function(){D.kind=i.value;upd()}});
+  document.addEventListener('click',function(e){
+    var s=e.target.closest('[data-spawn]');if(!s)return;var a=s.dataset.spawn.split('|');openDlg(a[0],a[1],a[2]);
+  });
+  $('#spawn-top').addEventListener('click',function(){openDlg('review','claude-fable-5-2',cur==='detail'?'t-3f9a12c0':null)});
+  $('#dlg-x').onclick=$('#dlg-cancel').onclick=closeDlg;
+  scrim.addEventListener('click',function(e){if(e.target===scrim)closeDlg()});
+  $('#dlg-start').onclick=function(){
+    var m=M.filter(function(x){return x.id===D.model})[0];
+    $('#dlg-cf-t').textContent='Starts a '+D.kind+' task on '+D.model+(m.acct==='local'?' (no paid cost).':' / '+m.acct+'. Budget rule check passed.')+' You can cancel it from the work item.';
+    $('#dlg-cf').classList.add('on');
+  };
+  $('#dlg-back').onclick=function(){$('#dlg-cf').classList.remove('on')};
+  $('#dlg-go').onclick=function(){$('#dlg-cf').classList.remove('on');var d=$('#dlg-done');d.textContent='Queued (mock): '+D.kind+' task, parent '+(D.parent||'none')+'. It will appear on the work item chain as planned.';d.style.display='block'};
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeDlg();closePops()}});
+})();
+</script>
+</body>
+</html>

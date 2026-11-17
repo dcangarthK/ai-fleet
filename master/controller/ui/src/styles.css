@@ -706,3 +706,12 @@ a.live-row:hover { background: var(--sunken); }
   input, select, textarea, label.field > input, label.field > select, label.field > textarea,
   .field input, .field select, .field textarea, .palette-input, .term .term-search input { font-size: 16px; }
 }
+
+/* Phone: save status reads first, on its own line, then the actions. */
+@media (max-width: 640px) {
+  .save-bar > [role="status"] { order: -1; flex-basis: 100%; }
+}
+/* Wide score tables scroll sideways: keep the model column pinned so the row stays identifiable. */
+.evals-scroll th:first-child, .evals-scroll td:first-child {
+  position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line);
+}

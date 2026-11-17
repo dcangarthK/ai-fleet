@@ -43,7 +43,7 @@ export function EvalsPage() {
       <LoadError error={evals.error} />
       <ErrorBanner error={error} onDismiss={clearError} />
 
-      <div className="panel">
+      <div className="panel evals-scroll">
         <table>
           <thead>
             <tr>

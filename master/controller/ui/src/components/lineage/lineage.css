@@ -277,3 +277,7 @@ input.lin-range:focus:not(:focus-visible) { outline: none; }
   /* Track sits on its own row here, so the hidden slot can leave layout without resizing it. */
   .lin-scrub-end > [data-on="false"] { display: none; }
 }
+@media (max-width: 640px), (pointer: coarse) {
+  .lin-hint-how { display: none; }
+  .lin-hint-inline { margin-left: auto; }
+}

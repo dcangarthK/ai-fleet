@@ -215,7 +215,7 @@ function Toolbar({ tv, cursor, grouped, setGrouped, onFit }: { tv: ReturnType<ty
       <Button size="sm" variant="ghost" onClick={() => tv.pan(-(tv.view.t1 - tv.view.t0) * 0.4)} aria-label="Pan earlier">‹ Earlier</Button>
       <Button size="sm" variant="ghost" onClick={() => tv.pan((tv.view.t1 - tv.view.t0) * 0.4)} aria-label="Pan later">Later ›</Button>
       {setGrouped && <Button size="sm" variant={grouped ? "primary" : "secondary"} aria-pressed={grouped} onClick={() => setGrouped(!grouped)}>Group by work item</Button>}
-      <span className="quiet lin-hint-inline">Drag to pan · Ctrl/⌘ + scroll or pinch to zoom · {fmtDur(tv.view.t1 - tv.view.t0)} in view</span>
+      <span className="quiet lin-hint-inline"><span className="lin-hint-how">Drag to pan · Ctrl/⌘ + scroll or pinch to zoom · </span>{fmtDur(tv.view.t1 - tv.view.t0)} in view</span>
     </div>
   );
 }

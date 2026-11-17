@@ -2184,7 +2184,9 @@ class JobManager:
         end = start
         for raw in lines:
             end += len(raw) + 1  # file offset just after this line
-            if b'"assistant"' not in raw and b'"rate_limit_event"' not in raw and b'"user"' not in raw:
+            if (b'"assistant"' not in raw and b'"rate_limit_event"' not in raw and b'"user"' not in raw
+                    and b'"item.started"' not in raw and b'"item.updated"' not in raw
+                    and b'"item.completed"' not in raw):
                 continue
             try:
                 event = json.loads(raw.decode("utf-8", "replace"))
@@ -2239,7 +2241,8 @@ class JobManager:
                 if item.get("type") == "agent_message" and isinstance(item.get("text"), str) and item["text"].strip():
                     self._silent_tool_text(job, st)
                 elif kind == "item.started" and item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):
-                    self._silent_tool_call(job, st, item.get("name") or item.get("command") or item.get("type"), item)
+                    name = item.get("name") if item.get("type") == "mcp_tool_call" else item.get("type")
+                    self._silent_tool_call(job, st, name, item)
             if st["cap"] is None and st.get("loop") and st["loop"].found:
                 st["cap"] = st["loop"].found
         if st["cap"] is not None and st["cap"].get("reason") == "loop" and not st["pending"]:

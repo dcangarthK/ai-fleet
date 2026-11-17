@@ -204,6 +204,18 @@ class Watch(Base):
         self.assertNotIn("tool_heartbeat", job)
         self.assertEqual(st["silent_tool_calls"], 1)
 
+    def test_codex_command_items_emit_a_safe_heartbeat_after_the_threshold(self):
+        self.m.silent_tool_heartbeat_calls = 2
+        self.m._touched_files = lambda _cwd: ["changed.py"]
+        job = self.job(agent="codex")
+        st = self.state(job, next_silent_tool_heartbeat=2)
+        command = lambda value: {"type": "item.started", "item": {
+            "type": "command_execution", "command": value}}
+        self.write(job, [command("echo secret-token"), command("rm -rf /not-a-real-path")])
+        self.m._watch_stream(job, st)
+        self.assertEqual(job["tool_heartbeat"], {"last_tool": "command_execution",
+                                                  "files_touched": ["changed.py"], "count": 2})
+
 
 class Launch(Base):
     def setUp(self):

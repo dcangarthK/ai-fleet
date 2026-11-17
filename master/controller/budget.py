@@ -925,7 +925,9 @@ def near_limit_until(rules: dict, account: str | None, agent: str, now: float) -
     record = usage_records().get(account)
     if not record or record.get("agent") != agent:
         return None
-    threshold = rules["limits"].get("near_limit_percent", DEFAULT_RULES["limits"]["near_limit_percent"])
+    # Dispatch has a hard safety floor: a provider-reported primary window at 90% must never receive new work.
+    # A stricter owner rule still applies, but a looser one cannot reduce this floor.
+    threshold = min(90, rules["limits"].get("near_limit_percent", DEFAULT_RULES["limits"]["near_limit_percent"]))
     resets = [window.get("resets_at") for window in (record.get("windows") or {}).values()
               if isinstance(window, dict) and now - window.get("observed_at", 0) <= usage.STALE_S
               # A full window is an established limit, not a new watcher hold: it must still clear immediately
@@ -1132,8 +1134,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         chosen, first_limit, first_watch = None, (None, None, None, False), (None, None, None, False)
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
-            # Requirement 10: fresh usage near the window limit reserves the remaining headroom.  This watcher is
-            # live-mode only while shadow mode continues to describe the existing placement decisions.
+            # Fresh provider usage near the window limit reserves the remaining headroom before dispatch.
             near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
             watched = near is not None
             if near and not until:

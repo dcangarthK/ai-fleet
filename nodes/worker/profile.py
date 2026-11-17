@@ -25,8 +25,10 @@ TOOLS = {
 # What a build/fix/test job's plain Bash is pre-approved as (auto-edit and full only; supervised pre-approves
 # nothing): the interpreters and runners the gate uses, not every shell command.
 BASH_RULES = [
-    "Bash(python3:*)", "Bash(git:*)", "Bash(uv run:*)", "Bash(scripts/gate.sh:*)", "Bash(./scripts/gate.sh:*)",
-    "Bash(npx vitest:*)",
+    "Bash(python3:*)", "Bash(uv run:*)", "Bash(scripts/gate.sh:*)", "Bash(./scripts/gate.sh:*)",
+    "Bash(npx vitest:*)", "Bash(python3 -m unittest:*)", "Bash(npm test)",
+    # Local git only (playbook 3.4). No blanket git:*, so push, remote, config, reset, clean stay ask-first.
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)",
     # Read-only inspection and the two fixed npm commands (not sed, rg, npm run:*, echo, test or find).
     "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)",
     "Bash(diff:*)", "Bash(pwd)", "Bash(npm ci --ignore-scripts)", "Bash(npm run build)",

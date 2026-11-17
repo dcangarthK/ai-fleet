@@ -3100,6 +3100,26 @@ class JobManager:
         return item in permitted or str(item).split("(")[0] in permitted
 
     @staticmethod
+    def _apply_policy_ceiling(requested, permitted):
+        """Keep what the policy permits. A broader scoped policy entry (Bash(git:*)) covers a narrower lean rule
+        (Bash(git status:*)); the policy's own entry is granted in its place, once, as before the rules were split."""
+        out = []
+        for item in requested:
+            if JobManager._policy_permits(item, permitted):
+                keep = item
+            else:
+                keep = None
+                inner = str(item)[5:-1] if str(item).startswith("Bash(") and str(item).endswith(")") else None
+                for entry in permitted:
+                    if inner and entry.startswith("Bash(") and entry.endswith(":*)") and (
+                            inner.startswith(entry[5:-3] + " ") or inner.startswith(entry[5:-3] + ":")):
+                        keep = entry
+                        break
+            if keep is not None and keep not in out:
+                out.append(keep)
+        return out
+
+    @staticmethod
     def _lean_grant(tools, mode):
         """What a lean job's tool list pre-approves, by mode (Part H 3.1). supervised: nothing, every call needs
         approval. read-only: the read tools. auto-edit/full: the list with Bash scoped to the rules in
@@ -3132,6 +3152,31 @@ class JobManager:
             tools = [item for item in tools if item in names]
         return tools or None
 
+    @staticmethod
+    def _git_writable_roots(job, mode, sandbox, resume=False):
+        """Codex workspace-write: a linked worktree's git dir (<repo>/.git/worktrees/<id>) lives outside the cwd, so
+        `git commit` fails creating index.lock there. Add that dir and the common dir as `--add-dir` (listed by
+        `codex exec --help`). Never for read-only, full (no sandbox) or when cwd is not a git checkout."""
+        if sandbox != "workspace-write" or mode == "full" or not job.get("cwd"):
+            return []
+        roots = []
+        for opt in ("--absolute-git-dir", "--git-common-dir"):
+            try:
+                done = subprocess.run(["git", "-C", job["cwd"], "rev-parse", opt], capture_output=True, text=True,
+                                      timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            path = done.stdout.strip() if done.returncode == 0 else ""
+            if path:
+                path = str((Path(job["cwd"]) / path).resolve())  # --git-common-dir may be relative to cwd
+                if path not in roots:
+                    roots.append(path)
+        if not roots:
+            return []
+        if resume:  # `codex exec resume --help` has no --add-dir; the config override is UNVERIFIED for resume
+            return ["-c", "sandbox_workspace_write.writable_roots=[%s]" % ",".join(json.dumps(r) for r in roots)]
+        return [arg for root in roots for arg in ("--add-dir", root)]
+
     def _command(self, job, prompt, allowed_tools, resume):
         agent = job["agent"]
         mode = job["mode"]
@@ -3158,7 +3203,7 @@ class JobManager:
                 if "claude_allow" in policy_tools:
                     permitted = [str(item) for item in policy_tools["claude_allow"]]
                     if requested:  # the policy is a ceiling on what is granted, not a grant
-                        requested = [item for item in requested if self._policy_permits(item, permitted)]
+                        requested = self._apply_policy_ceiling(requested, permitted)
                     elif mode in ("auto-edit", "full"):
                         requested = list(permitted)
                         if mode == "auto-edit":  # a plain "Bash" in the policy is only the scoped rules for a worker
@@ -3205,6 +3250,7 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                cmd += self._git_writable_roots(job, mode, sandbox, resume=True)
                 if job.get("effort"):
                     cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd += [job["session_id"], "-"]  # "-": prompt from stdin
@@ -3218,6 +3264,7 @@ class JobManager:
                     cmd += ["--model", job["model"]]
                 if network_flag:
                     cmd += ["-c", "sandbox_workspace_write.network_access=true"]
+                cmd += self._git_writable_roots(job, mode, sandbox)
                 if job.get("effort"):
                     cmd += ["-c", 'model_reasoning_effort="%s"' % job["effort"]]  # per run, never in config.toml
                 cmd.append("-")  # "-": prompt from stdin

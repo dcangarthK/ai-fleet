@@ -127,6 +127,13 @@ describe("graph layout", () => {
     expect(graph.place.b.y).not.toBe(graph.place.c.y);
     expect(graph.height).toBeGreaterThan(100);
   });
+
+  it("packs many single-attempt work items into a readable grid", () => {
+    const nodes = Array.from({ length: 27 }, (_, i) => node({ id: `single-${i}`, root_id: `root-${i}`, created_at: T0 + i }));
+    const graph = layoutGraph(nodes, []);
+    expect(graph.width / graph.height).toBeGreaterThan(0.8);
+    expect(graph.width / graph.height).toBeLessThan(3);
+  });
 });
 
 describe("trace layout", () => {
@@ -267,10 +274,10 @@ describe("agent heartbeats", () => {
     const now = T0 + 1000;
     const tk = { turns: 1, input: 600, output: 0, cache_read: 0, cache_write: 0 };
     const nodes = [
-      node({ id: "a", started_at: T0, ended_at: T0 + 60, tokens: tk }),
-      node({ id: "b", started_at: T0 + 30, ended_at: T0 + 120 }),
-      node({ id: "c", started_at: T0 + 300, ended_at: null, state: "working" }),
-      node({ id: "d", agent: "codex", model: "gpt", started_at: T0 + 10, ended_at: T0 + 20 }),
+      node({ id: "a", created_at: T0, started_at: T0, ended_at: T0 + 60, tokens: tk }),
+      node({ id: "b", created_at: T0, started_at: T0 + 30, ended_at: T0 + 120 }),
+      node({ id: "c", created_at: T0, started_at: T0 + 300, ended_at: null, state: "working" }),
+      node({ id: "d", created_at: T0, agent: "codex", model: "gpt", started_at: T0 + 10, ended_at: T0 + 20 }),
     ];
     const rows = agentRows(nodes, now, { t0: T0, t1: T0 + 600 }, 10);
     const sonnet = rows.find((r) => r.model === "claude-sonnet")!;

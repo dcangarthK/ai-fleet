@@ -2333,11 +2333,12 @@ async def cleanup(task_id: str, force: bool = False) -> dict:
         if not force:
             import subprocess
             branch = task.get("branch") or "fleet/" + task_id
-            merged, reason = _branch_merged(task.get("repo"), branch)
+            merged, reason = await asyncio.to_thread(_branch_merged, task.get("repo"), branch)
             out = dict(out)
             if merged:
-                done = subprocess.run(["git", "-C", task["repo"], "branch", "-d", branch],
-                                      capture_output=True, text=True, timeout=30)
+                done = await asyncio.to_thread(
+                    subprocess.run, ["git", "-C", task["repo"], "branch", "-d", branch],
+                    capture_output=True, text=True, timeout=30)
                 if done.returncode:
                     out.update({"branch_kept": True, "reason": "delete failed: " + done.stderr.strip()[:200]})
                 else:

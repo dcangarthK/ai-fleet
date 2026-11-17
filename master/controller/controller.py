@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import auth  # noqa: E402
+import batch as batch_machine  # noqa: E402
 import budget  # noqa: E402
 import events  # noqa: E402
 import evaluations  # noqa: E402
@@ -569,7 +570,7 @@ async def lifespan(_: FastAPI):
     fleet_instructions.import_repo()
     events.bind_loop(asyncio.get_running_loop())
     background = [asyncio.create_task(loop()),
-                  asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()),
+                  asyncio.create_task(evaluations.worker()), asyncio.create_task(pipeline_loop()), asyncio.create_task(batch_loop()),
                   asyncio.create_task(retention_loop()), asyncio.create_task(handoff.resume_loop()),
                   asyncio.create_task(live.sweep_loop())]
     if tasks.POLL_SECONDS > 0:  # FLEET_TASK_POLL_SECONDS=0 turns the task poll off; tests then drive ticks themselves
@@ -2029,6 +2030,23 @@ async def advance_pipeline(pipeline_id: str, event: dict) -> dict:
         return await _pipeline_step_unlocked(get_pipeline(pipeline_id), event)
 
 
+def _auto_approve_status(task: dict) -> str:
+    """'pending' while the controller's auto-approve may still resume this blocked task, else 'done' (its held or
+    exhausted event, no policy for the agent, supervised mode, or nothing it could resume)."""
+    if task.get("mode") == "supervised":
+        return "done"
+    auto = (task.get("policy") or {}).get("auto_approve") or {}
+    if not (auto.get("denied_tools") and task["agent"] in (auto.get("agents") or [])):
+        return "done"
+    if not tasks.denied_tool_names(task) or (task.get("auto_approvals") or 0) >= tasks.AUTO_APPROVE_ROUNDS:
+        return "done"
+    with db() as c:
+        last = c.execute("SELECT type FROM events WHERE task_id=? AND type IN "
+                         "('task.auto_approved','task.auto_approve_held','task.auto_approve_exhausted') "
+                         "ORDER BY id DESC LIMIT 1", (task["id"],)).fetchone()
+    return "done" if last and last["type"] != "task.auto_approved" else "pending"
+
+
 async def poll_pipeline(pipeline_id: str) -> None:
     lock = _pipeline_locks.setdefault(pipeline_id, asyncio.Lock())
     if lock.locked():
@@ -2079,8 +2097,13 @@ async def poll_pipeline(pipeline_id: str) -> None:
                 if new_id:
                     await _pipeline_step_unlocked(p, {"type": "build_limited", "action": "handoff", "task_id": new_id})
                     return
-            if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped"):
-                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"],
+            waiting = bool((p.get("budget") or {}).get("waiting_approval"))
+            if build["state"] in ("review", "failed", "interrupted", "cancelled", "capped",
+                                  "blocked", "awaiting_approval") or waiting:
+                # A blocked or awaiting build reaches step() too (AC17). The pipeline only reads it: the controller's
+                # own auto-approve is the one thing that resumes a blocked task.
+                extra = {"auto_approve": _auto_approve_status(build)} if build["state"] == "blocked" else {}
+                await _pipeline_step_unlocked(p, {"type": "build", "state": build["state"], **extra,
                                                   **loopheal.gate_event(build)})
             return
         if p["state"] == "review_waiting":
@@ -2235,6 +2258,194 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
         except HTTPException:
             pass
     return await advance_pipeline(pipeline_id, {"type": "cancel"})
+
+
+# ---------- batches (docs/SPEC-batch-pipeline.md) ----------
+# One call runs a whole batch. batch.py decides; this section stores state, runs pipelines and the final review.
+# It never resumes or releases a task, merges, pushes, completes or cleans up (AC8, AC9).
+
+_batch_locks: dict[str, asyncio.Lock] = {}
+_BATCH_SCHEMA = ("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, state TEXT, body TEXT, "
+                 "created_at REAL, updated_at REAL)")
+
+
+def _ensure_batches() -> None:
+    with db() as c:
+        c.execute(_BATCH_SCHEMA)
+
+
+def get_batch(batch_id: str) -> dict:
+    _ensure_batches()
+    with db() as c:
+        row = c.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"unknown batch {batch_id}")
+    return json.loads(row["body"]) | {"id": row["id"], "created_at": row["created_at"]}
+
+
+def save_batch(b: dict) -> None:
+    with db() as c:
+        c.execute("UPDATE batches SET state=?, body=?, updated_at=? WHERE id=?",
+                  (b["state"], json.dumps(b), time.time(), b["id"]))
+
+
+@app.post("/api/batches")
+async def create_batch(body: dict) -> dict:
+    _ensure_batches()
+    try:
+        b = batch_machine.new_batch(body)
+        for item in b["items"]:  # AC5: a reviewer that matches the builder is refused at submit, whole batch
+            build = batch_machine.route_build(item, {"models": {}, "accounts": {}}, 0)
+            review = batch_machine.route_review(build, item["security_sensitive"], {"models": {}, "accounts": {}}, 0)
+            pipeline_machine.new(batch_machine.pipeline_spec(item, b["policy"], build, review))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    b["id"], now = "b-" + secrets.token_hex(4), time.time()
+    with db() as c:
+        c.execute("INSERT INTO batches (id,state,body,created_at,updated_at) VALUES (?,?,?,?,?)",
+                  (b["id"], b["state"], json.dumps(b), now, now))
+    await batch_tick(b["id"])
+    return batch_machine.summary(get_batch(b["id"]))
+
+
+@app.get("/api/batches/{batch_id}")
+def read_batch(batch_id: str, full: bool = False) -> dict:
+    return batch_machine.summary(get_batch(batch_id), full=full)
+
+
+@app.get("/api/batches/{batch_id}/wait")
+async def wait_batch(batch_id: str, timeout: float = 1800) -> dict:
+    """One long-poll the controller wakes on events: returns when the batch is done, or at the timeout."""
+    deadline = time.monotonic() + min(max(timeout, 1), 1800)
+    while True:
+        since = events.snapshot()
+        b = get_batch(batch_id)
+        if b["state"] == "done" or time.monotonic() >= deadline:
+            return {"timed_out": b["state"] != "done"} | batch_machine.summary(b)
+        await events.changed(since, min(30, deadline - time.monotonic()))
+
+
+def _batch_item_event(item: dict) -> dict:
+    p = get_pipeline(item["pipeline_id"])
+    event = {"type": "pipeline", "id": item["id"], "pipeline": p}
+    if p.get("build_task"):
+        event["branch"] = tasks.get_task(p["build_task"]).get("branch") or "fleet/" + p["build_task"]
+    review_ids = [r.get("task_id") for r in p["reviews"].values() if r.get("task_id")]
+    ids = [i for i in [p.get("build_task"), *review_ids] if i]
+    b, r = p["builder"], (p["reviewers"] or [{}])[0]
+    paid = len((p.get("budget") or {}).get("paid_rounds", [])) or len(review_ids)
+    event["models"] = {"builder": {b.get("model") or b["agent"]: p["round"]},
+                       "reviewer": {(r.get("model") or r.get("agent") or "?"): paid} if paid else {}}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        with db() as c:  # tokens per model from the budget rows (agent_usage); units as recorded there
+            rows = c.execute(f"SELECT model, SUM(input) i, SUM(output) o FROM agent_usage WHERE task_id IN ({marks}) "
+                             "GROUP BY model", ids).fetchall()
+        event["spend"] = {(row["model"] or "?"): {"input": row["i"] or 0, "output": row["o"] or 0} for row in rows}
+        gate = tasks.get_task(p["build_task"]).get("gate_result")
+        if gate and p["state"] in ("escalated", "failed"):
+            event["gate_tail"] = str(gate)[-1500:]
+    return event
+
+
+async def _batch_start_item(b: dict, item: dict) -> None:
+    spec = batch_machine.pipeline_spec(item, b["policy"], item["build"], item["review"])
+    try:
+        p = await create_pipeline(PipelineRequest(**spec))
+    except HTTPException as exc:
+        item["state"], item["escalation"] = "failed", f"pipeline could not start: {exc.detail}"
+        return
+    item["pipeline_id"] = p["id"]
+    if p.get("build_task"):
+        try:  # descriptive Live label only (spec section 9)
+            live.batch_item_chain(p["build_task"], item["build"], item["review"])
+        except HTTPException:
+            pass
+
+
+_FINDING = re.compile(r"^\W*(HIGH|MED(?:IUM)?|LOW)\b", re.I)
+
+
+async def _batch_spawn_final(b: dict, action: dict) -> None:
+    ready = [i for i in b["items"] if i["id"] in action["ids"]]
+    lines = [f"- {i['title']}: branch {i['branch'] or '?'} in {i['repo']}" for i in ready]
+    prompt = ("Final review of the branches below, read-only: inspect each with git diff against its base and do not "
+              "edit anything. Report a verdict line and HIGH/MED/LOW findings.\n" + "\n".join(lines))
+    try:
+        task = await tasks.create_task(tasks.TaskIn(
+            agent=action["agent"], model=action["model"], effort=action["effort"], kind="final_review",
+            prompt=prompt, title=f"Final review of batch {b['id']}", repo=ready[0]["repo"], worktree=False,
+            mode="auto-edit"))
+        b["final"]["task_id"] = task["id"]
+    except HTTPException as exc:
+        b["final"]["error"] = str(exc.detail)
+        b["final"]["state"] = "parked"
+        b["final"]["until"] = time.time() + 300  # retry later; never reroute to Claude
+
+
+def _batch_final_event(b: dict) -> dict | None:
+    final = b.get("final") or {}
+    if final.get("state") != "spawned" or not final.get("task_id"):
+        return None
+    task = tasks.get_task(final["task_id"])
+    if task["state"] in tasks.ACTIVE:
+        return None
+    text = task.get("result") or task.get("error") or ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    verdict = next((ln for ln in lines if "verdict" in ln.lower()), lines[0] if lines else task["state"])
+    return {"type": "final_done", "verdict": verdict[:200], "model": final.get("model"),
+            "findings": [ln[:200] for ln in lines if _FINDING.match(ln)][:10]}
+
+
+async def batch_tick(batch_id: str) -> None:
+    lock = _batch_locks.setdefault(batch_id, asyncio.Lock())
+    if lock.locked():
+        return
+    async with lock:
+        b = get_batch(batch_id)
+        if b["state"] == "done":
+            return
+        before = json.dumps(b, sort_keys=True)
+        for item in b["items"]:
+            if item["pipeline_id"] and item["state"] not in batch_machine.SETTLED:
+                b, _ = batch_machine.step(b, _batch_item_event(item))
+        event = _batch_final_event(b)
+        if event:
+            b, _ = batch_machine.step(b, event)
+        limits = budget.limit_snapshot(budget.current_rules(), time.time())
+        b, actions = batch_machine.step(b, {"type": "tick", "now": time.time(), "limits": limits})
+        by_id = {i["id"]: i for i in b["items"]}
+        # a restart between the save and the pipeline insert leaves an active item with no pipeline: start it again
+        todo = [a["id"] for a in actions if a["do"] == "start_item"] + [
+            i["id"] for i in b["items"] if i["state"] in batch_machine.ACTIVE and not i["pipeline_id"]
+            and i["id"] not in [a["id"] for a in actions if a["do"] == "start_item"]]
+        save_batch(b)  # state first: a crash after this does not start the same item twice
+        for item_id in todo:
+            await _batch_start_item(b, by_id[item_id])
+            save_batch(b)
+        for action in actions:
+            if action["do"] == "spawn_final_review":
+                await _batch_spawn_final(b, action)
+                save_batch(b)
+        if json.dumps(b, sort_keys=True) != before:
+            events.emit(None, "batch.updated", {"id": batch_id, "state": b["state"]})
+
+
+async def batch_loop() -> None:
+    while True:
+        try:
+            _ensure_batches()
+            with db() as c:
+                ids = [row[0] for row in c.execute("SELECT id FROM batches WHERE state!='done' ORDER BY created_at")]
+        except Exception as exc:
+            print(f"batch poll failed: {exc!r}")
+            ids = []
+        for batch_id in ids:
+            try:
+                await batch_tick(batch_id)
+            except Exception as exc:
+                print(f"batch {batch_id} poll failed: {exc!r}")
+        await asyncio.sleep(POLL_SECONDS)
 
 
 def model_id(reference: str, engine: str = "ollama") -> str:

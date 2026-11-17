@@ -242,6 +242,25 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         if p.get("state") != "building":
             return p, []
         state = event.get("state")
+        budget = p.setdefault("budget", {})
+        if state != "blocked":
+            budget.pop("waiting_approval", None)  # the task left blocked: the controller's auto-approve resumed it
+        if state == "awaiting_approval":
+            p["state"] = "escalated"
+            _history(p, "escalated", note="owner approval needed: the builder task is awaiting approval")
+            return p, []
+        if state == "blocked":
+            # The pipeline never approves anything. While the controller's own auto-approve may still resume the
+            # task, wait; once it has finished (held, exhausted, or no policy), the owner has to act.
+            if event.get("auto_approve") == "pending":
+                if budget.get("waiting_approval") != p.get("build_task"):
+                    budget["waiting_approval"] = p.get("build_task")
+                    _history(p, "building", note="waiting for controller auto-approve")
+                return p, []
+            budget.pop("waiting_approval", None)
+            p["state"] = "escalated"
+            _history(p, "escalated", note="owner approval needed: the builder task stayed blocked")
+            return p, []
         if state == "review":
             p["state"] = "reviewing"
             p["reviews"] = {str(i): {"status": "pending"} for i in range(len(p["reviewers"]))}

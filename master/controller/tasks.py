@@ -972,7 +972,6 @@ async def poll_task(task_id: str) -> None:
     if settled:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
-        task = get_task(task_id)
         await handoff.after_settled(task_id)
         task = get_task(task_id)
         if task.get("failure_reason") == "limit" and task.get("resolution"):

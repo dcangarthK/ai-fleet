@@ -925,7 +925,9 @@ def near_limit_until(rules: dict, account: str | None, agent: str, now: float) -
     record = usage_records().get(account)
     if not record or record.get("agent") != agent:
         return None
-    threshold = rules["limits"].get("near_limit_percent", DEFAULT_RULES["limits"]["near_limit_percent"])
+    # Dispatch has a hard safety floor: a provider-reported primary window at 90% must never receive new work.
+    # A stricter owner rule still applies, but a looser one cannot reduce this floor.
+    threshold = min(90, rules["limits"].get("near_limit_percent", DEFAULT_RULES["limits"]["near_limit_percent"]))
     resets = [window.get("resets_at") for window in (record.get("windows") or {}).values()
               if isinstance(window, dict) and now - window.get("observed_at", 0) <= usage.STALE_S
               # A full window is an established limit, not a new watcher hold: it must still clear immediately
@@ -1132,8 +1134,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         chosen, first_limit, first_watch = None, (None, None, None, False), (None, None, None, False)
         for account in accounts(of_agent):
             until, why = blocked_by(rules, snapshot(account), of_agent, of_key, of_ident)
-            # Requirement 10: fresh usage near the window limit reserves the remaining headroom.  This watcher is
-            # live-mode only while shadow mode continues to describe the existing placement decisions.
+            # Fresh provider usage near the window limit reserves the remaining headroom before dispatch.
             near = near_limit_until(rules, account, of_agent, now) if usage.is_live() else None
             watched = near is not None
             if near and not until:
@@ -1156,6 +1157,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     resolved = model or (node_default_model(agent, node_id) if paid else None)
     key = match_key(rules, agent, resolved)
+    drafted_from = None
+    # Drafts belong on Haiku (TOKEN-DEEPDIVE 2.5): an explicit sonnet/opus draft is admitted on Haiku and the
+    # original identity recorded as routed_from. The owner's budget_override keeps the named model.
+    if kind == "draft" and agent == "claude" and model and not override and \
+            key in ("claude:claude-sonnet-*", "claude:claude-opus-*"):
+        drafted_from = identity(agent, model)
+        model = resolved = KIND_DEFAULT_MODEL["draft"]
+        key = match_key(rules, agent, resolved)
     if rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind):
         raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "
                            "guidance only)")
@@ -1169,7 +1178,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         reserved = ", ".join(entry.get("kinds") or [])
         raise Refusal(400, f"{label(key)} is reserved for [{reserved}]"
                            + (f"; use {alternative} for {kind}" if alternative else f"; no model in the rules allows {kind}"))
-    decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": None,
+    decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": drafted_from,
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
         placed, (until, why, wait_account, watched) = place(agent, key, decision["identity"], entry)

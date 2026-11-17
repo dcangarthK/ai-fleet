@@ -156,10 +156,12 @@ def estimate(kind: str, key: str, history, prompt_bytes: int = 0) -> dict:
     extra = prompt_bytes // 4
     if not rows:
         return {"tokens": DEFAULT_ESTIMATE.get(kind, DEFAULT_TOKENS) + extra, "usd": None, "basis": "default",
-                "samples": 0}
-    tokens = _median([(r.get("input") or 0) + (r.get("output") or 0) + (r.get("cached") or 0) for r in rows])
+                "samples": 0, "cached_tokens": 0}
+    tokens = _median([(r.get("input") or 0) + (r.get("output") or 0) for r in rows])
+    cached = _median([r.get("cached") or 0 for r in rows])
     usd = None if key == "codex" else _median([r.get("cost_usd") for r in rows])
-    return {"tokens": int(tokens) + extra, "usd": usd, "basis": basis, "samples": len(rows)}
+    return {"tokens": int(tokens) + extra, "usd": usd, "basis": basis, "samples": len(rows),
+            "cached_tokens": int(cached or 0)}
 
 
 def history(conn, since: float) -> list[dict]:
@@ -277,7 +279,7 @@ def cleanup_candidates(tasks, is_merged) -> list[dict]:
 def _window(conn, lo: float, hi: float) -> dict:
     per = conn.execute(
         "SELECT a.task_id, MAX(a.agent) AS agent, MAX(t.state) AS state, "
-        "COALESCE(SUM(a.input),0)+COALESCE(SUM(a.output),0)+COALESCE(SUM(a.cached),0) AS tok, "
+        "COALESCE(SUM(a.input),0)+COALESCE(SUM(a.output),0) AS tok, "
         "COALESCE(MAX(a.cost_usd),0) AS usd FROM agent_usage a LEFT JOIN tasks t ON t.id=a.task_id "
         "WHERE a.ts>=? AND a.ts<? AND a.agent IN ('claude','codex') GROUP BY a.task_id", (lo, hi)).fetchall()
     tokens = sum(r["tok"] for r in per)

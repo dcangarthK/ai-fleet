@@ -361,6 +361,28 @@ main hasn't touched them since the branch point, then run nodes/build.py.
 
 ## 6. Where the work stands
 
+**17 Nov early (Part I follow-ups):** both MED follow-ups are merged into main, **not yet pushed** (owner pushes):
+232791a + merge 0aa8b99 (t-5051ca76, Sonnet: `_branch_merged` and `git branch -d` in `async cleanup` now run via
+`asyncio.to_thread`) and c7062fa + merge 09c4350 (t-8a7395c0, Sonnet: verdict line closes the open severity section
+in `trim_task`; new test `test_verdict_closes_severity_section`, which sits in the `Fallbacks` class, cosmetic).
+Delta re-review t-ad322751 (Haiku, re_review): **APPROVE**, no HIGH/MED. Gate on merged main: every test file passes
+when run one per process. The combined run flaked once on `test_two_triggers_race_for_one_claim` (test_limit_handoff),
+and t-5051ca76's own gate flaked on `test_heartbeat_never_resets_runner_fails` (test_live); both pass alone, both
+timing-sensitive under load. Tasks t-5051ca76, t-8a7395c0, t-ad322751, t-12338cdc, t-c6f84bde, t-3947f855 and
+t-337f5c27 are completed and cleaned up. LOW items open: `git branch -d` in `cleanup` (tasks.py ~2339) can still
+raise `TimeoutExpired`/`OSError` uncaught (500); only the first verdict line closes a section (`and not verdict`,
+server.py:300); `_branch_merged` hardcodes `main`; the bare-verdict regex scans the whole text.
+**Restart of controller and MCP server still pending:** at 17 Nov ~02:10 the master runner held t-aa7312aa (UI
+revamp, awaiting_approval) and t-12eb0c18 (controller reroute, working). Restart once neither is running.
+
+**16 Nov late (Part I intelligent controller):** Part I is merged into main and pushed (c1b49e2), together with the
+cleanup-safety fix (t-ad893991: `cleanup` keeps unmerged branches) and the trimmed-findings parser fix
+(t-71338ed3). Two MED review follow-ups are queued because the Claude account is limited until 01:00:
+t-5051ca76 moves the blocking git calls in `async cleanup` off the event loop; t-8a7395c0 makes the verdict line
+reset the findings section in `master/mcp/server.py`. When they finish: delta re-review, merge, gate, and the owner
+pushes. LOW items left open: `_branch_merged` hardcodes `main`; the bare-verdict regex scans the whole text.
+Restart the controller and MCP server to pick up the new code, but only once no UI-revamp tasks are running on the master runner.
+
 **Done and merged (and live):** Phases 4–8; G1 (one reviewer contract), trusted reviews, per-file review of big
 diffs, review reasons/fallback/retry, readable notifications, trusted-agent bypass, approval persistence,
 **G2** (real-diff reviewer benchmark + trusted reviewer models), **G3** (grounding calibration eval),

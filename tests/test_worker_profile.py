@@ -65,6 +65,17 @@ def run_cmd(cmd, job):
     return subprocess.run(["bash", "-c", new], capture_output=True, text=True, env=env), h
 
 
+class BashRules(unittest.TestCase):
+    def test_allowed_and_denied(self):
+        rules = set(wprofile.BASH_RULES)
+        for r in ("ls:*", "cat:*", "head:*", "tail:*", "wc:*", "grep:*", "rg:*", "sed -n:*", "diff:*", "pwd",
+                  "npm ci --ignore-scripts", "npm run build"):
+            self.assertIn("Bash(" + r + ")", rules)
+        for r in ("sed:*", "npm run:*", "echo", "echo:*", "test", "test:*", "find", "find:*"):
+            self.assertNotIn("Bash(" + r + ")", rules)
+        self.assertNotIn("Bash", rules)
+
+
 class Filter(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

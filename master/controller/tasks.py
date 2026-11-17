@@ -973,8 +973,72 @@ async def poll_task(task_id: str) -> None:
         # Outside the task lock: a handoff takes the work-item lock first (lock order: pipeline, work item, task).
         import handoff
         await handoff.after_settled(task_id)
+        task = get_task(task_id)
+        if task.get("failure_reason") == "limit" and task.get("resolution"):
+            resolution = task["resolution"]
+            if isinstance(resolution, dict) and resolution.get("kind") == "handed_off":
+                emit(task_id, "task.rerouted", {"title": task["title"], "to": resolution.get("task_id"),
+                                                  "reason": "usage limit; eligible account selected"})
+        elif handoff.limit_failure(task) and not handoff.pipeline_owned(task_id):  # the pipeline parks its own
+            reason = ("explicit profile is pinned; waiting for its reset" if _profile_is_pinned(task)
+                      else "usage limit; no eligible account before the next reset")
+            await requeue_limit_wait(task_id, reason)
     elif get_task(task_id)["state"] == "capped":
         await auto_continue(task_id)  # Part H 3.3: a capped build carries on in a fresh session
+
+
+def _profile_is_pinned(task: dict) -> bool:
+    """Whether the owner explicitly selected this task's paid-account profile."""
+    placement = task.get("placement") or {}
+    return bool(placement.get("profile"))
+
+
+def _earliest_limit_reset(task: dict, now: float) -> float | None:
+    """The earliest known future reset among usable accounts for this paid agent."""
+    if _profile_is_pinned(task) and task.get("account"):
+        accounts = [task["account"]]  # a pinned task can only use its own account's reset
+    else:
+        accounts = accounts_of(placement(task["agent"], None), task["agent"])
+        if task.get("account"):
+            accounts.insert(0, task["account"])
+        accounts = list(dict.fromkeys(accounts))
+    rules = budget.current_rules()
+    ident = task.get("budget_identity") or budget.identity(task["agent"], task.get("model"))
+    key = task.get("budget_key")
+    ends = []
+    for account in accounts:
+        until, _why = budget.blocked_by(rules, budget.limit_snapshot(rules, now, account), task["agent"], key, ident)
+        if until and until > now:
+            ends.append(until)
+    if task.get("resets_at") and task["resets_at"] > now:
+        ends.append(task["resets_at"])
+    return min(ends) if ends else None
+
+
+async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None) -> bool:
+    """Keep a provider-limited task queued rather than blocked or left failed.
+
+    Backstop: runs only after handoff.after_settled, and only when it parked nothing (no resume_schedule row,
+    no resolution).  It never deletes or replaces a scheduled resume.
+    """
+    now = time.time() if now is None else now
+    async with _locks[task_id]:
+        task = get_task(task_id)
+        if task["state"] != "failed" or task.get("failure_reason") != "limit" or task.get("resolution"):
+            return False
+        with db() as c:  # backstop only: a resume the existing machinery scheduled is never touched
+            if c.execute("SELECT 1 FROM resume_schedule WHERE task_id=?", (task_id,)).fetchone():
+                return False
+        reset = _earliest_limit_reset(task, now)
+        if reset is None:
+            reset = task.get("resets_at")
+        if reset is None or reset <= now:
+            return False
+        if not transition(task, {"failed"}, "queued", not_before=reset, ended_at=None, budget_wait="limit",
+                          error=reason, resolution=None):
+            return False
+    emit(task_id, "task.rerouted", {"title": task["title"], "reason": reason, "not_before": reset})
+    return True
 
 
 # Consecutive GET /jobs/{id} polls per working task that the runner answered with an HTTP error
@@ -1219,6 +1283,17 @@ async def auto_approve_denials(task: dict) -> None:
     except NotAdmitted as exc:
         # Admission deferred or refused it: the task stays blocked for the owner and the round isn't spent.
         update(task["id"], auto_approvals=rounds, error=str(exc.detail))
+        verdict = exc.verdict or {}
+        if verdict.get("wait") == "limit" and (verdict.get("until") or 0) > time.time():
+            # A usage limit: hold the task queued until the reset (as requeue_limit_wait does) instead of leaving
+            # it blocked, and keep the pre-approved tools so the resume gets them.
+            current = get_task(task["id"])
+            kept = approvable_tools(current, [*(current.get("approved_tools") or []), *tools])
+            if transition(current, {current["state"]}, "queued", not_before=verdict["until"], budget_wait="limit",
+                          ended_at=None, approved_tools=json.dumps(kept), error=str(exc.detail)):
+                emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
+                                                            "reason": str(exc.detail), "queued_until": verdict["until"]})
+                return
         emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
                                                     "reason": str(exc.detail)})
         return
@@ -2304,13 +2379,47 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
     return items
 
 
+def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
+    """(merged, reason). Merged = branch is an ancestor of the repo's main. Any failure to check counts as unmerged."""
+    import subprocess
+    if not repo or not branch or not Path(repo).is_dir():
+        return False, "cannot check: repo or branch not available on the controller"
+    try:
+        out = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "cannot check: %s" % exc
+    if out.returncode == 0:
+        return True, "merged"
+    if out.returncode == 1:
+        return False, "branch is not merged into main"
+    return False, "cannot check: " + (out.stderr.strip() or "git failed")[:200]
+
+
 @router.post("/api/tasks/{task_id}/cleanup")
-async def cleanup(task_id: str) -> dict:
+async def cleanup(task_id: str, force: bool = False) -> dict:
+    """Remove the task's worktree. The branch is only deleted when merged into main; otherwise it is kept.
+    force=true keeps the old behaviour: no merge check and no branch deletion."""
     async with _locks[task_id]:
         task = get_task(task_id)
         if task["state"] in ACTIVE:
             raise HTTPException(409, "task is still active")
         out = await runner_call(node_of(task), "POST", f"/jobs/{task_id}/cleanup")
+        if not force:
+            import subprocess
+            branch = task.get("branch") or "fleet/" + task_id
+            merged, reason = await asyncio.to_thread(_branch_merged, task.get("repo"), branch)
+            out = dict(out)
+            if merged:
+                done = await asyncio.to_thread(
+                    subprocess.run, ["git", "-C", task["repo"], "branch", "-d", branch],
+                    capture_output=True, text=True, timeout=30)
+                if done.returncode:
+                    out.update({"branch_kept": True, "reason": "delete failed: " + done.stderr.strip()[:200]})
+                else:
+                    out["branch_kept"] = False
+            else:
+                out.update({"branch_kept": True, "reason": reason})
     emit(task_id, "task.cleaned_up", {"title": task["title"]})
     return out
 

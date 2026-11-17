@@ -258,6 +258,10 @@ _FINDING_RE = re.compile(
     r"^\s*(?P<pre>(?:[-*>#|]+\s*|\d+[.)]\s*)*)(?P<wrap>\*\*|\[)?(?P<word>HIGH|MEDIUM|MED|LOW)"
     r"(?:\*\*|\]|\s*(?:[:(|\u2014\u2013]|-\s|\)))", re.I)
 _VERDICT_RE = re.compile(r"^\s*[-*#>\s]*\**verdict\b", re.I)
+_SECTION_RE = re.compile(r"^\s*(?:#+\s*)?\**(?P<word>HIGH|MEDIUM|MED|LOW)\**:?\s*$")  # bare severity heading
+_TAGGED_RE = re.compile(r"^(?:[-*]\s+)?\*\*[A-Z]\d+\.")  # **H1. ...** or - **L1.** ...
+_ITEM_RE = re.compile(r"^(?:[-*]\s+|\d+[.)]\s)")  # unindented item under a severity heading
+_BARE_VERDICT_RE = re.compile(r"^\s*\**(APPROVE[D]?|CHANGES|REQUEST_CHANGES|LGTM|REJECT)\**\s*$")
 _APPROVE_RE = re.compile(r"approve|lgtm|\bpass|\bok\b|no (issues|findings)", re.I)
 _GATE_RE = re.compile(r"^(Ran \d+ tests?\b|OK\b|FAILED\b)")
 _FAILING_RE = re.compile(r"^(FAIL|ERROR): ")
@@ -289,13 +293,18 @@ def trim_task(t: dict) -> dict:
     the result are kept as `result_tail`; a failed gate with no recognised summary keeps its last 10 lines as
     `tail`. full=True on the tools returns everything."""
     result = t.get("result") or ""
-    verdict, findings, block = "", [], None
+    verdict, findings, block, section, tagged = "", [], None, False, False
     for line in result.splitlines():
-        if _VERDICT_RE.match(line) and not verdict:
-            verdict, block = line.strip(), None
-        elif _is_finding(line):
+        if _SECTION_RE.match(line):
+            section, block, tagged = True, None, False
+        elif (_VERDICT_RE.match(line) or _BARE_VERDICT_RE.match(line)) and not verdict:
+            verdict, block, section = line.strip(), None, False
+        elif _is_finding(line) or (section and (_TAGGED_RE.match(line) or (not tagged and _ITEM_RE.match(line)))):
+            tagged = tagged or bool(_TAGGED_RE.match(line))
             block = [line.strip()]
             findings.append(block)
+        elif line.startswith("#"):
+            section, block = False, None
         elif block is not None and line.strip():
             block.append(line.rstrip())
         else:
@@ -435,6 +444,22 @@ def drain_node(node: str) -> str:
 
 # ---------- agent tasks ----------
 
+ROW_KEYS = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
+
+
+def _trim_row(out: str, trim: bool) -> str:
+    """Trim a controller task row to ROW_KEYS when trim is true; error strings pass through unchanged."""
+    if not trim or not _trim_on(False):
+        return out
+    try:
+        row = json.loads(out)
+    except (ValueError, TypeError):
+        return out  # an error string
+    if not isinstance(row, dict):
+        return out
+    return json.dumps({k: row[k] for k in ROW_KEYS if k in row}, indent=2)
+
+
 def _q(value: str) -> str:
     return quote(value, safe="")
 
@@ -472,14 +497,7 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
         if v:
             body[k] = v
     out = _controller("POST", "/api/tasks", body, scope="operate")
-    if not _trim_on(False):
-        return out
-    try:
-        row = json.loads(out)
-        keys = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
-        return json.dumps({k: row[k] for k in keys if k in row}, indent=2)
-    except (ValueError, TypeError):
-        return out  # an error string
+    return _trim_row(out, True)
 
 
 @mcp.tool()
@@ -597,21 +615,21 @@ def message_task(task_id: str, text: str) -> str:
 
 
 @mcp.tool()
-def cancel_task(task_id: str) -> str:
-    """Stop a task (kills the agent process)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/cancel")
+def cancel_task(task_id: str, full: bool = False) -> str:
+    """Stop a task (kills the agent process). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cancel"), not full)
 
 
 @mcp.tool()
-def complete_task(task_id: str) -> str:
-    """Mark a reviewed task as done (accepted)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/complete")
+def complete_task(task_id: str, full: bool = False) -> str:
+    """Mark a reviewed task as done (accepted). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/complete"), not full)
 
 
 @mcp.tool()
-def cleanup_task(task_id: str) -> str:
-    """Remove a settled task's worktree (its branch is kept for merging)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/cleanup")
+def cleanup_task(task_id: str, full: bool = False) -> str:
+    """Remove a settled task's worktree (its branch is kept for merging). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cleanup"), not full)
 
 
 @mcp.tool()

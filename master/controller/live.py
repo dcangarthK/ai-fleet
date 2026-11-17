@@ -299,6 +299,11 @@ def workers(now: float, nodes: list[dict]) -> list[dict]:
         last_end = {(r["node_id"], r["agent"], r["profile"]): r["ended"] for r in c.execute(
             "SELECT node_id, agent, COALESCE(profile,'fleet') AS profile, MAX(ended_at) AS ended FROM tasks "
             "WHERE ended_at IS NOT NULL GROUP BY node_id, agent, COALESCE(profile,'fleet')")}
+    beats = {}  # task id -> the runner's last stored tool_heartbeat (set by the heartbeat endpoint, 12.1)
+    for node in nodes:
+        for job in ((node.get("runner") or {}).get("jobs") or []):
+            if isinstance(job, dict) and isinstance(job.get("tool_heartbeat"), dict):
+                beats[job.get("id")] = job["tool_heartbeat"]
     rows = []
     for r in running:
         waiver = _json(r["independence"])
@@ -309,6 +314,8 @@ def workers(now: float, nodes: list[dict]) -> list[dict]:
                      "elapsed_s": round(now - r["started_at"]) if r["started_at"] else None,
                      "independence": "waived" if (waiver or {}).get("waived") else None,
                      "waiver_reason": (waiver or {}).get("reason")})
+        if r["id"] in beats:
+            rows[-1]["tool_heartbeat"] = beats[r["id"]]
     busy = {(r["node"], r["agent"], r["profile"] if r["agent"] in budget.PAID_AGENTS else None) for r in rows}
     # Idle rows: one per (node, agent, profile) with nothing running, sharing Part C's Resources helper.
     limited: dict[tuple, float] = {}

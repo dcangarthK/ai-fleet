@@ -1824,6 +1824,27 @@ async def _stage1(p: dict) -> dict | None:
         "skip_paid": skip})
 
 
+REVIEW_SLOT_RETRY_SECONDS = 60
+
+
+def _batch_review_slot_full(p: dict, agent: str) -> bool:
+    """AC11: a batch review may not start when its agent's slots are all taken by other items' builds, reviews or
+    the final review. This item's own slot is excluded."""
+    tag = ((p.get("budget") or {}).get("batch") or {}).get("tag") or ""
+    batch_id, _, item_id = tag.partition(":")
+    if not item_id:
+        return False
+    try:
+        b = get_batch(batch_id)
+    except HTTPException:
+        return False
+    for item in b["items"]:
+        if item["id"] == item_id:
+            item["state"] = "queued"  # not counted: this is the item asking
+    used = batch_machine._slots(b).get(agent, 0)
+    return used >= b["policy"]["concurrency"].get(agent, 1)
+
+
 async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
     """One paid review task: kind, delta, caps and hints per the budget rules."""
     reviewer = p["reviewers"][index]
@@ -1837,6 +1858,10 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
         if "wait_until" in routed:
             return await _pipeline_step_unlocked(p, {"type": "review_limited", "reviewer": index, "task_id": None,
                                                      "resets_at": routed["wait_until"], "codex": False})
+        if _batch_review_slot_full(p, routed["agent"]):  # park briefly, then the same round's review retries
+            return await _pipeline_step_unlocked(p, {"type": "review_limited", "reviewer": index, "task_id": None,
+                                                     "resets_at": time.time() + REVIEW_SLOT_RETRY_SECONDS,
+                                                     "codex": False})
         reviewer = {"kind": "agent", "agent": routed["agent"], "model": routed["model"],
                     **({"effort": routed["effort"]} if routed.get("effort") else {})}
     rules = budget.current_rules()
@@ -1908,7 +1933,8 @@ async def _spawn_paid_review(p: dict, index: int, diff: str) -> dict:
                                           (b.get("spec_ref") or {}).get("sections"),
                                           (b.get("spec_ref") or {}).get("path"), build.get("cwd")),
             title=f"Review: {p['title']}", mode="read-only", repo=p.get("repo"), worktree=False,
-            effort=reviewer.get("effort"), node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
+            effort=None if kind == "re_review" else reviewer.get("effort"),  # re_review: the budget rule (low) applies
+            node=build["node_id"], parent_id=p["build_task"], link="review", kind=kind, review_of=p["build_task"],
             origin_kind=origin_kind if kind == "re_review" else None,
         ), forbidden=forbidden, pipeline=True)
         # The round is spent only once the review task was admitted (a refused one costs nothing), and it is
@@ -2412,7 +2438,7 @@ def _final_title(b: dict) -> str:
 
 def _find_final_task(b: dict) -> str | None:
     with db() as c:
-        row = c.execute("SELECT id FROM tasks WHERE title=? AND kind='final_review' ORDER BY ts DESC LIMIT 1",
+        row = c.execute("SELECT id FROM tasks WHERE title=? AND kind='final_review' ORDER BY created_at DESC LIMIT 1",
                         (_final_title(b),)).fetchone()
     return row["id"] if row else None
 

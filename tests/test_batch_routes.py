@@ -133,6 +133,39 @@ class FixRoundController(unittest.TestCase):
         self.assertEqual(b["final"]["task_id"], "t-final")
 
 
+class FixRound3(unittest.TestCase):
+    def test_find_final_task_against_real_db(self):
+        b = {"id": "b-find", "final": {"attempt": 0}}
+        controller.init_db()
+        now = time.time()
+        with controller.db() as c:
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(tasks)")]
+            self.assertIn("created_at", cols)
+            self.assertNotIn("ts", cols)
+            node = c.execute("SELECT id FROM nodes LIMIT 1").fetchone()
+            row = {"id": "t-final-find", "title": controller._final_title(b), "kind": "final_review",
+                   "agent": "codex", "prompt": "p", "state": "done", "created_at": now, "updated_at": now,
+                   "node_id": node["id"] if node else "n1"}
+            have = {k: v for k, v in row.items() if k in cols}
+            c.execute(f"INSERT INTO tasks ({','.join(have)}) VALUES ({','.join('?' * len(have))})", list(have.values()))
+        self.assertEqual(controller._find_final_task(b), "t-final-find")
+
+    def test_review_waits_when_reviewer_agent_slot_full(self):
+        b = controller.batch_machine.new_batch({"items": [item("a"), item("b")]})
+        b["id"] = "b-slot"
+        b["policy"]["concurrency"] = {"claude": 2, "codex": 1}
+        a, bb = b["items"]
+        a.update(state="building", build={"agent": "codex", "model": "gpt-5.6-terra"})  # Codex build running
+        bb.update(state="reviewing", security_sensitive=True, build={"agent": "claude", "model": "m"},
+                  review={"agent": "codex", "model": "gpt-5.6-terra"})
+        p = {"budget": {"batch": {"tag": "b-slot:b", "security": True}}}
+        from unittest import mock
+        with mock.patch.object(controller, "get_batch", return_value=b):
+            self.assertTrue(controller._batch_review_slot_full(p, "codex"))
+            a["state"] = "ready"
+            self.assertFalse(controller._batch_review_slot_full(p, "codex"))
+
+
 class AutoApproveStatus(unittest.TestCase):
     def task(self, **kw):
         base = {"id": "t-x", "agent": "claude", "mode": "auto-edit", "auto_approvals": 0,

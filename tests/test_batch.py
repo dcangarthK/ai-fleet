@@ -286,7 +286,7 @@ class FixRound(unittest.TestCase):
         self.assertEqual(spec["batch"]["tag"], "b:a")
 
     def test_slots_count_reviewing_and_final(self):
-        b = make([item("a"), item("b")], concurrency={"claude": 1, "codex": 1})
+        b = make([item("a"), item("b")], concurrency={"claude": 2, "codex": 1})
         b, _ = tick(b)
         b["items"][0].update(state="reviewing", review={"agent": "claude", "model": "m"})
         self.assertEqual(B._slots(b).get("claude"), 2)  # a's reviewer + b's builder

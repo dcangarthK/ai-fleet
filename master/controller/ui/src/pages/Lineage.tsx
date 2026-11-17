@@ -3,13 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { get } from "../lib/api";
 import {
-  buildNarrative, criticalPath, dataExtent, findAnomalies, findBottleneck, flagMap, fmtClock, rootsOf, snapshotAt,
+  criticalPath, dataExtent, findAnomalies, findBottleneck, flagMap, fmtClock, rootsOf, snapshotAt,
   stepTimes, fmtDur, fmtTokens, spanOf, tokenTotal, type LineageData,
 } from "../lib/lineageGraph";
 import { STATE } from "../lib/format";
 import { PageHead } from "../components/bits";
 import { Button, Card, Empty, ErrorState, Loading, Select, TabPanel, Tabs } from "../components/ui";
 import { River, RiverPanel } from "../components/lineage/River";
+import { Graph } from "../components/lineage/Graph";
 import { TraceGraph, TracePanel } from "../components/lineage/Trace";
 import { Agents } from "../components/lineage/Agents";
 import { Intel } from "../components/lineage/Intel";
@@ -24,18 +25,19 @@ const RANGES = [
   { id: "7d", label: "Last 7 days", sec: 7 * 86400 },
 ];
 const LENSES = [
+  { id: "graph", label: "Graph" },
   { id: "river", label: "Fleet river" },
   { id: "trace", label: "Trace" },
   { id: "agents", label: "Agents" },
 ];
-type Lens = "river" | "trace" | "agents";
+type Lens = "graph" | "river" | "trace" | "agents";
 
 export function LineagePage() {
   const { root } = useParams();
   const [sp, setSp] = useSearchParams();
   const navigate = useNavigate();
   const reduced = useReducedMotion();
-  const lens: Lens = root ? "trace" : sp.get("lens") === "agents" ? "agents" : sp.get("lens") === "trace" ? "trace" : "river";
+  const lens: Lens = root ? "trace" : sp.get("lens") === "river" ? "river" : sp.get("lens") === "agents" ? "agents" : sp.get("lens") === "trace" ? "trace" : "graph";
   const range = RANGES.find((r) => r.id === sp.get("range")) ?? RANGES[1];
   const sel = sp.get("sel");
   const [cursor, setCursor] = useState<number | null>(null);
@@ -62,7 +64,6 @@ export function LineagePage() {
   const anomalies = useMemo(() => findAnomalies(snap, events.filter((e) => cursor === null || e.ts <= cursor)), [snap, events, cursor]);
   const flags = useMemo(() => flagMap(anomalies), [anomalies]);
   const bottleneck = useMemo(() => findBottleneck(snap, effNow), [snap, effNow]);
-  const narrative = useMemo(() => (lens === "trace" && root ? buildNarrative(snap, effNow) : null), [lens, root, snap, effNow]);
   const roots = useMemo(() => rootsOf(nodes, now), [nodes, now]);
   const critical = useMemo(() => criticalPath(nodes, now), [nodes, now]);
 
@@ -71,7 +72,7 @@ export function LineagePage() {
     if (id === "trace") { if (!root) setParam("lens", "trace"); return; }
     const q = new URLSearchParams(sp);
     q.delete("sel");
-    if (id === "agents") q.set("lens", "agents"); else q.delete("lens");
+    if (id === "graph") q.delete("lens"); else q.set("lens", id);
     navigate({ pathname: "/lineage", search: q.toString() ? `?${q}` : "" });
   };
 
@@ -126,7 +127,9 @@ export function LineagePage() {
               <Scrubber t0={t0} t1={t1} steps={steps} events={events} nodes={nodes} cursor={cursor} setCursor={setCursor} />
               <Summary live={live} nodes={snap.length} lanes={data.lanes.length} roots={roots.length} cursor={cursor} root={root} />
 
-              {lens !== "agents" && <Intel nodes={snap} bottleneck={bottleneck} anomalies={anomalies} narrative={narrative} />}
+              <TabPanel id="graph" value={lens} idPrefix="lin">
+                <div className="graph-layout"><div><Graph nodes={snap} edges={data.edges} now={effNow} selected={sel} onSelect={(n) => setParam("sel", n?.id ?? null)} />{selected && <RiverPanel node={selected} now={effNow} onClose={() => setParam("sel", null)} />}</div><details className="graph-insights"><summary>Insights</summary><Intel nodes={snap} bottleneck={bottleneck} anomalies={anomalies} narrative={null} /></details></div>
+              </TabPanel>
 
               <TabPanel id="river" value={lens} idPrefix="lin">
                 <LineageInsight nodes={snap} critical={critical} now={effNow} />

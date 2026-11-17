@@ -11,6 +11,18 @@
 .lin-insight-strip b { display: block; color: var(--ink); font-size: 15px; }
 .lin-river-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: var(--s3); align-items: start; }
 .lin-river-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); }
+.graph-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: var(--s3); align-items: start; }.graph-insights { border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s3); background: var(--surface); }.graph-insights summary { cursor: pointer; font-weight: 700; color: var(--ink); }.graph-insights .lin-intel { margin-top: var(--s3); }
+.graph-wrap { position: relative; width: 100%; height: max(70vh, 520px); min-height: 520px; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
+.graph-svg { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+.graph-svg:active { cursor: grabbing; }
+.graph-bg { fill: url(#graph-dots); } #graph-dots circle { fill: var(--line-strong); opacity: .55; }
+.graph-band { fill: color-mix(in srgb, var(--accent) 6%, var(--surface)); stroke: var(--line); }
+.graph-band-label { fill: var(--ink-2); font-size: 12px; font-family: var(--mono); font-weight: 700; }
+.graph-actions { position: absolute; z-index: 2; top: var(--s2); left: var(--s2); display: flex; align-items: center; gap: var(--s2); background: color-mix(in srgb, var(--surface) 88%, transparent); border-radius: var(--r); padding: 2px; }
+.graph-actions button, .graph-mini { min-height: 28px; background: var(--surface); }
+.graph-edge path { fill: none; stroke: var(--ink-3); stroke-width: 1.6; opacity: .8; }.graph-edge.hot path { stroke: var(--accent); stroke-width: 3; opacity: 1; }.graph-edge.bad path { stroke: var(--bad); }.graph-edge.running path { stroke: var(--accent); stroke-dasharray: 7 6; animation: graph-flow 1s linear infinite; }.graph-edge circle { fill: var(--accent); stroke: var(--surface); }.graph-edge.bad circle { fill: var(--bad); }.graph-arrow { fill: var(--ink-3); }.graph-arrow.accent { fill: var(--accent); }.graph-arrow.bad { fill: var(--bad); } @keyframes graph-flow { to { stroke-dashoffset: -13; } }
+.graph-link rect { fill: var(--surface); stroke: var(--line-strong); }.graph-link text { fill: var(--ink); font-size: 10px; font-weight: 700; }
+.graph-node { cursor: pointer; transform-origin: center; animation: graph-enter .36s both; }.graph-node rect { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.5; }.graph-node:hover rect { filter: drop-shadow(0 6px 8px rgba(0,0,0,.22)); stroke: var(--accent); }.graph-node.dim { opacity: .25; }.graph-node.running rect { stroke: var(--accent); }.graph-node.running circle { filter: drop-shadow(0 0 5px var(--accent)); animation: graph-pulse 1.5s infinite; }.graph-node.failed rect { stroke: var(--bad); }.graph-node.cancelled rect { stroke-dasharray: 5 4; stroke: var(--ink-3); }.graph-node circle { fill: var(--accent); }.graph-node.graph-claude circle { fill: var(--info); }.graph-node.graph-ollama circle { fill: var(--ok); }.graph-initial { fill: light-dark(#fff,#0b1626); font-weight: 800; font-size: 11px; }.graph-title { fill: var(--ink); font-size: 12px; font-weight: 700; }.graph-sub { fill: var(--ink-2); font-size: 10.5px; }.graph-tick { fill: var(--ok); font-size: 19px; font-weight: 800; }.graph-fail { fill: var(--bad); font-size: 20px; font-weight: 800; } @keyframes graph-pulse { 50% { opacity: .5; } } @keyframes graph-enter { from { opacity: 0; transform: scale(.94); } to { opacity: 1; transform: scale(1); } }.graph-mini { position: absolute; right: var(--s2); bottom: var(--s2); z-index: 2; width: 36px; padding: 0; }
 .lin-toolbar { margin-bottom: var(--s3); }
 .lin-hint, .lin-hint-inline { font-size: 12px; }
 .lin-hint { margin-top: var(--s3); max-width: 80ch; }
@@ -223,11 +235,14 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
   .lin-bar.live .lin-bar-edge, .lin-now.follow line, .lin-beat.on { animation: none; }
   .lin-particle { display: none; }
   .lin-bar-body { transition: none; }
+  .graph-node, .graph-node.running circle, .graph-edge.running path { animation: none; }
 }
 
 @media (max-width: 639px) {
   .lin-insight-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lin-river-layout { display: block; }
+  .graph-wrap { height: 70vh; min-height: 420px; }
+  .graph-layout { display: block; }.graph-insights { margin-top: var(--s3); }
   .lin-minimap { display: none; }
   .lin-river-panel { position: fixed; inset: auto 0 0; z-index: 45; max-height: min(62vh, 520px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -12px 32px var(--scrim); padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
 }

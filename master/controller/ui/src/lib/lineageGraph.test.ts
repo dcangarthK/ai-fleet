@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentRows, buildNarrative, criticalPath, findAnomalies, findBottleneck, flagMap, layoutRiver, layoutTrace, marksFor,
-  focusSet, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
+  focusSet, layoutGraph, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
   type LEvent, type LNode,
 } from "./lineageGraph";
 
@@ -115,6 +115,17 @@ describe("lineage focus", () => {
     const nodes = [node({ id: "a", parent_id: "b" }), node({ id: "b", parent_id: "a" }), node({ id: "c" })];
     expect([...focusSet(nodes, [], null)].sort()).toEqual(["a", "b", "c"]);
     expect([...focusSet(nodes, [], "a")].sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("graph layout", () => {
+  it("places children one column after their parent and siblings on separate rows", () => {
+    const nodes = [node({ id: "a" }), node({ id: "b", parent_id: "a" }), node({ id: "c", parent_id: "a" }), node({ id: "d", parent_id: "b" })];
+    const graph = layoutGraph(nodes, []);
+    expect(graph.place.b.col).toBe(graph.place.a.col + 1);
+    expect(graph.place.d.col).toBe(graph.place.b.col + 1);
+    expect(graph.place.b.y).not.toBe(graph.place.c.y);
+    expect(graph.height).toBeGreaterThan(100);
   });
 });
 

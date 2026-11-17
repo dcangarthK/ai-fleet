@@ -743,8 +743,10 @@ class BudgetApiTests(unittest.TestCase):
         self.assertIsNone(t["model"])  # the row stays model-less by design; the default is sent at start
         self.assertEqual(self.sent(t["id"]).get("model"), "claude-haiku-5-5")
         named = self.ok(agent="claude", kind="draft", model="claude-sonnet-5-5")
-        self.assertEqual(named["model"], "claude-sonnet-5-5")  # a named model is never replaced
-        self.assertEqual(self.sent(named["id"]).get("model"), "claude-sonnet-5-5")
+        # a named sonnet/opus draft is admitted on Haiku; the original is recorded as routed_from
+        self.assertEqual(named["model"], "claude-haiku-5-5")
+        self.assertEqual(named["routed_from"], "claude:claude-sonnet-5-5")
+        self.assertEqual(self.sent(named["id"]).get("model"), "claude-haiku-5-5")
 
     def test_independence_checks_the_kind_default_not_the_node_default(self):
         """H3: a review with no model is a Haiku/Sonnet review, so it is checked as that model."""

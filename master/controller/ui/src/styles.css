@@ -641,3 +641,6 @@ a.live-row:hover { background: var(--sunken); }
 }
 @media (min-width: 640px) { .show-sm { display: none; } }
 @media (min-width: 1440px) { .main { padding-left: var(--s7); padding-right: var(--s7); } .top { padding-left: var(--s7); padding-right: var(--s7); } }
+
+/* Tool heartbeat line under a running job cells; colour comes from .quiet, so it follows light/dark. */
+.live-running .live-beat { grid-column: 1 / -1; cursor: help; }

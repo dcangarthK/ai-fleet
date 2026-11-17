@@ -1,0 +1,28 @@
+{
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": false,
+    "superpowers@claude-plugins-official": false,
+    "ui-ux-pro-max@ui-ux-pro-max-skill": false,
+    "accesslint@accesslint-marketplace": false,
+    "design-research@designer-skills": false,
+    "design-systems@designer-skills": false,
+    "ux-strategy@designer-skills": false,
+    "ui-design@designer-skills": false,
+    "interaction-design@designer-skills": false,
+    "prototyping-testing@designer-skills": false,
+    "design-ops@designer-skills": false,
+    "designer-toolkit@designer-skills": false,
+    "bencium-controlled-ux-designer@bencium-marketplace": false,
+    "bencium-innovative-ux-designer@bencium-marketplace": false,
+    "bencium-impact-designer@bencium-marketplace": false,
+    "design-audit@bencium-marketplace": false,
+    "typography@bencium-marketplace": false,
+    "relationship-design@bencium-marketplace": false,
+    "adaptive-communication@bencium-marketplace": false,
+    "negentropy-lens@bencium-marketplace": false,
+    "bencium-aeo@bencium-marketplace": false,
+    "bencium-code-conventions@bencium-marketplace": false,
+    "renaissance-architecture@bencium-marketplace": false,
+    "human-architect-mindset@bencium-marketplace": false
+  }
+}

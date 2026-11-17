@@ -397,6 +397,8 @@ def rank_slots(kind: str, exclude=(), task: dict | None = None, *, now: float | 
             continue
         if budget.rule0_blocks(row["agent"], model, kind) or budget.rule0_blocks(row["agent"], row["model"], kind):
             continue
+        if budget.model_guard(row["agent"], model, kind, None) or budget.model_guard(row["agent"], row["model"], kind, None):
+            continue  # G1: admission would refuse it (a reroute never carries the owner's override)
         if (row["agent"], model, row["account"]) in excluded or (row["agent"], row["model"], row["account"]) in excluded_keys:
             continue
         if (row["agent"], model) in builders or row["model"] in builder_keys or row["agent"] in banned_agents:
@@ -888,7 +890,7 @@ async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float, stal
                                     accounts_for=lambda _agent: [slot["account"]], reroute=False)
         except budget.Refusal as refusal:
             unclaim(task["id"], blob)
-            return {"action": "none", "reason": refusal.detail}
+            return {"action": "none", "reason": refusal.message}
         if decision["wait"]:
             unclaim(task["id"], blob)
             return {"action": "none", "reason": decision["reason"]}

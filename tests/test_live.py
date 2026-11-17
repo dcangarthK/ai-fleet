@@ -13,6 +13,7 @@ import unittest
 from tests.test_budget import rules
 from tests.test_controller import FakeRunner, W, unmetered_claude_rules, wait_for
 from tests.test_limit_handoff import CLAUDE_LIMIT, FABLE, OPUS, PROFILES, SONNET, fresh_loop_state
+HAIKU = "claude-haiku-5-5"
 
 from fastapi.testclient import TestClient
 
@@ -102,7 +103,7 @@ class LiveBase(unittest.TestCase):
 
 class LiveApiTests(LiveBase):
     def test_running_rows_idle_codex_row_and_no_leakage(self):
-        opus = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest", stage="build-1",
+        opus = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest", stage="build-1",
                        prompt="SECRET-PROMPT-TEXT build it", title="Greeting build")
         sonnet = self.ok(agent="claude", model=SONNET, kind="draft", title="Greeting draft")
         FakeRunner.jobs[opus["id"]]["result"] = "SECRET-RESULT-TEXT"
@@ -113,7 +114,7 @@ class LiveApiTests(LiveBase):
         self.assertEqual(set(rows) & {opus["id"], sonnet["id"]}, {opus["id"], sonnet["id"]})
         row = rows[opus["id"]]
         self.assertEqual((row["title"], row["agent"], row["model"], row["account_label"], row["kind"], row["stage"]),
-                         ("Greeting build", "claude", OPUS, "owner-max", "build", "build-1"))
+                         ("Greeting build", "claude", SONNET, "owner-max", "build", "build-1"))
         self.assertEqual(row["branch"], f"fleet/{opus['id']}")
         self.assertIsNotNone(row["started_at"])
         self.assertIn("effort", row)
@@ -146,11 +147,11 @@ class LiveApiTests(LiveBase):
 
     def test_queue_reasons(self):
         body = rules()
-        body["models"]["claude:claude-opus-*"]["max_concurrent"] = 1
+        body["models"]["claude:claude-sonnet-*"]["max_concurrent"] = 1
         r = self.c.put("/api/budget/rules", json={"body": body}, headers=W)
         self.assertEqual(r.status_code, 200)
-        first = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest", profile="fleet")
-        slot = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest", profile="fleet")
+        first = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest", profile="fleet")
+        slot = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest", profile="fleet")
         approval = self.ok(agent="claude", model=SONNET, kind="draft", mode="supervised")
         queue = {q["task_id"]: q for q in self.live()["queue"]}
         self.assertEqual(queue[slot["id"]]["wait"], "slot")
@@ -503,22 +504,22 @@ class PinningTests(LiveBase):
 
     def test_a_test_task_is_not_a_builder_in_the_work_item(self):
         body = rules()
-        body["models"]["claude:claude-opus-*"]["kinds"].append("test")
+        body["models"]["claude:claude-sonnet-*"]["kinds"].append("test")
         self.c.put("/api/budget/rules", json={"body": body}, headers=W)
-        build = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest")
+        build = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest")
         self.ok(agent="claude", model=SONNET, kind="test", parent_id=build["id"], mode="read-only",
                 worktree=False, independence="waived", independence_reason="fixture")
-        self.assertEqual(handoff.build_attempts(build["id"]), [("claude", OPUS)])
+        self.assertEqual(handoff.build_attempts(build["id"]), [("claude", SONNET)])
 
     def test_adhoc_independence_refused_unless_waived(self):
         body = rules()
-        body["models"]["claude:claude-opus-*"]["kinds"].append("test")
+        body["models"]["claude:claude-sonnet-*"]["kinds"].append("test")
         self.c.put("/api/budget/rules", json={"body": body}, headers=W)
-        build = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest")
+        build = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest")
         with db() as c:
             before = c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
             decisions = c.execute("SELECT COUNT(*) FROM events WHERE type LIKE 'budget.%'").fetchone()[0]
-        r = self.c.post("/api/tasks", json={"agent": "claude", "model": OPUS, "prompt": "test it", "kind": "test",
+        r = self.c.post("/api/tasks", json={"agent": "claude", "model": SONNET, "prompt": "test it", "kind": "test",
                                             "parent_id": build["id"], "link": "check", "mode": "read-only",
                                             "worktree": False}, headers=W)
         self.assertEqual(r.status_code, 400, r.text)
@@ -526,27 +527,27 @@ class PinningTests(LiveBase):
         with db() as c:  # a refused task leaves no trace (Fable's builder note b)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], before)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE type LIKE 'budget.%'").fetchone()[0], decisions)
-        no_reason = self.c.post("/api/tasks", json={"agent": "claude", "model": OPUS, "prompt": "test", "kind": "test",
+        no_reason = self.c.post("/api/tasks", json={"agent": "claude", "model": SONNET, "prompt": "test", "kind": "test",
                                                     "parent_id": build["id"], "independence": "waived"}, headers=W)
         self.assertEqual(no_reason.status_code, 400)
-        waived = self.ok(agent="claude", model=OPUS, prompt="test it", kind="test", parent_id=build["id"], link="check",
+        waived = self.ok(agent="claude", model=SONNET, prompt="test it", kind="test", parent_id=build["id"], link="check",
                          mode="read-only", worktree=False, independence="waived",
-                         independence_reason="owner chose Opus as tester")
-        self.assertEqual(waived["independence"], {"waived": True, "reason": "owner chose Opus as tester"})
+                         independence_reason="owner chose Sonnet as tester")
+        self.assertEqual(waived["independence"], {"waived": True, "reason": "owner chose Sonnet as tester"})
         with db() as c:
             self.assertIsNotNone(c.execute("SELECT 1 FROM events WHERE type='task.independence_waived' AND task_id=?",
                                            (waived["id"],)).fetchone())
         row = next(w for w in self.live()["workers"] if w.get("task_id") == waived["id"])
         self.assertEqual(row["independence"], "waived")
         secret = "sk-ant-" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4"
-        leaky = self.ok(agent="claude", model=OPUS, prompt="test it", kind="test", parent_id=build["id"], link="check",
+        leaky = self.ok(agent="claude", model=SONNET, prompt="test it", kind="test", parent_id=build["id"], link="check",
                         mode="read-only", worktree=False, independence="waived",
                         independence_reason=f"key {secret} was the reason")
         self.assertNotIn(secret, json.dumps(leaky["independence"]))
         with db() as c:
             events = " ".join(r[0] or "" for r in c.execute("SELECT data FROM events WHERE task_id=?", (leaky["id"],)))
         self.assertNotIn(secret, events)
-        other = self.ok(agent="claude", model=SONNET, prompt="review", kind="review", parent_id=build["id"],
+        other = self.ok(agent="claude", model=HAIKU, prompt="review", kind="review", parent_id=build["id"],
                         link="review", mode="read-only", worktree=False)
         self.assertNotIn(other["state"], ("failed",))
 
@@ -1242,7 +1243,7 @@ class FailoverTests(LiveBase):
             self.refresh()
 
     def test_a_queued_review_of_an_offline_nodes_build_is_pinned(self):
-        build = self.ok(agent="claude", model=OPUS, kind="build", gate="pytest")
+        build = self.ok(agent="claude", model=SONNET, kind="build", gate="pytest")
         review = self.ok(agent="claude", model=SONNET, kind="review", review_of=build["id"], mode="read-only",
                          worktree=False)
         with db() as c:

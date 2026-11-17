@@ -685,16 +685,17 @@ class RankTests(StallBase):
     def test_build_prefers_standard_tier_then_idle_and_never_fable(self):
         ranked = [(s["model"], s["profile"]) for s in self.slots("build")]
         self.assertEqual(ranked[:2], [(SONNET, "fleet"), (SONNET, "spare")])
-        self.assertLess(ranked.index((OPUS, "fleet")), ranked.index((HAIKU, "fleet")))
+        self.assertLess(ranked.index((SONNET, "spare")), ranked.index((HAIKU, "fleet")))
         self.assertNotIn(FABLE, [m for m, _ in ranked])
+        self.assertNotIn(OPUS, [m for m, _ in ranked])  # the model guard (G1): Opus does not build
 
     def test_rule_zero_is_hard_coded(self):
         body = rules()
         body["models"]["claude:claude-fable-*"]["kinds"] = ["*"]
         self.put_rules(body)
-        for kind in ("build", "fix", "test"):
+        for kind in ("build", "fix", "test", "review"):  # G1: Fable is refused on every kind
             self.assertNotIn(FABLE, [s["model"] for s in self.slots(kind)], kind)
-        self.assertIn(FABLE, [s["model"] for s in self.slots("review")])
+        self.assertIn(OPUS, [s["model"] for s in self.slots("review")])
 
     def test_busy_slots_rank_after_idle_ones(self):
         body = rules()
@@ -719,7 +720,8 @@ class RankTests(StallBase):
         review = {"id": t["id"], "node_id": "master", "agent": "claude"}
         models = {s["model"] for s in self.slots("review", review)}
         self.assertNotIn(SONNET, models)
-        self.assertIn(FABLE, models)
+        self.assertIn(OPUS, models)
+        self.assertNotIn(FABLE, models)
         self.assertEqual({s["node"] for s in self.slots("build", review)}, {"master"})
 
     def test_cross_vendor_is_allowed_for_a_stalled_codex_build(self):

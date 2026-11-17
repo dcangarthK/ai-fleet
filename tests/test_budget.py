@@ -510,7 +510,7 @@ class BudgetApiTests(unittest.TestCase):
         self.put_rules(rules(limits__on_limit="fallback"))
         self.limited_codex()
         t = self.ok(agent="codex", kind="security_review", mode="read-only", worktree=False)
-        self.assertEqual((t["agent"], t["model"], t["routed_from"]), ("claude", "claude-fable-5-2", "codex"))
+        self.assertEqual((t["agent"], t["model"], t["routed_from"]), ("claude", "claude-opus-5-5", "codex"))
         self.assertEqual(t["state"], "working")
         decisions = self.c.get("/api/budget/decisions").json()
         self.assertTrue(any(d["decision"] == "rerouted" and d.get("task_id") == t["id"] for d in decisions))
@@ -532,8 +532,8 @@ class BudgetApiTests(unittest.TestCase):
     def test_account_limit_skips_a_fallback_on_the_same_account(self):
         self.put_rules(rules(limits__on_limit="fallback"))
         self.limited_codex(agent="claude", model="claude-opus-5-5")  # a Claude limit holds the whole account
-        t = self.ok(agent="claude", model="claude-opus-5-5", kind="build", gate="pytest")
-        self.assertEqual((t["agent"], t["model"], t["state"]), ("claude", "claude-opus-5-5", "queued"))
+        t = self.ok(agent="claude", model="claude-sonnet-5-5", kind="build", gate="pytest")
+        self.assertEqual((t["agent"], t["model"], t["state"]), ("claude", "claude-sonnet-5-5", "queued"))
         self.assertIn("claude account limited", t["error"])
         status = {s["key"]: s for s in self.c.get("/api/budget/status").json()["models"]}
         self.assertEqual(status["claude:claude-sonnet-*"]["state"], "limited")
@@ -949,7 +949,7 @@ class BudgetApiTests(unittest.TestCase):
         self.assertEqual(third["effort"], "high")
 
     def test_review_tasks_launch_with_only_review_tools_and_limits(self):
-        t = self.ok(agent="claude", model="claude-fable-5-2", kind="review", mode="read-only", worktree=False)
+        t = self.ok(agent="claude", model="claude-opus-5-5", kind="review", mode="read-only", worktree=False)
         sent = self.sent(t["id"])
         self.assertEqual(sent["tools"], ["Read", "Grep", "Glob"])
         self.assertEqual(sent["max_turns"], 8)
@@ -960,7 +960,7 @@ class BudgetApiTests(unittest.TestCase):
 
     def test_an_explicitly_empty_review_tool_list_means_no_tools(self):
         self.put_rules(rules(review_exec__tools=[]))
-        t = self.ok(agent="claude", model="claude-fable-5-2", kind="review", mode="read-only", worktree=False)
+        t = self.ok(agent="claude", model="claude-opus-5-5", kind="review", mode="read-only", worktree=False)
         sent = self.sent(t["id"])
         self.assertIn("tools", sent)
         self.assertEqual(sent["tools"], [])  # never dropped, which would leave the reviewer unrestricted
@@ -1013,7 +1013,7 @@ class BudgetApiTests(unittest.TestCase):
         parent = self.ok(agent="claude", model="claude-sonnet-5-5", kind="build", gate="pytest")
         diff = "".join(section(f"pkg/m{i}.py", "k" * 700) for i in range(5))
         # A different model from the builder: ad-hoc reviews must be independent (docs/SPEC-live-monitor.md 6).
-        first = self.ok(agent="claude", model="claude-fable-5-2", kind="review", mode="read-only", worktree=False,
+        first = self.ok(agent="claude", model="claude-opus-5-5", kind="review", mode="read-only", worktree=False,
                         prompt="Review these.\n" + diff, parent_id=parent["id"], link="review")
         self.assertGreater(len(first["split"]), 1)
         for part in first["split"]:
@@ -1108,7 +1108,7 @@ class PipelineBudgetTests(unittest.TestCase):
     def start(self, **kw):
         body = {"title": "Budget pipeline", "spec": "Keep the greeting correct", "repo": "/repo", "gate": "pytest",
                 "mode": "auto-edit", "builder": {"agent": "codex"}, "max_rounds": 3,
-                "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-fable-5-2"}]} | kw
+                "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-opus-5-5"}]} | kw
         r = self.c.post("/api/pipelines", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
@@ -1196,7 +1196,7 @@ class PipelineBudgetTests(unittest.TestCase):
         untrusted = dict(self.ISSUE, problem="Untrusted role finding", evidence="hello")
         self.local_answers = [json.dumps({"verdict": "request_changes", "issues": [untrusted]})] * 2
         p = self.start(reviewers=[{"kind": "role", "role": "reviewer"},
-                                  {"kind": "agent", "agent": "claude", "model": "claude-fable-5-2"}])
+                                  {"kind": "agent", "agent": "claude", "model": "claude-opus-5-5"}])
         self.finish_build(p)
         current = self.until(p, lambda x: x if x["reviews"].get("1", {}).get("task_id") else None)
         self.answer(current["reviews"]["1"]["task_id"], "request_changes", [self.ISSUE])

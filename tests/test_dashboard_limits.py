@@ -7,7 +7,6 @@ import unittest
 
 from tests.test_budget import rules
 from tests.test_controller import FakeRunner, W, wait_for
-from tests.test_limit_handoff import OPUS, SONNET
 from tests.test_live import LiveBase
 
 import budget
@@ -17,6 +16,10 @@ from store import db
 FLEET_ACCOUNT = "claude/owner-max"  # PROFILES: claude "fleet" is labelled owner-max, "spare" is "spare"
 SPARE_ACCOUNT = "claude/spare"
 CODEX_ACCOUNT = "codex/owner-plus"
+
+
+# Real model names (tests.test_limit_handoff's OPUS/SONNET are role names for its own pipeline walks).
+OPUS, SONNET = "claude-opus-5-5", "claude-sonnet-5-5"
 
 
 def window(used, resets_in, minutes):
@@ -120,9 +123,9 @@ class OneHelperTests(LimitBase):
             self.assertEqual(scope, "account", key)
             self.assertAlmostEqual(self.resource_until(FLEET_ACCOUNT, key), until, delta=1)
         self.assertIsNotNone(self.live_until(FLEET_ACCOUNT))
-        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", OPUS, "build"), "limit")
-        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", "claude-fable-5-2", "review"), "limit")
-        self.assertIsNone(self.admission(SPARE_ACCOUNT, "claude", OPUS, "build"))
+        # Opus may review but not build (model guard), and Fable is refused outright.
+        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", OPUS, "review"), "limit")
+        self.assertIsNone(self.admission(SPARE_ACCOUNT, "claude", OPUS, "review"))
 
     def test_auto_scope_leaves_codex_per_model(self):
         now = time.time()
@@ -183,7 +186,7 @@ class OneHelperTests(LimitBase):
         self.assertEqual(scope, "model")
         self.assertEqual(self.fleet_until(self.OPUS_KEY), (until, "model"))
         self.assertAlmostEqual(self.resource_until(FLEET_ACCOUNT, self.OPUS_KEY), until, delta=1)
-        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", OPUS, "build"), "limit")
+        self.assertEqual(self.admission(FLEET_ACCOUNT, "claude", OPUS, "review"), "limit")
         self.assertEqual(self.status_until(self.SONNET_KEY), (None, None))
         self.assertEqual(self.fleet_until(self.SONNET_KEY), (None, None))
         self.assertIsNone(self.resource_until(FLEET_ACCOUNT, self.SONNET_KEY))

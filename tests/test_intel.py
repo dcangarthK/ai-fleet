@@ -80,7 +80,7 @@ class RankTests(unittest.TestCase):
         order = eligible_keys(rank("final_review", headroom=head2))
         self.assertEqual(order[0], "codex")
         self.assertIn(OPUS, order)
-        self.assertIn(FABLE, order)
+        self.assertNotIn(FABLE, order)  # Fable is paid: never proposed (model guard)
 
     def test_2_draft_prefers_local_then_haiku_over_sonnet(self):  # criterion 2
         cands = rank("draft")
@@ -94,14 +94,10 @@ class RankTests(unittest.TestCase):
 
     def test_3_build_never_fable_or_forbidden_pairs(self):  # criterion 3
         cands = rank("build")
-        fable = pick(cands, FABLE)
-        self.assertFalse(fable["eligible"])
-        self.assertTrue(any("rule 0" in r for r in fable["reasons"]))
+        self.assertFalse([c for c in cands if "fable" in c["key"]])  # not a candidate at all
         self.assertEqual(cands[0]["key"], SONNET)
         for kind in ("merge", "benchmark", "check", "draft", "re_review", "test"):
             self.assertFalse(pick(rank(kind), "codex")["eligible"], kind)
-        for kind in ("build", "fix", "test", "merge", "benchmark", "draft", "check"):
-            self.assertFalse(pick(rank(kind), FABLE)["eligible"], kind)
         flags = [c["eligible"] for c in cands]  # ineligible are kept, sorted last
         self.assertEqual(flags, sorted(flags, reverse=True))
 

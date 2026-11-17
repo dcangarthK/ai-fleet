@@ -8,7 +8,7 @@ import secrets
 import time
 import unittest
 
-from tests.test_budget import rules
+from tests.test_budget import rules as _budget_rules
 from tests.test_controller import FakeRunner, W, settle_pipeline, unmetered_claude_rules, wait_for
 
 from fastapi.testclient import TestClient
@@ -34,10 +34,22 @@ def _later_today(zone=None):
 
 CLAUDE_LIMIT = f"You've hit your 5-hour limit · resets {_later_today('Africa/Johannesburg')} (Africa/Johannesburg)"
 AUTH_FAIL = "Invalid API key · Please run /login"
+# Model guard (docs/SPEC-token-gaps-2026-11-17.md G1): Fable is refused and Opus may not build, so this suite's
+# pipeline walks use three allowed models: a builder (Sonnet), a third model (Haiku) and a reviewer (Opus).
+BUILD_M, THIRD_M, REVIEW_M = "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"
+# The real names, imported by other suites.
 OPUS, SONNET, FABLE = "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"
 PROFILES = {"claude": [{"id": "fleet", "label": "owner-max", "ready": True},
                        {"id": "spare", "label": "spare", "ready": True}],
             "codex": [{"id": "fleet", "label": "owner-plus", "ready": True}]}
+
+
+def rules(**changes):
+    """The default rules with the builder model (Sonnet here) limited to one run per account, as Opus was before
+    the model guard moved builds off Opus: these suites test concurrency and handoff between accounts."""
+    body = _budget_rules(**changes)
+    body["models"]["claude:claude-sonnet-*"]["max_concurrent"] = 1
+    return body
 
 
 def fresh_loop_state():
@@ -111,7 +123,7 @@ class HandoffBase(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
 
-    def build(self, model=OPUS, **kw):
+    def build(self, model=BUILD_M, **kw):
         return self.ok(**({"agent": "claude", "model": model, "kind": "build", "gate": "pytest"} | kw))
 
     def limit(self, task_id, text=CLAUDE_LIMIT, poll=True, **job):
@@ -178,23 +190,23 @@ class SlotTests(HandoffBase):
         self.assertEqual(budget.account_key("claude", "n2", "work", "owner-max"), "claude/owner-max")
         self.assertEqual(budget.account_key("claude", "n2", "solo", None), "claude@n2/solo")
         running = self.build()  # master, owner-max
-        self.assertEqual(budget.running_count("claude:claude-opus-*", account="claude/owner-max"), 1)
+        self.assertEqual(budget.running_count("claude:claude-sonnet-*", account="claude/owner-max"), 1)
         nodes = [n for n in tasks.node_rows() if n["id"] == "master"] + [node2]
         rows = {(r["node"], r["profile"], r["model"]): r for r in handoff.resources(nodes=nodes)}
-        self.assertEqual(rows[("n2", "work", "claude:claude-opus-*")]["state"], "busy")
-        self.assertEqual(rows[("n2", "solo", "claude:claude-opus-*")]["state"], "free")
+        self.assertEqual(rows[("n2", "work", "claude:claude-sonnet-*")]["state"], "busy")
+        self.assertEqual(rows[("n2", "solo", "claude:claude-sonnet-*")]["state"], "free")
         self.limit(running["id"], poll=True)
         rows = {(r["node"], r["profile"], r["model"]): r for r in handoff.resources(nodes=nodes)}
-        self.assertEqual(rows[("n2", "work", "claude:claude-opus-*")]["state"], "limited")
-        self.assertEqual(rows[("master", "spare", "claude:claude-opus-*")]["state"], "busy")  # the handoff runs there
-        self.assertEqual(rows[("n2", "solo", "claude:claude-opus-*")]["state"], "free")
+        self.assertEqual(rows[("n2", "work", "claude:claude-sonnet-*")]["state"], "limited")
+        self.assertEqual(rows[("master", "spare", "claude:claude-sonnet-*")]["state"], "busy")  # the handoff runs there
+        self.assertEqual(rows[("n2", "solo", "claude:claude-sonnet-*")]["state"], "free")
         self.assertNotIn("dir", json.dumps(list(rows.values())))
 
     def test_resources_api_is_view_scope_and_shows_labels_only(self):
         r = self.c.get("/api/resources", headers={"X-Fleet-Scope": "view"})
         self.assertEqual(r.status_code, 200, r.text)
         rows = r.json()
-        mine = [x for x in rows if x["node"] == "master" and x["agent"] == "claude" and x["model"] == "claude:claude-opus-*"]
+        mine = [x for x in rows if x["node"] == "master" and x["agent"] == "claude" and x["model"] == "claude:claude-sonnet-*"]
         self.assertEqual([(x["profile"], x["label"], x["state"]) for x in mine],
                          [("fleet", "owner-max", "free"), ("spare", "spare", "free")])
         self.assertTrue(all({"kinds", "today_tokens", "running", "max"} <= set(x) for x in rows))
@@ -208,9 +220,9 @@ class HandoffTests(HandoffBase):
         [new] = self.children(src["id"])
         t = self.get(new)
         self.assertEqual((t["link"], t["kind"], t["model"], t["mode"], t["gate"], t["repo"]),
-                         ("retry", "build", OPUS, src["mode"], "pytest", src["repo"]))
+                         ("retry", "build", BUILD_M, src["mode"], "pytest", src["repo"]))
         self.assertEqual((t["profile"], t["account_label"]), ("spare", "spare"))
-        self.assertEqual(t["routed_from"], "claude:claude-opus-5-5 (owner-max)")
+        self.assertEqual(t["routed_from"], "claude:claude-sonnet-5-5 (owner-max)")
         self.assertEqual(t["policy_hash"], src["policy_hash"])
         body = self.sent(new)
         self.assertEqual((body["base_branch"], body["source_job"], body["profile"]), (f"fleet/{src['id']}", src["id"], "spare"))
@@ -234,7 +246,7 @@ class HandoffTests(HandoffBase):
         src = self.build()
         self.limit(src["id"])
         [new] = self.children(src["id"])
-        body = {"prompt": "Build the greeting module", "repo": "/repo", "agent": "claude", "model": OPUS,
+        body = {"prompt": "Build the greeting module", "repo": "/repo", "agent": "claude", "model": BUILD_M,
                 "kind": "build", "gate": "pytest", "parent_id": src["id"]}
         r = self.c.post("/api/tasks", json=body | {"link": "retry"}, headers=W)
         self.assertEqual(r.status_code, 409, r.text)
@@ -304,7 +316,7 @@ class HandoffTests(HandoffBase):
         # And at the hard daily budget.
         self.settle_all()
         src = self.build()
-        body["models"]["claude:claude-opus-*"]["daily_tokens_hard"] = 0
+        body["models"]["claude:claude-sonnet-*"]["daily_tokens_hard"] = 0
         self.put_rules(body)
         self.limit(src["id"])
         self.assertEqual(self.children(src["id"]), [])
@@ -350,7 +362,7 @@ class HandoffTests(HandoffBase):
         self.refresh()
         body = rules()
         body["models"]["codex"]["kinds"] = ["*"]
-        body["limits"]["fallbacks"]["claude:claude-opus-*"] = ["codex:gpt-5"]
+        body["limits"]["fallbacks"]["claude:claude-sonnet-*"] = ["codex:gpt-5"]
         self.put_rules(body)
         src = self.build()
         self.limit(src["id"])
@@ -373,7 +385,7 @@ class HandoffTests(HandoffBase):
         self.assertEqual(auth.required_scope(type("R", (), {"method": "POST", "url": type("U", (), {
             "path": f"/api/tasks/{src['id']}/handoff"})()})()), "admin")
         listed = self.c.get(f"/api/tasks/{src['id']}/handoff").json()
-        self.assertIn(("spare", OPUS), [(s["profile"], s["model"]) for s in listed["slots"]])
+        self.assertIn(("spare", BUILD_M), [(s["profile"], s["model"]) for s in listed["slots"]])
         slot = next(s for s in listed["slots"] if s["profile"] == "spare")
         r = self.c.post(f"/api/tasks/{src['id']}/handoff", json={"slot": slot}, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
@@ -391,7 +403,7 @@ class HandoffTests(HandoffBase):
 
 class WaitTests(HandoffBase):
     def review(self, **kw):
-        return self.ok(**({"agent": "claude", "model": FABLE, "kind": "review", "mode": "read-only",
+        return self.ok(**({"agent": "claude", "model": REVIEW_M, "kind": "review", "mode": "read-only",
                            "worktree": False} | kw))
 
     def test_wait_resume_reschedule_once_then_left_for_the_owner(self):
@@ -405,7 +417,7 @@ class WaitTests(HandoffBase):
         later = row["at"] + 1
         with db() as c:
             c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
-                      "VALUES (?,?,?,?,?,?,?,?,?)", (later, "t-other1", 1, "claude", FABLE, "claude:" + FABLE, "limit",
+                      "VALUES (?,?,?,?,?,?,?,?,?)", (later, "t-other1", 1, "claude", REVIEW_M, "claude:" + REVIEW_M, "limit",
                                                      later + 3600, "claude/owner-max"))
         self.c.portal.call(handoff.run_due, later)
         row = self.schedule(t["id"])
@@ -414,7 +426,7 @@ class WaitTests(HandoffBase):
         self.assertFalse(self.posts(t["id"], "message"))
         with db() as c:
             c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
-                      "VALUES (?,?,?,?,?,?,?,?,?)", (row["at"], "t-other2", 1, "claude", FABLE, "claude:" + FABLE,
+                      "VALUES (?,?,?,?,?,?,?,?,?)", (row["at"], "t-other2", 1, "claude", REVIEW_M, "claude:" + REVIEW_M,
                                                      "limit", row["at"] + 3600, "claude/owner-max"))
         self.c.portal.call(handoff.run_due, row["at"] + 1)
         row = self.schedule(t["id"])
@@ -442,7 +454,7 @@ class WaitTests(HandoffBase):
         with db() as c:
             c.execute("UPDATE agent_usage SET resets_at=? WHERE task_id=?", (row["at"] - 200, t["id"]))
         body = rules()
-        body["models"]["claude:claude-fable-*"]["max_concurrent"] = 1
+        body["models"]["claude:claude-opus-*"]["max_concurrent"] = 1
         self.put_rules(body)
         blocker = self.review()  # takes the only Fable slot of owner-max
         with db() as c:
@@ -486,7 +498,7 @@ class WaitTests(HandoffBase):
         with db() as c:
             c.execute("UPDATE agent_usage SET resets_at=? WHERE task_id=?", (time.time() - 1, t["id"]))
         body = rules()
-        body["models"]["claude:claude-fable-*"]["kinds"] = ["build"]  # reviews are no longer allowed on Fable
+        body["models"]["claude:claude-opus-*"]["kinds"] = ["build"]  # reviews are no longer allowed on Fable
         self.put_rules(body)
         self.c.portal.call(handoff.run_due, row["at"] + 1)
         row = self.schedule(t["id"])
@@ -505,7 +517,7 @@ class WaitTests(HandoffBase):
         self.assertEqual(self.schedule(t["id"])["state"], "skipped")
 
     def test_a_limit_with_no_session_retries_on_the_same_slot_from_a_checkpoint(self):
-        t = self.ok(agent="claude", model=SONNET, kind="test", gate=None)
+        t = self.ok(agent="claude", model=THIRD_M, kind="test", gate=None)
         self.limit(t["id"], session_id=None)
         self.assertEqual(self.children(t["id"]), [])  # draft: wait first
         row = self.schedule(t["id"])
@@ -514,12 +526,12 @@ class WaitTests(HandoffBase):
         self.c.portal.call(handoff.run_due, row["at"] + 1)
         [new] = self.children(t["id"])
         got = self.get(new)
-        self.assertEqual((got["link"], got["model"], got["profile"]), ("retry", SONNET, "fleet"))
+        self.assertEqual((got["link"], got["model"], got["profile"]), ("retry", THIRD_M, "fleet"))
         self.assertEqual(self.sent(new)["base_branch"], f"fleet/{t['id']}")
         self.assertEqual(len(self.posts(t["id"], "checkpoint")), 1)
 
     def test_a_first_turn_retry_that_finds_the_task_moved_on_is_skipped_not_left(self):
-        t = self.ok(agent="claude", model=SONNET, kind="test", gate=None)
+        t = self.ok(agent="claude", model=THIRD_M, kind="test", gate=None)
         self.limit(t["id"], session_id=None)
         row = self.schedule(t["id"])
         with db() as c:
@@ -575,7 +587,7 @@ class WaitTests(HandoffBase):
 class ContinuationTests(HandoffBase):
     """Every way of continuing a task passes one admission (budget and node policy) before the runner hears of it."""
     def review(self, **kw):
-        return self.ok(**({"agent": "claude", "model": FABLE, "kind": "review", "mode": "read-only",
+        return self.ok(**({"agent": "claude", "model": REVIEW_M, "kind": "review", "mode": "read-only",
                            "worktree": False} | kw))
 
     def blocked(self, task_id):
@@ -585,7 +597,7 @@ class ContinuationTests(HandoffBase):
                       (json.dumps([{"tool_name": "Read"}]), task_id))
         FakeRunner.jobs[task_id].update(state="exited", exit_code=0)
 
-    def limit_account(self, account="claude/owner-max", model=FABLE):
+    def limit_account(self, account="claude/owner-max", model=REVIEW_M):
         with db() as c:
             c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
                       "VALUES (?,?,?,?,?,?,?,?,?)", (time.time(), "t-" + secrets.token_hex(4), 1, "claude", model, "claude:" + model,
@@ -605,7 +617,7 @@ class ContinuationTests(HandoffBase):
         t = self.review()
         self.blocked(t["id"])
         body = rules()
-        body["models"]["claude:claude-fable-*"]["daily_tokens_hard"] = 0  # at the hard daily budget
+        body["models"]["claude:claude-opus-*"]["daily_tokens_hard"] = 0  # at the hard daily budget
         self.put_rules(body)
         r = self.c.post(f"/api/tasks/{t['id']}/approve", headers=W)
         self.assertEqual(r.status_code, 409, r.text)
@@ -632,7 +644,7 @@ class ContinuationTests(HandoffBase):
         t = self.review()
         self.blocked(t["id"])
         body = rules()
-        body["models"]["claude:claude-fable-*"]["daily_tokens_hard"] = 0
+        body["models"]["claude:claude-opus-*"]["daily_tokens_hard"] = 0
         self.put_rules(body)
         task = tasks.get_task(t["id"])
         task["policy"] = dict(task["policy"] or {}, auto_approve={"denied_tools": True, "agents": ["claude"]})
@@ -662,7 +674,7 @@ class ContinuationTests(HandoffBase):
 
     def test_two_concurrent_resumes_never_exceed_the_accounts_concurrency(self):
         body = rules()
-        body["models"]["claude:claude-fable-*"]["max_concurrent"] = 1
+        body["models"]["claude:claude-opus-*"]["max_concurrent"] = 1
         self.put_rules(body)
         first = self.review()
         second = self.review()  # waits for the account's one Fable slot... on the spare account instead
@@ -688,7 +700,7 @@ class ContinuationTests(HandoffBase):
 
     def test_a_failed_runner_call_releases_the_reservation(self):
         body = rules()
-        body["models"]["claude:claude-fable-*"]["max_concurrent"] = 1
+        body["models"]["claude:claude-opus-*"]["max_concurrent"] = 1
         self.put_rules(body)
         t = self.review()
         with db() as c:
@@ -707,7 +719,7 @@ class ContinuationTests(HandoffBase):
             tasks.runner_call = real
         self.assertEqual(r.status_code, 502, r.text)
         self.assertEqual(budget.RESERVED, {})
-        self.assertEqual(budget.running_count("claude:claude-fable-*", account="claude/owner-max"), 0)
+        self.assertEqual(budget.running_count("claude:claude-opus-*", account="claude/owner-max"), 0)
 
     def test_manual_message_in_quiet_hours_is_deferred(self):
         t = self.review()
@@ -771,7 +783,7 @@ class ContinuationTests(HandoffBase):
 
     def test_two_concurrent_resumes_never_exceed_the_nodes_concurrency(self):
         first = self.review()
-        second = self.review(model=SONNET)  # a different model: the account's limits don't decide this one
+        second = self.review(model=THIRD_M)  # a different model: the account's limits don't decide this one
         with db() as c:  # both settled on the same node, whose policy allows one running task
             for t in (first, second):
                 policy = json.loads(c.execute("SELECT policy FROM tasks WHERE id=?", (t["id"],)).fetchone()[0] or "{}")
@@ -844,17 +856,17 @@ class PromptTests(unittest.TestCase):
     def test_handed_off_is_a_resolution_kind_with_its_own_display(self):
         self.assertIn("handed_off", lineage.RESOLUTION_KINDS)
         shown = lineage.display_status({"state": "failed", "failure_reason": "limit", "resolution": json.dumps(
-            {"kind": "handed_off", "task_id": "t-1", "model": OPUS, "label": "spare"})})
+            {"kind": "handed_off", "task_id": "t-1", "model": BUILD_M, "label": "spare"})})
         self.assertEqual(shown, {"tone": "resolved", "label": "Handed off → t-1"})
 
     def test_resolved_models_for_review_independence(self):
-        self.assertEqual(handoff.resolved_model({"agent": "claude", "model": None, "usage": {"model": SONNET}}),
-                         ("claude", SONNET))
-        self.assertEqual(handoff.resolved_model({"agent": "claude", "model": OPUS, "usage": None}), ("claude", OPUS))
+        self.assertEqual(handoff.resolved_model({"agent": "claude", "model": None, "usage": {"model": THIRD_M}}),
+                         ("claude", THIRD_M))
+        self.assertEqual(handoff.resolved_model({"agent": "claude", "model": BUILD_M, "usage": None}), ("claude", BUILD_M))
 
 
 class PipelineTests(HandoffBase):
-    def start(self, reviewer=FABLE, builder=OPUS):
+    def start(self, reviewer=REVIEW_M, builder=BUILD_M):
         body = {"title": "Handoff pipeline", "spec": "Build the greeting", "repo": "/repo", "gate": "pytest",
                 "mode": "auto-edit", "builder": {"agent": "claude", "model": builder}, "max_rounds": 3,
                 "reviewers": [{"kind": "agent", "agent": "claude", "model": reviewer}]}
@@ -929,8 +941,10 @@ class PipelineTests(HandoffBase):
         self.assertEqual(current["budget"]["paid_rounds"], [1])
 
     def test_review_independence_across_every_build_attempt(self):
-        self.put_rules(rules(limit_scope="model"))  # the walk assumes Opus and Sonnet limit apart
-        p = self.start(reviewer=SONNET)
+        body = rules(limit_scope="model")  # the walk assumes the builder and the third model limit apart
+        body["limits"]["fallbacks"]["claude:claude-sonnet-*"] = ["claude:claude-haiku-5-5"]
+        self.put_rules(body)
+        p = self.start(reviewer=THIRD_M)
         first = p["build_task"]
         self.limit(first)
         self.poll(p)
@@ -939,7 +953,7 @@ class PipelineTests(HandoffBase):
         self.limit(second)
         self.poll(p)
         third = self.pipeline(p)["build_task"]
-        self.assertEqual((self.get(third)["model"], self.get(third)["account_label"]), (SONNET, "owner-max"))
+        self.assertEqual((self.get(third)["model"], self.get(third)["account_label"]), (THIRD_M, "owner-max"))
         FakeRunner.jobs[third].update(state="exited", exit_code=0, result="ok", gate={"state": "passed", "exit_code": 0})
         current = settle_pipeline(self.c, p["id"], lambda x: x if x["state"] == "escalated" else None)
         self.assertIn("all eligible reviewers built this work", current["history"][-1]["note"])
@@ -959,28 +973,28 @@ class PipelineTests(HandoffBase):
 
     def test_a_limited_reviewer_never_falls_back_to_a_model_that_built_the_work(self):
         body = rules()
-        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-fable-*": ["claude:claude-opus-5-5"]})
+        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-opus-*": ["claude:claude-sonnet-5-5"]})
         self.put_rules(body)
         p = self.start()  # Opus builds, Fable reviews
-        self.limit_everywhere(FABLE)
+        self.limit_everywhere(REVIEW_M)
         current = self.pass_build(p)
         review_id = current["reviews"].get("0", {}).get("task_id")
         if review_id:  # admitted only on Fable itself, waiting for its reset: never on Opus, the builder
             review = self.get(review_id)
-            self.assertEqual((review["agent"], review["model"]), ("claude", FABLE))
+            self.assertEqual((review["agent"], review["model"]), ("claude", REVIEW_M))
             self.assertEqual(review["state"], "queued")
         else:
             self.assertIn(current["state"], ("escalated", "reviewing"))
         reviews = [t for t in self.children(p["build_task"]) if self.get(t)["link"] == "review"]
-        self.assertFalse([t for t in reviews if self.get(t)["model"] == OPUS])
+        self.assertFalse([t for t in reviews if self.get(t)["model"] == BUILD_M])
 
     def test_review_round_accounting_uses_the_admitted_agent_and_model(self):
         body = rules()
         body["models"]["codex"]["kinds"] = ["*"]
-        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-fable-*": ["codex:gpt-5"]})
+        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-opus-*": ["codex:gpt-5"]})
         self.put_rules(body)
         p = self.start()
-        self.limit_everywhere(FABLE)
+        self.limit_everywhere(REVIEW_M)
         current = self.pass_build(p)
         review = self.get(current["reviews"]["0"]["task_id"])
         self.assertEqual((review["agent"], review["model"]), ("codex", "gpt-5"))
@@ -990,10 +1004,10 @@ class PipelineTests(HandoffBase):
     def test_a_limited_fallback_codex_review_gives_its_codex_round_back(self):
         body = rules()
         body["models"]["codex"]["kinds"] = ["*"]
-        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-fable-*": ["codex:gpt-5"]})
+        body["limits"].update(on_limit="fallback", fallbacks={"claude:claude-opus-*": ["codex:gpt-5"]})
         self.put_rules(body)
         p = self.start()  # Fable is the configured reviewer
-        self.limit_everywhere(FABLE)
+        self.limit_everywhere(REVIEW_M)
         current = self.pass_build(p)
         review = current["reviews"]["0"]["task_id"]
         self.assertEqual(self.get(review)["agent"], "codex")
@@ -1011,7 +1025,7 @@ class PipelineTests(HandoffBase):
             policy["limits"] = dict(policy.get("limits") or {}, max_concurrent=1)
             c.execute("UPDATE tasks SET policy=? WHERE id=?", (json.dumps(policy), build))
         current = self.pass_build(p)
-        blocker = self.ok(agent="claude", model=SONNET, kind="test", gate=None)  # now running on the node
+        blocker = self.ok(agent="claude", model=THIRD_M, kind="test", gate=None)  # now running on the node
         self.assertEqual(blocker["state"], "working")
         issue = {"severity": "medium", "file": "app.py", "problem": "Greeting regression", "evidence": "hello",
                  "expected": "x", "actual": "y", "fix": "z"}

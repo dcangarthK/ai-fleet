@@ -33,7 +33,7 @@ DEFAULT_RULES = {
                   "default_effort": {"final_review": "high", "security_review": "high", "build": "high", "*": "medium"},
                   "daily_tokens_soft": 2000000, "daily_tokens_hard": None},
         "claude:claude-opus-*": {"tier": "premium", "max_concurrent": 1,
-                                 "kinds": ["build", "final_review", "security_review", "review", "test", "lead"]},
+                                 "kinds": ["build", "final_review", "security_review", "review", "re_review", "test", "lead"]},
         "claude:claude-fable-*": {"tier": "premium", "max_concurrent": 2,
                                   "kinds": ["review", "re_review", "final_review", "security_review"]},
         # Drafts belong on the cheap tier (CLAUDE.md, Paid-model budget) and KIND_DEFAULT_MODEL already sends
@@ -56,7 +56,7 @@ DEFAULT_RULES = {
                # 85 rather than 90: on 2026-11-16 the fleet account passed 90 with runs already in flight and
                # those runs then died on the limit mid-task, costing a checkpoint and a handoff each.
                "near_limit_percent": 85,
-               "fallbacks": {"codex": ["claude:claude-fable-5-2"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
+               "fallbacks": {"codex": ["claude:claude-opus-5-5"], "claude:claude-opus-*": ["claude:claude-sonnet-5-5"]},
                # A task that stops at a usage limit (docs/SPEC-limit-handoff.md 4.2): hand its work to another slot,
                # or wait for the reset. By kind; "*" covers the rest.
                "on_task_limit": {"build": "handoff", "fix": "handoff", "*": "wait"},
@@ -83,11 +83,30 @@ TOP_KEYS = set(DEFAULT_RULES)
 MODEL_FIELDS = {"tier", "max_concurrent", "kinds", "default_effort", "daily_tokens_soft", "daily_tokens_hard"}
 
 
+class GuardDetail(dict):
+    """A refusal detail that serialises as {"error", "refused_by"} (tasks._refusal_detail passes a non-str detail
+    through unchanged, so the HTTP 400 body carries it) yet still reads as its message for callers that treat
+    `Refusal.detail` as text (str(), f-strings, and str methods such as `.startswith`)."""
+
+    def __str__(self) -> str:
+        return self["error"]
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self["error"], name)
+
+
 class Refusal(Exception):
-    def __init__(self, status: int, detail: str):
-        super().__init__(detail)
+    def __init__(self, status: int, detail, refused_by: str | None = None):
+        """`refused_by` names a hard-coded guard; the detail then becomes a GuardDetail carrying it."""
+        self.message = detail
+        if refused_by:
+            detail = GuardDetail(error=detail, refused_by=refused_by)
+        super().__init__(self.message)
         self.status = status
         self.detail = detail
+        self.refused_by = refused_by
 
 
 def lead_allowed(agent: str, model: str | None) -> bool:
@@ -1165,7 +1184,11 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         drafted_from = identity(agent, model)
         model = resolved = KIND_DEFAULT_MODEL["draft"]
         key = match_key(rules, agent, resolved)
-    if rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind):
+    guard = model_guard(agent, resolved, kind, effort) or model_guard(agent, key, kind, effort)
+    if guard and not override:
+        raise Refusal(400, guard, refused_by="model_guard")
+    # The owner's override admits a guarded identity, Fable on build/fix/test included (it supersedes rule 0).
+    if not (guard and override) and (rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind)):
         raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "
                            "guidance only)")
     if paid and key is None and rules.get("unlisted") == "refuse":
@@ -1179,7 +1202,7 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         raise Refusal(400, f"{label(key)} is reserved for [{reserved}]"
                            + (f"; use {alternative} for {kind}" if alternative else f"; no model in the rules allows {kind}"))
     decision = {"agent": agent, "model": model, "key": key, "identity": identity(agent, resolved), "routed_from": drafted_from,
-                "routed_why": "draft kind -> haiku" if drafted_from else None,
+                "routed_why": f"owner override: {guard}" if guard else ("draft kind -> haiku" if drafted_from else None),
                 "wait": None, "reason": None, "account": accounts(agent)[0]}
     if paid and key:  # "unlisted": "allow" means the rules don't govern a named model that has no rule
         placed, (until, why, wait_account, watched) = place(agent, key, decision["identity"], entry)
@@ -1199,9 +1222,12 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                             f_agent, f_model or node_default_model(f_agent, node_id)) in forbidden):
                         continue
                     f_key = match_key(rules, f_agent, f_model)
-                    if rule0_blocks(f_agent, f_model or node_default_model(f_agent, node_id), kind) or \
-                            rule0_blocks(f_agent, f_key, kind):
+                    f_resolved = f_model or node_default_model(f_agent, node_id)
+                    if rule0_blocks(f_agent, f_resolved, kind) or rule0_blocks(f_agent, f_key, kind):
                         continue  # rule 0: never reroute a build, fix or test onto Fable
+                    # The model guard skips a refused identity (the effort is reset below, so ignore it here).
+                    if model_guard(f_agent, f_resolved, kind, None) or model_guard(f_agent, f_key, kind, None):
+                        continue
                     if f_key and not kind_allowed(rules["models"][f_key], kind, origin_kind):
                         continue
                     f_entry = entry_for(rules, f_key, f_agent)
@@ -1218,7 +1244,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
                                 until=until, not_before=until if watched else None)
         if decision["key"]:
             maybe_soft_notice(rules, decision["key"], now)
-    decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)
+    on_opus = _is_opus(decision["agent"], decision["model"]) or _is_opus(decision["agent"], decision["key"])
+    if on_opus and not override and (not effort or effort.lower() in OPUS_BLOCKED_EFFORT):
+        # Opus never gets an unset or high effort by default: by kind (also after a reroute from another model).
+        decision["effort"] = OPUS_DEFAULT_EFFORT.get(kind, "low")
+    else:
+        decision["effort"] = resolve_effort(rules, decision["key"], kind, effort, failures)
+        if on_opus and not effort and decision["effort"] in OPUS_BLOCKED_EFFORT:
+            decision["effort"] = OPUS_DEFAULT_EFFORT.get(kind, "medium")
     if kind in REVIEW_KINDS:
         decision["review_exec"] = rules["review_exec"]
     return decision
@@ -1268,6 +1301,33 @@ def on_task_stall(rules: dict, kind: str | None) -> str:
 # CLAUDE.md rule 0, hard-coded whatever the rules say: Fable never builds, fixes or tests.
 RULE0_KINDS = {"build", "fix", "test"}
 
+# Model guard (docs/SPEC-token-gaps-2026-11-17.md G1), hard-coded like rule 0: the Budget page cannot switch it off.
+# Only the owner's per-task budget_override passes it.
+OPUS_KINDS = {"final_review", "security_review", "review", "re_review", "lead"}
+OPUS_DEFAULT_EFFORT = {"final_review": "medium", "security_review": "medium", "review": "low", "re_review": "low",
+                       "lead": "low"}
+OPUS_BLOCKED_EFFORT = {"high", "xhigh", "max"}
+FABLE_RULE = "fable is paid: refused (owner override only)"
+
+
+def model_guard(agent: str | None, model_or_key: str | None, kind: str, effort: str | None) -> str | None:
+    """The rule a Claude identity breaks, or None. Ignores the stored rules."""
+    if agent != "claude":
+        return None
+    text = (model_or_key or "").lower()
+    if "fable" in text:
+        return FABLE_RULE
+    if "opus" in text:
+        if (effort or "").lower() in OPUS_BLOCKED_EFFORT:
+            return f"opus at {effort} effort is refused (owner override only)"
+        if kind not in OPUS_KINDS:
+            return f"opus does not run {kind} tasks: refused (owner override only)"
+    return None
+
+
+def _is_opus(agent: str | None, model_or_key: str | None) -> bool:
+    return agent == "claude" and "opus" in (model_or_key or "").lower()
+
 
 def rule0_blocks(agent: str | None, model_or_key: str | None, kind: str) -> bool:
     return kind in RULE0_KINDS and agent == "claude" and "fable" in (model_or_key or "").lower()
@@ -1288,7 +1348,7 @@ def admission(task: dict, now: float | None = None, *, effort: str | None = None
                          node_id=task.get("node_id"),
                          accounts_for=lambda _agent: [account], reroute=False)
     except Refusal as refusal:
-        return {"outcome": "refuse", "until": None, "reason": refusal.detail, "wait": None}
+        return {"outcome": "refuse", "until": None, "reason": refusal.message, "wait": None}
     if decision["wait"] is None:
         # Others running on this account (not this task, which is settled) decide the slot.
         return {"outcome": "admit", "until": None, "reason": None, "wait": None}

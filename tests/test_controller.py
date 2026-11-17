@@ -1354,8 +1354,8 @@ Imported body.
     def test_agent_reviewer_model_is_passed_to_the_review_task(self):
         body = {"title": "Model review", "spec": "do it", "repo": "/r/project", "gate": "pytest", "mode": "auto-edit",
                 "builder": {"agent": "claude"}, "max_rounds": 1,
-                "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-fable-5-1"}]}
-        refused = self.c.post("/api/pipelines", json=dict(
+                "reviewers": [{"kind": "agent", "agent": "claude", "model": "claude-opus-5-5"}]}
+        refused =self.c.post("/api/pipelines", json=dict(
             body, reviewers=[{"kind": "agent", "agent": "claude"}]), headers=W)
         self.assertEqual(refused.status_code, 400)
         for bad in (["x"], "", 7):
@@ -1375,9 +1375,9 @@ Imported body.
                 self.c.portal.call(controller.tasks.poll_task, p["build_task"])
                 self.c.portal.call(controller.poll_pipeline, p["id"])
             rid = current["reviews"]["0"]["task_id"]
-            self.assertEqual(controller.tasks.get_task(rid)["model"], "claude-fable-5-1")
+            self.assertEqual(controller.tasks.get_task(rid)["model"], "claude-opus-5-5")
             sent = [b for path, b in FakeRunner.calls if path == "/jobs" and b["id"] == rid][0]
-            self.assertEqual(sent["model"], "claude-fable-5-1")
+            self.assertEqual(sent["model"], "claude-opus-5-5")
         finally:
             self.c.post(f"/api/pipelines/{p['id']}/cancel", headers=W)
 

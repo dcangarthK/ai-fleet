@@ -120,6 +120,13 @@ class StallBase(HandoffBase):
             return [json.loads(r[0] or "{}") for r in c.execute(
                 "SELECT data FROM events WHERE task_id=? AND type=? ORDER BY id", (task_id, kind))]
 
+    def build(self, model=OPUS, **kw):
+        """These suites exercise stall handling on the owner's builder identity (Opus, one run per account), which
+        the model guard refuses to build unless the owner overrides, so the test is the owner here."""
+        if "opus" in (model or ""):
+            kw.setdefault("budget_override", "test: model guard (G1)")
+        return super().build(model=model, **kw)
+
     def running(self, model=OPUS, **kw):
         t = self.build(model=model, **kw)
         self.assertEqual(t["state"], "working")
@@ -614,14 +621,17 @@ class FixRoundTests(StallBase):
         self.assertTrue(record["waiting"])
         self.assertEqual(record["tries"], 2)
 
-    def test_fix4_admit_refuses_fable_for_build_fix_and_test_even_with_override(self):
+    def test_fix4_admit_refuses_fable_for_every_kind_unless_the_owner_overrides(self):
+        # Superseded rule 0 (docs/SPEC-token-gaps-2026-11-17.md G1): Fable is paid, refused whatever the rules say;
+        # only the owner's per-task budget_override admits it.
         body = rules()
         body["models"]["claude:claude-fable-*"]["kinds"] = ["*"]
         self.put_rules(body)
-        for kind in ("build", "fix", "test"):
+        for kind in ("build", "fix", "test", "review"):
             with self.assertRaises(budget.Refusal):
-                budget.admit(agent="claude", model=FABLE, kind=kind, effort=None, override=True)
-        budget.admit(agent="claude", model=FABLE, kind="review", effort=None, override=False)
+                budget.admit(agent="claude", model=FABLE, kind=kind, effort=None, override=False)
+            self.assertEqual(budget.admit(agent="claude", model=FABLE, kind=kind, effort=None, override=True)["model"],
+                             FABLE)
 
     def test_fix4_auto_build_never_lands_on_fable(self):
         body = rules()
@@ -643,7 +653,7 @@ class FixRoundTests(StallBase):
             c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,model,identity,outcome,resets_at,account) "
                       "VALUES (?,?,?,?,?,?,?,?,NULL)", (time.time(), "t-fffffff0", 1, "claude", OPUS,
                                                         "claude:" + OPUS, "limit", time.time() + 3600))
-        decision = budget.admit(agent="claude", model=OPUS, kind="build", effort=None, override=False)
+        decision = budget.admit(agent="claude", model=OPUS, kind="build", effort=None, override=True)
         self.assertNotIn("fable", (decision["model"] or "").lower())
         self.assertEqual(decision["wait"], "limit")
         stalled = {"agent": "claude", "model": OPUS, "budget_key": "claude:claude-opus-*", "kind": "build",
@@ -767,8 +777,8 @@ class ResourcesTests(StallBase):
 class PipelineStallTests(StallBase):
     def test_a_stalled_build_is_rerouted_without_using_a_fix_round(self):
         body = {"title": "Stall pipeline", "spec": "Build the greeting", "repo": "/repo", "gate": "pytest",
-                "mode": "auto-edit", "builder": {"agent": "claude", "model": OPUS}, "max_rounds": 3,
-                "reviewers": [{"kind": "agent", "agent": "claude", "model": FABLE}]}
+                "mode": "auto-edit", "builder": {"agent": "claude", "model": SONNET}, "max_rounds": 3,
+                "reviewers": [{"kind": "agent", "agent": "claude", "model": OPUS}]}
         r = self.c.post("/api/pipelines", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
         p = r.json()
@@ -789,16 +799,17 @@ class PipelineStallTests(StallBase):
         self.assertTrue(any("stalled" in (h.get("note") or "") for h in current["history"]))
         self.assertFalse(any("usage limit" in (h.get("note") or "") for h in current["history"]))
 
-    def start_pipeline(self, reviewer_model):
+    def start_pipeline(self, reviewer_model, builder_model=SONNET):
+        # Opus may not build (model guard, G1), so the pipeline builder is Sonnet unless a test names another.
         body = {"title": "Stall pipeline", "spec": "Build the greeting", "repo": "/repo", "gate": "pytest",
-                "mode": "auto-edit", "builder": {"agent": "claude", "model": OPUS}, "max_rounds": 3,
+                "mode": "auto-edit", "builder": {"agent": "claude", "model": builder_model}, "max_rounds": 3,
                 "reviewers": [{"kind": "agent", "agent": "claude", "model": reviewer_model}]}
         r = self.c.post("/api/pipelines", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()
 
     def test_fix5_a_stalled_pipeline_build_never_goes_to_its_reviewer(self):
-        p = self.start_pipeline(SONNET)
+        p = self.start_pipeline(SONNET, builder_model=HAIKU)  # Sonnet is the first choice for a rebuild: it reviews
         first = p["build_task"]
         self.age(first)
         self.set_jobs(job(first, alive=False))
@@ -815,7 +826,7 @@ class PipelineStallTests(StallBase):
         self.assertNotEqual(tasks.get_task(new)["model"], SONNET)  # Sonnet would be first otherwise
 
     def test_must_a_stalled_pipeline_review_is_left_running_with_an_alert(self):
-        p = self.start_pipeline(FABLE)
+        p = self.start_pipeline(OPUS)
         review = self.running(model=SONNET)
         with db() as c:
             c.execute("UPDATE pipelines SET reviews=? WHERE id=?",

@@ -12,13 +12,13 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 
 CANDIDATES = ["local:fast", "local:coder", "claude:claude-haiku-5-5", "claude:claude-sonnet-5-5",
-              "claude:claude-opus-5-5", "claude:claude-fable-5-2", "codex"]
+              "claude:claude-opus-5-5", "codex"]  # never Fable: it is paid (docs/SPEC-token-gaps-2026-11-17.md G1)
 
 KIND_PREFERENCE = {
-    "build": ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "codex"],
-    "fix": ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "codex"],
+    "build": ["claude:claude-sonnet-5-5", "codex"],
+    "fix": ["claude:claude-sonnet-5-5", "codex"],
     "test": ["claude:claude-sonnet-5-5", "claude:claude-haiku-5-5"],
-    "review": ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5", "claude:claude-haiku-5-5"],
+    "review": ["claude:claude-sonnet-5-5", "claude:claude-haiku-5-5"],
     "re_review": ["claude:claude-haiku-5-5", "claude:claude-sonnet-5-5"],
     "final_review": ["codex", "claude:claude-opus-5-5"],
     "security_review": ["codex", "claude:claude-opus-5-5"],
@@ -26,7 +26,7 @@ KIND_PREFERENCE = {
     "benchmark": ["claude:claude-haiku-5-5", "claude:claude-sonnet-5-5"],
     "check": ["claude:claude-haiku-5-5", "claude:claude-sonnet-5-5"],
     "draft": ["local:coder", "local:fast", "claude:claude-haiku-5-5", "claude:claude-sonnet-5-5"],
-    "lead": ["claude:claude-sonnet-5-5"],
+    "lead": ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5"],
 }
 PREF_POINTS = (40, 30, 20, 10)
 FABLE_NEVER = {"build", "fix", "test", "merge", "benchmark", "draft", "check"}

@@ -15,7 +15,7 @@ python3 -m unittest tests/test_batch.py
 python3 -m unittest tests/test_pipeline_blocked.py
 uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_batch_mcp.py
 uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_batch_routes.py
-uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_draft_routing.py tests/test_intel.py tests/test_loop_heal.py tests/test_token_budget_h3.py tests/test_visible_decisions.py
+uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_draft_routing.py tests/test_model_guard.py tests/test_intel.py tests/test_loop_heal.py tests/test_token_budget_h3.py tests/test_visible_decisions.py
 uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_ui_api.py
 python3 nodes/build.py --check
 bash -n nodes/onboard.sh master/setup.sh

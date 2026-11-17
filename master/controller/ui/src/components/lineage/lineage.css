@@ -13,8 +13,7 @@
 .lin-river-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); }
 .graph-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: var(--s3); align-items: start; }.graph-insights, .graph-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s3); background: var(--surface); }.graph-insights summary { cursor: pointer; font-weight: 700; color: var(--ink); }.graph-insights .lin-intel { margin-top: var(--s3); }
 .graph-wrap { position: relative; width: 100%; height: max(70vh, 520px); min-height: 520px; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
-.graph-svg { width: 100%; height: 100%; display: block; touch-action: pan-y; cursor: grab; }
-.graph-svg.dragging { touch-action: none; }
+.graph-svg { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
 .graph-svg:active { cursor: grabbing; }
 .graph-bg { fill: url(#graph-dots); } #graph-dots circle { fill: var(--line-strong); opacity: .55; }
 .graph-band { fill: color-mix(in srgb, var(--accent) 6%, var(--surface)); stroke: var(--line); }
@@ -260,3 +259,4 @@ input.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent)
   .lin-river-panel { position: fixed; inset: auto 0 0; z-index: 45; max-height: min(62vh, 520px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -12px 32px var(--scrim); padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
 }
 @media (max-width: 640px), (pointer: coarse) { .graph-actions .quiet { display: none; } }
+@media (max-width: 640px) { .graph-wrap { height: 60vh; min-height: 420px; } }

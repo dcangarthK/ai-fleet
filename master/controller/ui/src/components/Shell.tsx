@@ -45,6 +45,7 @@ export function Shell() {
   useEffect(() => {
     const col = mainColRef.current;
     if (col) col.inert = drawer;
+    return () => { if (col) col.inert = false; };
   }, [drawer]);
 
   return (

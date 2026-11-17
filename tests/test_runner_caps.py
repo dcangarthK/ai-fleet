@@ -143,7 +143,8 @@ class Watch(Base):
 
     def state(self, job, **kw):
         return {"pos": 0, "buf": b"", "ids": set(), "cap": None, "dirty": False, "pending": set(), "stamp_from": 0,
-                "caps": {"turns": 1}} | kw
+                "caps": {"turns": 1}, "silent_tool_calls": 0,
+                "next_silent_tool_heartbeat": self.m.silent_tool_heartbeat_calls} | kw
 
     def write(self, job, events):
         path = self.fleet / "jobs" / job["id"] / "events.jsonl"
@@ -174,6 +175,34 @@ class Watch(Base):
         self.write(job, [event])
         self.m._watch_stream(job, st)
         self.assertIn("observed_at", job["rate_limit"])  # a line written after the restore is live
+
+    def test_silent_tool_heartbeat_emits_at_configured_count_and_text_resets_it(self):
+        self.assertEqual(self.m.silent_tool_heartbeat_calls, 8)
+        config_path = self.fleet / "runner.json"
+        config = json.loads(config_path.read_text())
+        config["silent_tool_heartbeat_calls"] = 2
+        config_path.write_text(json.dumps(config))
+        configured = runner.JobManager(self.fleet, "http://127.0.0.1:1")
+        self.assertEqual(configured.silent_tool_heartbeat_calls, 2)
+        self.m.silent_tool_heartbeat_calls = configured.silent_tool_heartbeat_calls
+        self.m._touched_files = lambda _cwd: ["changed.py"]
+        job = self.job()
+        st = self.state(job, next_silent_tool_heartbeat=2)
+        tool = lambda name: {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": name, "name": name, "input": {}}]}}
+        text = {"type": "assistant", "message": {"content": [{"type": "text", "text": "status"}]}}
+        self.write(job, [tool("Read")])
+        self.m._watch_stream(job, st)
+        self.assertNotIn("tool_heartbeat", job)
+        self.write(job, [tool("Edit")])
+        self.m._watch_stream(job, st)
+        self.assertEqual(job["tool_heartbeat"]["last_tool"], "Edit")
+        self.assertEqual(job["tool_heartbeat"]["files_touched"], ["changed.py"])
+        self.assertEqual(job["tool_heartbeat"]["count"], 2)
+        self.write(job, [text, tool("Write")])
+        self.m._watch_stream(job, st)
+        self.assertNotIn("tool_heartbeat", job)
+        self.assertEqual(st["silent_tool_calls"], 1)
 
 
 class Launch(Base):

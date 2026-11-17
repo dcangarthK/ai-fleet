@@ -748,6 +748,26 @@ async def heartbeat(request: Request):
     HEARTBEAT_ACCEPTED[node_id] = now
     stored = _json(row["runner"]) or {}
     health = tasks.merge_health(stored, body)  # what a poll could report, nothing more
+    # The runner's existing jobs heartbeat is deliberately a narrow contract.  Keep this optional live detail
+    # bounded here rather than widening task state or accepting arbitrary job fields from a node.
+    raw_jobs = body.get("jobs") if isinstance(body.get("jobs"), list) else []
+    heartbeat_by_id = {}
+    for item in raw_jobs[:tasks.MAX_HEALTH_JOBS]:
+        detail = item.get("tool_heartbeat") if isinstance(item, dict) else None
+        if not isinstance(detail, dict) or not isinstance(item.get("id"), str):
+            continue
+        count = detail.get("count")
+        tool = detail.get("last_tool")
+        files = detail.get("files_touched")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            continue
+        heartbeat_by_id[item["id"]] = {"last_tool": tool[:160] if isinstance(tool, str) else "tool",
+                                        "files_touched": [path[:240] for path in files[:20]
+                                                          if isinstance(path, str)] if isinstance(files, list) else [],
+                                        "count": count}
+    for item in health.get("jobs") or []:
+        if item.get("id") in heartbeat_by_id:
+            item["tool_heartbeat"] = heartbeat_by_id[item["id"]]
     with db() as c:
         # Never resets runner_fails: a push proves runner-to-controller only (12.1).
         c.execute("UPDATE nodes SET runner=?, heartbeat_at=?, runner_age_s=? WHERE id=?",

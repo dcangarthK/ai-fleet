@@ -1877,6 +1877,11 @@ class JobManager:
             self.allow_raw_gates = False
         max_jobs = config.get("max_jobs", 2)
         self.max_jobs = max_jobs if isinstance(max_jobs, int) and not isinstance(max_jobs, bool) and max_jobs > 0 else 2
+        silent_tool_calls = config.get("silent_tool_heartbeat_calls", 8)
+        self.silent_tool_heartbeat_calls = (silent_tool_calls
+                                            if isinstance(silent_tool_calls, int)
+                                            and not isinstance(silent_tool_calls, bool)
+                                            and silent_tool_calls > 0 else 8)
         max_minutes = config.get("max_job_minutes", 120)
         self.max_job_minutes = (float(max_minutes)
                                 if isinstance(max_minutes, (int, float)) and not isinstance(max_minutes, bool)
@@ -2166,9 +2171,12 @@ class JobManager:
             act = self._activity_of(job, now_s, cpus)
             if len(entries) < JOBS_REPORT_MAX:
                 cpu = act["cpu_s"]
-                entries.append({"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
-                                "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
-                                "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)})
+                entry = {"id": job["id"], "state": job.get("state"), "alive": self._alive(job),
+                         "gate_alive": gate, "idle_s": max(0, int(now_s - act["last"])),
+                         "activity_src": act["src"], "cpu_s": None if cpu is None else round(cpu, 1)}
+                if isinstance(job.get("tool_heartbeat"), dict):
+                    entry["tool_heartbeat"] = job["tool_heartbeat"]
+                entries.append(entry)
         keep = {job["id"] for job, _gate in active}
         with self.activity_lock:  # forget finished jobs
             for job_id in [key for key in self.activity if key not in keep]:
@@ -2838,8 +2846,14 @@ class JobManager:
                     st["ids"].add(mid)
                     job["turns_seen"] = len(st["ids"])
                 for block in message.get("content") if isinstance(message.get("content"), list) else []:
-                    if isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str):
-                        st["pending"].add(block["id"])
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                        self._silent_tool_text(job, st)
+                    elif block.get("type") == "tool_use":
+                        if isinstance(block.get("id"), str):
+                            st["pending"].add(block["id"])
+                        self._silent_tool_call(job, st, block.get("name"), block.get("input"))
                 usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
                 context = sum(v for v in (usage.get("input_tokens"), usage.get("cache_read_input_tokens"),
                                           usage.get("cache_creation_input_tokens"))
@@ -2861,11 +2875,60 @@ class JobManager:
                     st["cap"] = st["loop"].found
                 if st["cap"] is not None and not st["pending"]:
                     return st["cap"]  # every tool call of the turn that hit the cap has its result
+            elif kind in ("item.started", "item.updated", "item.completed"):
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                if item.get("type") == "agent_message" and isinstance(item.get("text"), str) and item["text"].strip():
+                    self._silent_tool_text(job, st)
+                elif kind == "item.started" and item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):
+                    self._silent_tool_call(job, st, item.get("name") or item.get("command") or item.get("type"), item)
             if st["cap"] is None and st.get("loop") and st["loop"].found:
                 st["cap"] = st["loop"].found
         if st["cap"] is not None and st["cap"].get("reason") == "loop" and not st["pending"]:
             return st["cap"]  # a text-only loop has no tool result to wait for
         return None
+
+    @staticmethod
+    def _touched_files(cwd):
+        """The current changed and untracked paths, bounded for the controller heartbeat."""
+        try:
+            done = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=cwd,
+                                  capture_output=True, text=True, errors="replace", timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if done.returncode:
+            return []
+        paths, skip = [], False
+        for entry in done.stdout.split("\0"):
+            if not entry:
+                continue
+            if skip:
+                skip = False
+                continue
+            if len(entry) < 4:
+                continue
+            paths.append(entry[3:][:240])
+            skip = entry[:2].strip() in ("R", "C")
+            if len(paths) == 20:
+                break
+        return paths
+
+    def _silent_tool_text(self, job, st):
+        """Assistant text ends a silent sequence and withdraws its old heartbeat."""
+        st["silent_tool_calls"] = 0
+        st["next_silent_tool_heartbeat"] = self.silent_tool_heartbeat_calls
+        if job.pop("tool_heartbeat", None) is not None:
+            st["dirty"] = True
+
+    def _silent_tool_call(self, job, st, name, _input):
+        """Publish every Nth tool call made without assistant text through the existing node heartbeat."""
+        count = st["silent_tool_calls"] = st.get("silent_tool_calls", 0) + 1
+        threshold = st.get("next_silent_tool_heartbeat", self.silent_tool_heartbeat_calls)
+        if count < threshold:
+            return
+        st["next_silent_tool_heartbeat"] = threshold + self.silent_tool_heartbeat_calls
+        job["tool_heartbeat"] = {"last_tool": str(name or "tool")[:160],
+                                 "files_touched": self._touched_files(job.get("cwd") or ""), "count": count}
+        st["dirty"] = True
 
     def _cap_stop(self, job, cap):
         """Stop a job at its cap after the current turn and settle it `capped`. The prompt arrives on a file, so the

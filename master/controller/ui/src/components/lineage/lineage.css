@@ -6,6 +6,11 @@
 .lin-openlink { white-space: nowrap; font-weight: 550; }
 .lin-summary { color: var(--ink-2); margin: 0 0 var(--s3); font-size: 13px; }
 .lin-summary b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.lin-insight-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin: 0 0 var(--s3); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--line); }
+.lin-insight-strip span { padding: var(--s2) var(--s3); background: var(--surface); color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.lin-insight-strip b { display: block; color: var(--ink); font-size: 15px; }
+.lin-river-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: var(--s3); align-items: start; }
+.lin-river-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); }
 .lin-toolbar { margin-bottom: var(--s3); }
 .lin-hint, .lin-hint-inline { font-size: 12px; }
 .lin-hint { margin-top: var(--s3); max-width: 80ch; }
@@ -55,7 +60,8 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-lane-sub { fill: var(--ink-3); font-size: 11px; }
 
 /* Bars */
-.lin-bar { cursor: pointer; outline: none; }
+.lin-bar { cursor: grab; outline: none; }
+.lin-bar.dim, .lin-edge.dim { opacity: 0.25; }
 .lin-hit { fill: transparent; }
 .lin-bar-body { fill: color-mix(in srgb, var(--c) 22%, var(--surface)); stroke: var(--c); stroke-width: 1; transition: fill 0.15s; }
 .lin-bar-edge { fill: var(--c); }
@@ -63,8 +69,9 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-bar:focus-visible .lin-bar-body, .lin-bar.sel .lin-bar-body { stroke-width: 2.5; stroke: var(--focus); }
 .lin-bar:focus-visible .lin-hit { stroke: var(--focus); stroke-width: 1.5; stroke-dasharray: 3 3; rx: 6; }
 .lin-bar-text { fill: var(--ink); font-size: 11.5px; font-family: var(--mono); pointer-events: none; }
+.lin-outside-label { fill: var(--ink); font-size: 11px; font-weight: 800; font-family: var(--mono); pointer-events: none; }
 .lin-glyph rect { fill: var(--c); }
-.lin-glyph text { fill: var(--surface); font-size: 8.5px; font-weight: 800; font-family: var(--mono); pointer-events: none; }
+.lin-glyph text { fill: light-dark(#fff, #0b1626); font-size: 8.5px; font-weight: 800; font-family: var(--mono); pointer-events: none; }
 .lin-hatch-line { stroke: var(--ink-3); stroke-width: 1.4; opacity: 0.8; }
 .lin-wait { fill: url(#lin-hatch); stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.9; }
 .lin-wait-end { fill: url(#lin-hatch); stroke: var(--c); stroke-width: 1; }
@@ -79,24 +86,35 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-diamond.d-stall path { fill: var(--info); }
 .lin-diamond.d-gate path { fill: var(--bad); }
 .lin-flag circle { fill: var(--warn); stroke: var(--surface); stroke-width: 1.5; }
-.lin-flag text { fill: var(--surface); font-weight: 800; font-size: 11px; }
+.lin-flag text { fill: light-dark(#fff, #1d1300); font-weight: 800; font-size: 11px; }
 
 /* Edges */
 .lin-edge path, .lin-tedge path { fill: none; stroke: var(--c, var(--ink-3)); stroke-width: 1.4; opacity: 0.75; }
 .lin-edge.hot path { stroke-width: 2.4; opacity: 1; }
-.lin-edge.t-warn { --c: var(--warn); } .lin-edge.t-info { --c: var(--info); } .lin-edge.t-ok { --c: var(--ok); }
+.lin-edge.t-warn { --c: var(--warn); } .lin-edge.t-info { --c: var(--info); } .lin-edge.t-ok { --c: var(--ok); } .lin-edge.t-bad { --c: var(--bad); }
 .lin-edge.t-accent { --c: var(--accent); } .lin-edge.t-quiet { --c: var(--ink-3); }
+.lin-particle { fill: var(--c, var(--accent)); stroke: var(--surface); stroke-width: 1; pointer-events: none; }
 .lin-edge-label { fill: var(--ink-2); font-size: 10.5px; paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
 .lin-arrow { fill: var(--ink-3); }
-.lin-arrow.t-warn { fill: var(--warn); } .lin-arrow.t-info { fill: var(--info); } .lin-arrow.t-ok { fill: var(--ok); }
+.lin-arrow.t-warn { fill: var(--warn); } .lin-arrow.t-info { fill: var(--info); } .lin-arrow.t-ok { fill: var(--ok); } .lin-arrow.t-bad { fill: var(--bad); }
 .lin-arrow.t-accent { fill: var(--accent); } .lin-arrow.t-quiet { fill: var(--ink-3); }
 
 /* Now line */
 .lin-now line { stroke: var(--accent); stroke-width: 1.5; }
 .lin-now rect { fill: var(--accent); }
-.lin-now text { fill: var(--accent-ink); font-size: 10px; font-weight: 700; }
+.lin-now text { fill: light-dark(#fff, #0b1626); font-size: 10px; font-weight: 700; }
 .lin-now.follow line { stroke-dasharray: 5 4; animation: lin-dash 1s linear infinite; }
 @keyframes lin-dash { to { stroke-dashoffset: -9; } }
+
+.lin-minimap { position: absolute; top: var(--s2); right: var(--s2); width: 112px; height: 34px; z-index: 3; cursor: pointer; }
+.lin-minimap > rect:first-child { fill: color-mix(in srgb, var(--surface) 94%, transparent); stroke: var(--line-strong); }
+.lin-minimap line { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; opacity: 0.78; pointer-events: none; }
+.lin-minimap .lin-minimap-view { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: var(--accent); stroke-width: 1.5; }
+
+.lin-river-panel { border-top: 1px solid var(--line); background: var(--surface); padding: var(--s4); }
+.lin-river-panel .kv { margin: var(--s3) 0; grid-template-columns: minmax(92px, 120px) minmax(0, 1fr); }
+.button-link { display: inline-flex; align-items: center; justify-content: center; min-height: var(--h-sm); padding: 0 var(--s2); border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--ink); text-decoration: none; font-size: 13px; font-weight: 550; }
+.button-link:hover { border-color: var(--ink-3); background: var(--sunken); }
 
 /* Hover card */
 .lin-card { position: absolute; z-index: 5; transform: translateX(-50%); width: min(260px, calc(100% - 16px)); pointer-events: none; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: var(--s3); font-size: 12.5px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22); }
@@ -203,5 +221,13 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 /* ---------------------------------------------------------------- reduced motion */
 @media (prefers-reduced-motion: reduce) {
   .lin-bar.live .lin-bar-edge, .lin-now.follow line, .lin-beat.on { animation: none; }
+  .lin-particle { display: none; }
   .lin-bar-body { transition: none; }
+}
+
+@media (max-width: 639px) {
+  .lin-insight-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lin-river-layout { display: block; }
+  .lin-minimap { display: none; }
+  .lin-river-panel { position: fixed; inset: auto 0 0; z-index: 45; max-height: min(62vh, 520px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -12px 32px var(--scrim); padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
 }

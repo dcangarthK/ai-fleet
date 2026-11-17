@@ -43,7 +43,7 @@ export function ModelsPage() {
     { key: "model", header: "Model", cell: (m) => (
       <>
         <b>{m.display_name || m.reference}</b>
-        <div className="sub mono wrap-any">{m.reference}</div>
+        {(m.display_name && m.display_name !== m.reference) && <div className="sub mono wrap-any">{m.reference}</div>}
         {roleTags(assignments.filter((a) => a.model === m.reference).map((a) => a.role))}
         {m.trusted_reviewer && <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span>}
         {m.derived_trusted_reviewer && (
@@ -59,10 +59,12 @@ export function ModelsPage() {
     ) },
     { key: "size", header: "Size", numeric: true, hideStacked: true, cell: (m) => (m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—") },
     { key: "evals", header: "Eval scores", hideStacked: true, cell: (m) => <span className="small">{scores(m.evals)}</span> },
+    { key: "availability", header: "On nodes", hideWide: true, cell: (m) => <span className="small">{nodes.filter((n) => m.nodes[n.id]?.installed || m.nodes[n.id]?.state === "ready").map((n) => n.name).join(", ") || <span className="quiet">Not installed</span>}</span> },
     ...nodes.map((n): Column<CatalogModel> => ({
       key: `node-${n.id}`,
       header: <span className="row" style={{ gap: "var(--s2)" }}><NodeLight node={n} />{n.name}</span>,
       label: n.name,
+      hideStacked: true,
       cell: (m) => (
         <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
           onInstall={() => setInstalling({ model: m, node: n.id })}

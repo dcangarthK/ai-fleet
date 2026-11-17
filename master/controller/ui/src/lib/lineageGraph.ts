@@ -143,30 +143,33 @@ export interface RiverLayout {
 }
 
 /** Lanes grouped by node, each as tall as its packed rows. `gap` is the minimum clear time between bars on a row. */
-export function layoutRiver(nodes: LNode[], lanes: LLane[], now: number, gap = 0): RiverLayout {
+export function layoutRiver(nodes: LNode[], lanes: LLane[], now: number, gap = 0, showGroups = true, groupByRoot = false): RiverLayout {
   const byLane = new Map<string, LNode[]>();
   for (const n of nodes) byLane.set(n.lane, [...(byLane.get(n.lane) ?? []), n]);
   const known = new Map(lanes.map((l) => [l.id, l]));
   for (const id of byLane.keys()) {
     if (!known.has(id)) { const n = byLane.get(id)![0]; known.set(id, { id, node: n.node, account: n.account, agent: n.agent }); }
   }
-  const ordered = [...known.values()].filter((l) => byLane.has(l.id)).sort((a, b) => a.node.localeCompare(b.node) || a.account.localeCompare(b.account));
+  const buckets = groupByRoot
+    ? [...new Set(nodes.map((n) => n.root_id))].sort().map((root) => ({ label: root, members: nodes.filter((n) => n.root_id === root) }))
+    : [...new Set([...known.values()].filter((l) => byLane.has(l.id)).map((l) => l.node))].sort().map((node) => ({ label: node, members: nodes.filter((n) => n.node === node) }));
   const groups: RiverGroup[] = [];
   const place: RiverLayout["place"] = {};
   let y = 0;
-  for (const lane of ordered) {
-    let group = groups[groups.length - 1];
-    if (!group || group.node !== lane.node) {
-      group = { node: lane.node, y, h: GROUP_H, lanes: [] };
-      groups.push(group);
-      y += GROUP_H;
+  for (const bucket of buckets) {
+    const group: RiverGroup = { node: bucket.label, y, h: showGroups ? GROUP_H : 0, lanes: [] };
+    groups.push(group);
+    y += showGroups ? GROUP_H : 0;
+    const laneIds = [...new Set(bucket.members.map((n) => n.lane))].sort((a, b) => (known.get(a)?.account ?? a).localeCompare(known.get(b)?.account ?? b));
+    for (const id of laneIds) {
+      const lane = known.get(id)!;
+      const members = bucket.members.filter((n) => n.lane === id);
+      const packed = packLane(members.map((n) => { const s = spanOf(n, now); return { id: n.id, from: s.created, to: s.end }; }), gap);
+      const h = packed.count * ROW_H + LANE_PAD * 2;
+      group.lanes.push({ id: `${bucket.label}:${lane.id}`, account: lane.account, agent: lane.agent, y, h, rows: packed.count });
+      for (const n of members) place[n.id] = { lane: lane.id, row: packed.rows[n.id], y: y + LANE_PAD + packed.rows[n.id] * ROW_H };
+      y += h;
     }
-    const members = byLane.get(lane.id)!;
-    const packed = packLane(members.map((n) => { const s = spanOf(n, now); return { id: n.id, from: s.created, to: s.end }; }), gap);
-    const h = packed.count * ROW_H + LANE_PAD * 2;
-    group.lanes.push({ id: lane.id, account: lane.account, agent: lane.agent, y, h, rows: packed.count });
-    for (const n of members) place[n.id] = { lane: lane.id, row: packed.rows[n.id], y: y + LANE_PAD + packed.rows[n.id] * ROW_H };
-    y += h;
     group.h = y - group.y;
   }
   return { groups, place, height: y };
@@ -218,6 +221,36 @@ export function criticalPath(nodes: LNode[], now: number): string[] {
   return path;
 }
 export const edgeKey = (from: string, to: string): string => `${from}>${to}`;
+
+/** The focused attempt and its complete upstream/downstream dependency chain. */
+export function focusSet(nodes: LNode[], edges: LEdge[], focused: string | null): Set<string> {
+  if (!focused) return new Set(nodes.map((n) => n.id));
+  const parents = new Map<string, string[]>();
+  const children = new Map<string, string[]>();
+  const connect = (from: string, to: string) => {
+    parents.set(to, [...(parents.get(to) ?? []), from]);
+    children.set(from, [...(children.get(from) ?? []), to]);
+  };
+  for (const n of nodes) if (n.parent_id) connect(n.parent_id, n.id);
+  for (const e of edges) connect(e.from, e.to);
+  const out = new Set<string>();
+  const visit = (graph: Map<string, string[]>) => {
+    const pending = [focused];
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (out.has(id)) continue;
+      out.add(id);
+      pending.push(...(graph.get(id) ?? []));
+    }
+  };
+  visit(parents);
+  // A second directed walk prevents an ancestor's other children becoming focused siblings.
+  const descendants = new Set<string>();
+  const pending = [focused];
+  while (pending.length) { const id = pending.pop()!; if (descendants.has(id)) continue; descendants.add(id); pending.push(...(children.get(id) ?? [])); }
+  descendants.forEach((id) => out.add(id));
+  return out;
+}
 
 // ---------------------------------------------------------------------------------------------------- trace layout
 

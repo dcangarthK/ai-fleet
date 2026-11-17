@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentRows, buildNarrative, criticalPath, findAnomalies, findBottleneck, flagMap, layoutRiver, layoutTrace, marksFor,
-  mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
+  focusSet, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
   type LEvent, type LNode,
 } from "./lineageGraph";
 
@@ -95,6 +95,26 @@ describe("critical path", () => {
   it("survives a parent cycle", () => {
     const nodes = [node({ id: "a", parent_id: "b", ended_at: T0 + 9 }), node({ id: "b", parent_id: "a", ended_at: T0 + 5 })];
     expect(criticalPath(nodes, T0 + 20).length).toBe(2);
+  });
+});
+
+describe("lineage focus", () => {
+  it("keeps the focused attempt plus every upstream and downstream dependency", () => {
+    const nodes = [
+      node({ id: "root" }),
+      node({ id: "build", parent_id: "root" }),
+      node({ id: "sibling", parent_id: "build" }),
+      node({ id: "fix", parent_id: "build" }),
+      node({ id: "merge", parent_id: "fix" }),
+      node({ id: "other" }),
+    ];
+    expect([...focusSet(nodes, [], "fix")].sort()).toEqual(["root", "build", "fix", "merge"].sort());
+  });
+
+  it("returns every node when no attempt is focused and handles cycles", () => {
+    const nodes = [node({ id: "a", parent_id: "b" }), node({ id: "b", parent_id: "a" }), node({ id: "c" })];
+    expect([...focusSet(nodes, [], null)].sort()).toEqual(["a", "b", "c"]);
+    expect([...focusSet(nodes, [], "a")].sort()).toEqual(["a", "b"]);
   });
 });
 

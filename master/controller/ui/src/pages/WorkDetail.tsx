@@ -37,7 +37,7 @@ export function WorkDetailPage() {
   const gate = gateRounds(attempts);
 
   const cols: Column<DetailAttempt>[] = [
-    { key: "id", header: "Attempt", cell: (a) => <button type="button" className="linklike mono" onClick={() => setSel(a.id)}>{a.id}</button> },
+    { key: "id", header: "Attempt", cell: (a) => <a href={`#${a.id}`} className="mono" onClick={(e) => { e.preventDefault(); setSel(a.id); }}>{a.id}</a> },
     { key: "stage", header: "Stage", cell: (a) => a.stage || a.kind || "build" },
     { key: "state", header: "State", cell: (a) => a.state.replace(/_/g, " ") },
     { key: "model", header: "Model", cell: (a) => a.model || a.agent },
@@ -50,7 +50,7 @@ export function WorkDetailPage() {
       <PageHead
         title={d.title || d.root_id}
         intro={<><Truncate text={d.root_id} className="mono" /> · {chainSummary(chain)}</>}
-        actions={<Link to={`/lineage/${d.root_id}`}>Trace</Link>}
+        actions={<Link className="button-link" to={`/lineage/${d.root_id}`}>Open trace</Link>}
       />
       <div className="stack" style={{ gap: 16 }}>
         {warn && <div role="alert"><Badge tone="warn">Same model</Badge> {warn}</div>}
@@ -83,10 +83,9 @@ export function WorkDetailPage() {
                 <ul>{findings.map((f, i) => <li key={i}><Badge tone={f.severity === "HIGH" ? "bad" : f.severity === "MED" ? "warn" : "quiet"}>{f.severity}</Badge> {f.title}{f.detail && <span className="muted"> {f.detail}</span>}</li>)}</ul>
               )}
             </Card>
-            <Card>
-              <h2>Tokens</h2>
+            <Card title="Tokens">
               {tokenTotal(d.tokens) === 0 ? <p className="muted">No token data.</p>
-                : <p>Whole item: {n(tokenTotal(d.tokens))} total ({n(d.tokens.input)} in, {n(d.tokens.output)} out, {n(d.tokens.cache_read)} cache read, {n(d.tokens.cache_write)} cache write, {n(d.tokens.turns)} turns).{current.tokens && <> This attempt: {n(tokenTotal(current.tokens))}.</>}</p>}
+                : <div className="stats"><div className="stat"><span>Whole item</span><b>{n(tokenTotal(d.tokens))}</b></div><div className="stat"><span>This attempt</span><b>{n(tokenTotal(current.tokens))}</b></div><div className="stat"><span>Input / output</span><b>{n(d.tokens.input)} / {n(d.tokens.output)}</b></div><div className="stat"><span>Cache / turns</span><b>{n(d.tokens.cache_read + d.tokens.cache_write)} / {n(d.tokens.turns)}</b></div></div>}
             </Card>
             <Card><h2>Actions</h2><Actions root={d.root_id} attempt={current} repo={d.repo} /></Card>
           </>

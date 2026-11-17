@@ -81,6 +81,42 @@ def git_kind(cmd):
     return None
 
 
+HEREDOC_RE = re.compile(r"(?:^|[;&|]|&&)\s*cat\s+>>?\s*\S+\s*<<")
+CD_RE = re.compile(r"^\s*cd\s+(\S+|'[^']*'|\"[^\"]*\")\s*(&&|;)\s*(.+)$", re.S)
+
+
+def is_heredoc_write(cmd):
+    return bool(HEREDOC_RE.search(cmd or ""))
+
+
+def worktree_root(payload):
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd())
+
+
+def strip_cd(cmd, root):
+    """G2: rewrite a single leading `cd <dir> &&|;` whose dir is inside the worktree. The rest runs from the root,
+    prefixed with `cd <rel> && ` only when <dir> is not the root. None = leave the command alone (no cd, an
+    out-of-tree dir, or two or more cds)."""
+    m = CD_RE.match(cmd or "")
+    if not m:
+        return None
+    if sum(1 for seg in split_segments(cmd) if re.match(r"\s*cd(\s|$)", seg)) != 1:
+        return None
+    try:
+        toks = shlex.split(m.group(1))
+    except ValueError:
+        return None
+    if len(toks) != 1 or any(c in toks[0] for c in "$`~"):
+        return None
+    target = os.path.realpath(os.path.join(root, toks[0]))
+    if target != root and not target.startswith(root + os.sep):
+        return None
+    rest = m.group(3).strip()
+    if target == root:
+        return rest
+    return "cd %s && %s" % (shlex.quote(os.path.relpath(target, root)), rest)
+
+
 def job_dir():
     global _private_dir
     d = os.environ.get("FLEET_JOB_DIR")
@@ -249,7 +285,15 @@ def hook_output(payload):
         if is_test_command(inner) and repeat_count(inner) > MAX_TEST_RUNS:
             return deny_repeat()
         return None
+    if is_heredoc_write(cmd):
+        # A denial message, not a stop: the model gets the reason and retries with Write in the same run.
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "use the Write/Edit tool, not a heredoc"}}
     new = dict(ti)
+    stripped = strip_cd(cmd, worktree_root(payload))
+    if stripped is not None:
+        cmd = new["command"] = stripped
     gk = git_kind(cmd)
     if gk == "log":
         new["command"] = "git log -n 30"
@@ -259,7 +303,7 @@ def hook_output(payload):
         if repeat_count(cmd) > MAX_TEST_RUNS:
             return deny_repeat()
         new["command"] = rewrite_command(cmd, new_log_path())
-    else:
+    elif stripped is None:
         return None
     # updatedInput only: no permissionDecision, so normal permission rules still apply
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": new}}

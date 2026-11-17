@@ -40,3 +40,8 @@ command or of a segment after `&&`, `||`, `;` or `|`; `grep vitest` or a commit 
 through. Bare `git log` gets `-n 30`; `git diff` without a path output is piped through `head -n 300` with a
 `truncated, full: <path>` line. Each output line is capped at 500 chars. Hook replies carry `updatedInput` only,
 no `permissionDecision`, so normal permission rules still decide.
+
+Worker instruction line (G2): no `cd`, no heredoc writes (use Write/Edit), no paths outside the worktree. The hook
+strips a single leading in-worktree `cd <dir> &&|;` (kept as `cd <rel> && ` for a subdir), leaves out-of-tree or
+multiple `cd`s alone, and denies `cat > f <<EOF` / `cat >> f <<EOF` with "use the Write/Edit tool, not a heredoc".
+`BASH_RULES` also allows `cd:*`, `npx tsc:*`, `npm run typecheck` and `npm run lint` (not `npm run:*`, not `sed`).

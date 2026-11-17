@@ -1283,6 +1283,17 @@ async def auto_approve_denials(task: dict) -> None:
     except NotAdmitted as exc:
         # Admission deferred or refused it: the task stays blocked for the owner and the round isn't spent.
         update(task["id"], auto_approvals=rounds, error=str(exc.detail))
+        verdict = exc.verdict or {}
+        if verdict.get("wait") == "limit" and (verdict.get("until") or 0) > time.time():
+            # A usage limit: hold the task queued until the reset (as requeue_limit_wait does) instead of leaving
+            # it blocked, and keep the pre-approved tools so the resume gets them.
+            current = get_task(task["id"])
+            kept = approvable_tools(current, [*(current.get("approved_tools") or []), *tools])
+            if transition(current, {current["state"]}, "queued", not_before=verdict["until"], budget_wait="limit",
+                          ended_at=None, approved_tools=json.dumps(kept), error=str(exc.detail)):
+                emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
+                                                            "reason": str(exc.detail), "queued_until": verdict["until"]})
+                return
         emit(task["id"], "task.auto_approve_held", {"title": task["title"], "tools": tools,
                                                     "reason": str(exc.detail)})
         return

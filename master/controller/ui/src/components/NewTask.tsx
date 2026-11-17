@@ -7,6 +7,10 @@ import { KINDS, type Kind } from "../lib/budget";
 
 type Agent = "codex" | "claude" | "ollama";
 
+const MODELS: Record<Agent, readonly string[]> = {
+  codex: ["gpt-5.6-terra"], claude: ["sonnet", "opus", "haiku"], ollama: [],
+};
+
 /** "New task" dialog. Supervised and full modes go to the approval inbox before they start. */
 export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (t: Task) => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -67,7 +71,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
             </select>
           </label>
           <label className="field">Agent
-            <select value={agent} onChange={(e) => setAgent(e.target.value as Agent)}>
+            <select value={agent} onChange={(e) => { setAgent(e.target.value as Agent); setModel("auto"); }}>
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
               <option value="ollama">Local model (Ollama)</option>
@@ -87,7 +91,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
           <label className="field">Model
             <select value={model || "auto"} onChange={(e) => setModel(e.target.value)}>
               <option value="auto">Auto</option>
-              {agent === "ollama" && ollamaModels.map((m) => <option key={m} value={m}>{m}</option>)}
+              {(agent === "ollama" ? ollamaModels : MODELS[agent]).map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
           </label>
         </div>
@@ -102,7 +106,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
         </div>
         {agent !== "ollama" && <SpawnPreview kind={kind} agent={agent} />}
         {agent !== "ollama" && (
-          <label className="row small" style={{ gap: 8 }}>
+          <label className="check small">
             <input type="checkbox" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />
             <span>Skip permission prompts: {agent === "claude" ? "Claude" : "Codex"} runs in full mode without asking. Needs the node to allow full mode and a policy that pre-approves it.</span>
           </label>

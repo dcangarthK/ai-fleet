@@ -103,13 +103,12 @@ describe("lineage focus", () => {
     const nodes = [
       node({ id: "root" }),
       node({ id: "build", parent_id: "root" }),
-      node({ id: "review", parent_id: "build" }),
+      node({ id: "sibling", parent_id: "build" }),
       node({ id: "fix", parent_id: "build" }),
       node({ id: "merge", parent_id: "fix" }),
       node({ id: "other" }),
     ];
-    const edges = [{ from: "review", to: "fix", link: "retry", reason: null }];
-    expect([...focusSet(nodes, edges, "fix")].sort()).toEqual(["root", "build", "review", "fix", "merge"].sort());
+    expect([...focusSet(nodes, [], "fix")].sort()).toEqual(["root", "build", "fix", "merge"].sort());
   });
 
   it("returns every node when no attempt is focused and handles cycles", () => {

@@ -117,7 +117,7 @@ export function usePanZoom(ref: RefObject<HTMLElement | SVGElement>, opts: {
 
     const onWheel = (e: Event) => {
       const w = e as WheelEvent;
-      if (w.ctrlKey || w.metaKey) {
+      if (!w.shiftKey && Math.abs(w.deltaY) >= Math.abs(w.deltaX)) {
         w.preventDefault();
         o.current.zoom(Math.exp(w.deltaY * 0.0025), anchorAt(w.clientX));
       } else if (w.shiftKey || Math.abs(w.deltaX) > Math.abs(w.deltaY)) {
@@ -152,7 +152,7 @@ export function usePanZoom(ref: RefObject<HTMLElement | SVGElement>, opts: {
         setDragging(true);
         return;
       }
-      if (!moved && Math.abs(e.clientX - startX) < 4) return;
+      if (!moved && Math.abs(e.clientX - startX) < 3) return;
       moved = true;
       setDragging(true);
       o.current.pan(-(e.clientX - last) * secPerPx());

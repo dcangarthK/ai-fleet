@@ -7,7 +7,7 @@ import {
 } from "../../lib/lineageGraph";
 import { useMedia, usePanZoom, useWidth } from "./hooks";
 
-const BAR_H = 22;
+const BAR_H = 28;
 const AXIS_H = 30;
 const MIN_W = 880;
 
@@ -17,9 +17,9 @@ const LINK_TONE: Record<string, string> = { retry: "warn", fix: "warn", review: 
 interface Card { id: string; x: number; y: number }
 
 /** The fleet river: swimlanes per node and account over one time axis. Hand-written SVG. */
-export function River({ nodes, edges, lanes, events, now, view, follow, cursor, flags, selected, grouped = true, onOpen, zoom, pan }: {
+export function River({ nodes, edges, lanes, events, now, view, follow, cursor, flags, selected, grouped = true, resetVersion = 0, onOpen, zoom, pan }: {
   nodes: LNode[]; edges: LEdge[]; lanes: LLane[]; events: LEvent[]; now: number; view: TimeView; follow: boolean;
-  cursor: number | null; flags: Map<string, AnomalyKind[]>; selected?: string | null; grouped?: boolean;
+  cursor: number | null; flags: Map<string, AnomalyKind[]>; selected?: string | null; grouped?: boolean; resetVersion?: number;
   onOpen: (n: LNode | null) => void; zoom: (factor: number, anchor: number) => void; pan: (dt: number) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -38,7 +38,7 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const nodeDrag = useRef<{ id: string; pointer: number; x: number; y: number; base: { x: number; y: number }; moved: boolean } | null>(null);
 
-  const layout = useMemo(() => layoutRiver(nodes, lanes, now, span / plotW * 8, grouped), [nodes, lanes, now, span, plotW, grouped]);
+  const layout = useMemo(() => layoutRiver(nodes, lanes, now, span / plotW * 8, grouped, grouped), [nodes, lanes, now, span, plotW, grouped]);
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const focused = useMemo(() => focusSet(nodes, edges, selected ?? null), [nodes, edges, selected]);
   const ticks = useMemo(() => niceTicks(view.t0, view.t1, Math.max(3, Math.floor(plotW / 110))), [view, plotW]);
@@ -49,9 +49,10 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
   const yOf = (id: string) => AXIS_H + layout.place[id].y + offsetOf(id).y;
   const edgeKeyHot = (e: LEdge) => hot !== null && (e.from === hot || e.to === hot);
   const inFocus = (id: string) => !selected || focused.has(id);
+  useEffect(() => { setPositions({}); }, [resetVersion]);
 
   useEffect(() => {
-    const clear = (e: globalThis.KeyboardEvent) => { if (e.key === "Escape" && selected) onOpen(null); };
+    const clear = (e: globalThis.KeyboardEvent) => { const el = e.target as HTMLElement; if (e.key === "Escape" && selected && !["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) && !el.closest("[role=dialog]")) onOpen(null); };
     window.addEventListener("keydown", clear);
     return () => window.removeEventListener("keydown", clear);
   }, [selected, onOpen]);
@@ -76,10 +77,16 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
     const ends = nodes.map((n) => spanOf(n, now).end);
     return { t0: Math.min(...starts, view.t0), t1: Math.max(...ends, view.t1) };
   }, [nodes, now, view]);
-  const miniX = W - 126, miniY = H - 48, miniW = 112, miniH = 34;
-  const mini = (t: number) => miniX + ((t - domain.t0) / Math.max(1, domain.t1 - domain.t0)) * miniW;
+  const miniW = 112, miniH = 34;
+  const mini = (t: number) => ((t - domain.t0) / Math.max(1, domain.t1 - domain.t0)) * miniW;
+  const miniPan = (e: PointerEvent<SVGSVGElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const t = domain.t0 + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (domain.t1 - domain.t0);
+    pan(t - (view.t0 + view.t1) / 2);
+  };
 
   function dragStart(n: LNode, e: PointerEvent<SVGGElement>) {
+    if (e.button !== 0) return;
     e.stopPropagation();
     const base = offsetOf(n.id);
     nodeDrag.current = { id: n.id, pointer: e.pointerId, x: e.clientX, y: e.clientY, base, moved: false };
@@ -108,7 +115,7 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
             <pattern id="lin-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <line x1="0" y1="0" x2="0" y2="6" className="lin-hatch-line" />
             </pattern>
-            {["warn", "info", "ok", "accent", "quiet"].map((t) => (
+            {["warn", "info", "ok", "accent", "quiet", "bad"].map((t) => (
               <marker key={t} id={`lin-arrow-${t}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
                 <path d="M0 0L8 4L0 8z" className={`lin-arrow t-${t}`} />
               </marker>
@@ -165,7 +172,7 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
                 const x2 = x(cs.created) + offsetOf(c.id).x, y2 = yOf(c.id) + BAR_H / 2 + 3;
                 if (Math.max(x1, x2) < plotL - 10 || Math.min(x1, x2) > plotL + plotW + 10) return null;
                 const dx = Math.min(140, Math.max(26, Math.abs(x2 - x1) * 0.5));
-                const tone = LINK_TONE[e.link] ?? "quiet";
+                const tone = p.state === "failed" || c.state === "failed" ? "bad" : LINK_TONE[e.link] ?? "quiet";
                 const label = e.reason && e.reason !== e.link ? `${e.link} · ${e.reason.replace("_", " ")}` : e.link;
                 const wide = Math.abs(x2 - x1) > 84 || hot !== null && edgeKeyHot(e);
                 const d = `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`;
@@ -221,6 +228,7 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
                       {showTitle && (
                         <text x={xb + 28} y={y + 15} className="lin-bar-text">{truncate(`${n.id.replace(/^t-/, "")} ${n.model ?? n.agent ?? ""}`, Math.floor((barW - 34) / 6.4))}</text>
                       )}
+                      {!showTitle && <text x={xe + 6} y={y + 18} className="lin-outside-label">{kindGlyph(n.kind)}</text>}
                     </>
                   )}
                   {xb === null && <rect x={xs} y={y + 3} width={Math.max(2, xe - xs)} height={BAR_H - 6} rx={3} className="lin-wait-end" />}
@@ -251,17 +259,13 @@ export function River({ nodes, edges, lanes, events, now, view, follow, cursor, 
               </g>
             </g>
           </g>
-          <g className="lin-minimap" aria-label="Overview minimap">
-            <rect x={miniX - 7} y={miniY - 7} width={miniW + 14} height={miniH + 14} rx={4} />
-            {nodes.map((n) => {
-              const pl = layout.place[n.id]; if (!pl) return null;
-              const s = spanOf(n, now);
-              return <line key={n.id} x1={mini(s.created)} x2={mini(s.end)} y1={miniY + 7 + ((pl.y / Math.max(1, layout.height)) * (miniH - 14))} y2={miniY + 7 + ((pl.y / Math.max(1, layout.height)) * (miniH - 14))} />;
-            })}
-            <rect className="lin-minimap-view" x={mini(view.t0)} y={miniY} width={Math.max(3, mini(view.t1) - mini(view.t0))} height={miniH} />
-          </g>
         </svg>
       </div>
+      <svg className="lin-minimap" viewBox={`0 0 ${miniW} ${miniH}`} aria-label="Overview minimap" onPointerDown={miniPan}>
+        <rect width={miniW} height={miniH} rx={4} />
+        {nodes.map((n) => { const pl = layout.place[n.id]; if (!pl) return null; const s = spanOf(n, now); const y = 7 + ((pl.y / Math.max(1, layout.height)) * (miniH - 14)); return <line key={n.id} x1={mini(s.created)} x2={mini(s.end)} y1={y} y2={y} />; })}
+        <rect className="lin-minimap-view" x={mini(view.t0)} width={Math.max(3, mini(view.t1) - mini(view.t0))} height={miniH} />
+      </svg>
 
       {card && cardNode && <HoverCard node={cardNode} now={cursor ?? now} events={events} x={card.x} y={card.y} />}
     </div>

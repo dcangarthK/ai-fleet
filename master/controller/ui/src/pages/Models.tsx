@@ -59,7 +59,7 @@ export function ModelsPage() {
     ) },
     { key: "size", header: "Size", numeric: true, hideStacked: true, cell: (m) => (m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—") },
     { key: "evals", header: "Eval scores", hideStacked: true, cell: (m) => <span className="small">{scores(m.evals)}</span> },
-    { key: "availability", header: "On nodes", cell: (m) => <span className="small">{nodes.filter((n) => m.nodes[n.id]?.installed || m.nodes[n.id]?.state === "ready").map((n) => n.name).join(", ") || <span className="quiet">Not installed</span>}</span> },
+    { key: "availability", header: "On nodes", hideWide: true, cell: (m) => <span className="small">{nodes.filter((n) => m.nodes[n.id]?.installed || m.nodes[n.id]?.state === "ready").map((n) => n.name).join(", ") || <span className="quiet">Not installed</span>}</span> },
     ...nodes.map((n): Column<CatalogModel> => ({
       key: `node-${n.id}`,
       header: <span className="row" style={{ gap: "var(--s2)" }}><NodeLight node={n} />{n.name}</span>,

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "token-parser-edge-case",
+    "title": "Fix token telemetry edge case",
+    "prompt": "In this repository, inspect the token telemetry parsing path. Make one small, well-tested correction for an edge case where malformed usage data could be counted incorrectly. Keep the change narrowly scoped and add or update the relevant unit test.",
+    "gate": "fleet-gate"
+  },
+  {
+    "id": "task-validation-message",
+    "title": "Improve task validation error",
+    "prompt": "In this repository, find one task-request validation path with an unclear error. Improve the error so it states the invalid field and the correction required. Add or update a focused unit test; do not change unrelated validation behaviour.",
+    "gate": "fleet-gate"
+  },
+  {
+    "id": "usage-summary-empty-data",
+    "title": "Harden empty usage summary",
+    "prompt": "In this repository, inspect the usage or token summary code for an empty-data edge case. Make a minimal correctness improvement, with a focused regression test. Preserve the existing public response shape.",
+    "gate": "fleet-gate"
+  },
+  {
+    "id": "runner-gate-diagnostic",
+    "title": "Clarify runner gate diagnostic",
+    "prompt": "In this repository, improve one runner gate failure diagnostic so a user can distinguish a missing gate profile from a command failure. Keep the change small, preserve existing security checks, and add or update a focused test.",
+    "gate": "fleet-gate"
+  },
+  {
+    "id": "lineage-round-count",
+    "title": "Verify lineage gate-round accounting",
+    "prompt": "In this repository, inspect task lineage gate-round accounting. Fix one concrete edge case in how failed gate rounds are counted, and add a focused regression test. Do not alter unrelated lineage semantics.",
+    "gate": "fleet-gate"
+  },
+  {
+    "id": "controller-json-boundary",
+    "title": "Harden controller JSON boundary",
+    "prompt": "In this repository, find one controller JSON parsing boundary that can mishandle malformed stored data. Make a defensive, backwards-compatible improvement and add a focused unit test.",
+    "gate": "fleet-gate"
+  }
+]

@@ -134,6 +134,24 @@ describe("graph layout", () => {
     expect(graph.width / graph.height).toBeGreaterThan(0.8);
     expect(graph.width / graph.height).toBeLessThan(3);
   });
+
+  it("keeps every card inside its work-item block", () => {
+    const nodes = [
+      node({ id: "alpha", root_id: "work-a" }),
+      node({ id: "alpha-review", root_id: "work-a", parent_id: "alpha" }),
+      node({ id: "beta", root_id: "work-b", created_at: T0 + 10 }),
+    ];
+    const graph = layoutGraph(nodes, []);
+    for (const n of nodes) {
+      const block = graph.groups.find((g) => g.root === n.root_id)!;
+      const place = graph.place[n.id];
+      const x = block.x + place.x, y = block.y + place.y;
+      expect(x).toBeGreaterThanOrEqual(block.x);
+      expect(y).toBeGreaterThanOrEqual(block.y);
+      expect(x + 220).toBeLessThanOrEqual(block.x + block.w);
+      expect(y + 64).toBeLessThanOrEqual(block.y + block.h);
+    }
+  });
 });
 
 describe("trace layout", () => {

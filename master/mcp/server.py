@@ -469,7 +469,7 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
                gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
                role: str = "", kind: str = "", effort: str = "", budget_override: str = "", link: str = "",
                profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
-    """Start a task for an agent on the fleet; returns at once, so use wait_tasks (don't poll).
+    """Start a task for an agent on the fleet; returns at once; wait_tasks blocks until it settles.
     agent: 'codex' or 'claude' (coding agents), or 'ollama' (one-shot answer; needs model).
     prompt: the instructions. repo: absolute git repo path; the agent works in its own worktree/branch.
     kind: build, fix, review, re_review, final_review, security_review, merge, benchmark, check, draft, test, lead.

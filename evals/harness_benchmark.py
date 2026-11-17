@@ -10,6 +10,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import sys
 import time
 import urllib.error
@@ -65,13 +66,23 @@ def token_counts(task: dict, telemetry: dict | None = None) -> dict:
             "cache": cache or number(usage.get("cached"))}
 
 
-def record_case(case: dict, task: dict, telemetry: dict | None = None) -> dict:
+def add_tokens(rounds: list[dict]) -> dict:
+    """Sum individual runner-attempt usage records without relying on session-total semantics."""
+    return {name: sum(tokens.get(name, 0) for tokens in rounds) for name in ("input", "output", "cache")}
+
+
+def record_case(case: dict, task: dict, telemetry: dict | None = None,
+                round_tokens: list[dict] | None = None) -> dict:
     gate = task.get("gate_result") if isinstance(task.get("gate_result"), dict) else {}
     gate_passed = gate.get("state") == "passed"
     rounds = task.get("runs") if isinstance(task.get("runs"), int) and task["runs"] >= 0 else 0
+    event_tokens = token_counts({}, telemetry)
+    tokens = event_tokens if any(event_tokens.values()) else add_tokens(round_tokens or [])
+    if not any(tokens.values()):
+        tokens = token_counts(task)
     return {"case_id": case["id"], "title": case["title"], "task_id": task.get("id"),
             "state": task.get("state"), "gate_passed": gate_passed, "rounds": rounds,
-            "fix_rounds": max(0, rounds - 1), "tokens": token_counts(task, telemetry)}
+            "fix_rounds": max(0, rounds - 1), "tokens": tokens}
 
 
 def summary(cases: list[dict]) -> dict:
@@ -102,19 +113,29 @@ def wait_for_task(base: str, token: str, task_id: str, timeout: int) -> dict:
     return request(base, "GET", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}", token)
 
 
+def variant_prompt(ref: str, prompt: str) -> str:
+    """Pin work to the variant after the runner creates its isolated task worktree."""
+    return (f"This is harness variant ref {ref!r}. Before inspecting or editing files, run "
+            f"git checkout --detach {shlex.quote(ref)} in the current worktree. Do not switch to another ref.\n\n{prompt}")
+
+
 def run(args) -> dict:
     cases = load_cases(Path(args.cases))
     records = []
     for case in cases:
-        body = {"agent": args.agent, "title": f"Harness {case['id']}", "prompt": case["prompt"],
+        body = {"agent": args.agent, "title": f"Harness {case['id']}",
+                "prompt": variant_prompt(args.variant_ref, case["prompt"]),
                 "repo": args.repo, "gate": args.gate or case["gate"], "mode": "auto-edit",
                 "worktree": True, "kind": "benchmark"}
         if args.model:
             body["model"] = args.model
         if args.node:
             body["node"] = args.node
+        if args.effort:
+            body["effort"] = args.effort
         created = request(args.controller, "POST", "/api/tasks", args.token, body)
         task = wait_for_task(args.controller, args.token, created["id"], args.timeout)
+        round_tokens = [token_counts(task)]
         # A failed gate leaves an auto-edit task resumable in its existing worktree. Reusing that controller path
         # is what makes "fix rounds" comparable across instruction variants instead of merely counting first tries.
         while (task.get("gate_result") or {}).get("state") == "failed" and (task.get("runs") or 0) < args.max_rounds:
@@ -122,14 +143,16 @@ def run(args) -> dict:
                     args.token, {"text": "The configured gate failed. Inspect its output and fix the failures. The runner reruns "
                                        "the gate after you finish; do not run it yourself."})
             task = wait_for_task(args.controller, args.token, created["id"], args.timeout)
+            round_tokens.append(token_counts(task))
         try:
             telemetry = request(args.controller, "GET", f"/api/tokens/{created['id']}", args.token)
         except RuntimeError:
             telemetry = None  # Not every agent emits an event log; task usage is still authoritative.
-        record = record_case(case, task, telemetry)
+        record = record_case(case, task, telemetry, round_tokens)
         records.append(record)
         print(f"{record['case_id']}: gate={'pass' if record['gate_passed'] else 'fail'} rounds={record['rounds']}")
-    return {"schema": 1, "variant": args.variant, "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    return {"schema": 1, "variant": args.variant, "variant_ref": args.variant_ref, "agent": args.agent,
+            "effort": args.effort, "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "cases": records, "summary": summary(records)}
 
 
@@ -140,10 +163,12 @@ def main(argv=None):
     parser.add_argument("--repo", help="absolute repository path on the selected runner")
     parser.add_argument("--controller", default=os.environ.get("FLEET_CONTROLLER", "http://127.0.0.1:8701"))
     parser.add_argument("--token", default=os.environ.get("FLEET_TOKEN", ""))
-    parser.add_argument("--agent", default="claude", help="never codex: benchmarks are not Codex work (CLAUDE.md budget rule 1)")
+    parser.add_argument("--agent", default="claude", help="claude or ollama (codex and auto are refused)")
     parser.add_argument("--model")
     parser.add_argument("--node")
+    parser.add_argument("--variant-ref", help="Git ref checked out in every benchmark worktree")
     parser.add_argument("--gate", help="override every case's gate profile")
+    parser.add_argument("--effort", choices=("low", "medium", "high"), help="effort sent to each benchmark task")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--max-rounds", type=int, default=3, help="initial attempt plus gate-fix resumes per case")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
@@ -153,12 +178,14 @@ def main(argv=None):
         old, new = (json.loads(Path(path).read_text(encoding="utf-8")) for path in args.compare)
         print(compare(old, new))
         return 0
-    if not args.variant or not args.repo:
-        parser.error("variant and --repo are required unless --compare is used")
+    if not args.variant or not args.variant_ref or not args.repo:
+        parser.error("variant, --variant-ref, and --repo are required unless --compare is used")
     if args.max_rounds < 1:
         parser.error("--max-rounds must be at least 1")
-    if args.agent == "codex":
-        parser.error("benchmarks never run on codex (CLAUDE.md paid-model budget rule 1)")
+    if args.agent not in ("claude", "ollama"):
+        parser.error("--agent must be claude or ollama; auto and codex are refused for benchmarks")
+    if not re.fullmatch(r"[A-Za-z0-9._/][A-Za-z0-9._/-]{0,127}", args.variant_ref):
+        parser.error("--variant-ref must be a plain git ref (letters, digits, . _ / -; not starting with -)")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.variant):
         parser.error("variant must be 1-64 chars of letters, digits, dot, dash or underscore")
     if not args.token:

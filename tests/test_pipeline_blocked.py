@@ -101,6 +101,14 @@ class Blocked(unittest.TestCase):
         p, _ = fc.run(p, {"type": "build", "state": "blocked", "auto_approve": "done"})
         self.assertEscalatedForOwner(p)
 
+    def test_approval_wait_capped(self):
+        fc, p = FakeController(), new()
+        p, _ = fc.run(p, {"type": "build", "state": "blocked", "auto_approve": "pending"})
+        p["budget"]["waiting_since"] -= PL.APPROVAL_WAIT_MAX + 1
+        p, _ = fc.run(p, {"type": "build", "state": "blocked", "auto_approve": "pending"})
+        self.assertEscalatedForOwner(p)
+        self.assertNotIn("waiting_approval", p["budget"])
+
     def test_t8c_awaiting_approval_escalates_at_once(self):
         fc, p = FakeController(), new()
         p, actions = fc.run(p, {"type": "build", "state": "awaiting_approval"})

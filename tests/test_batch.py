@@ -257,6 +257,43 @@ class FinalReview(unittest.TestCase):
         self.assertEqual(b["final"]["verdict"], "approve")
 
 
+class FixRound(unittest.TestCase):
+    def test_final_limited_parks_then_retries(self):
+        b = make([item("a")])
+        b, _ = tick(b)
+        b = settle_ready(b, ["a"])
+        b, _ = tick(b)
+        b, _ = B.step(b, {"type": "final_limited", "until": NOW + 500})
+        self.assertEqual((b["final"]["state"], b["final"]["attempt"]), ("parked", 1))
+        b, actions = tick(b, now=NOW + 100)
+        self.assertEqual(actions, [])
+        b, actions = tick(b, now=NOW + 501)
+        self.assertEqual([a["do"] for a in actions], ["spawn_final_review"])
+        self.assertEqual(b["final"]["attempt"], 1)
+
+    def test_final_limited_ignored_when_not_spawned(self):
+        b = make([item("a")])
+        b, _ = B.step(b, {"type": "final_limited", "until": NOW + 5})
+        self.assertIsNone(b["final"])
+
+    def test_effort_reaches_pipeline_spec(self):
+        build = {"agent": "codex", "model": "gpt-5.6-terra", "effort": "medium"}
+        review = {"agent": "claude", "model": "claude-fable-5-2", "effort": "medium"}
+        spec = B.pipeline_spec(B.normalise_item(item("a")), B.new_batch({"items": [item("a")]})["policy"],
+                               build, review, tag="b:a")
+        self.assertEqual(spec["builder"]["effort"], "medium")
+        self.assertEqual(spec["reviewers"][0]["effort"], "medium")
+        self.assertEqual(spec["batch"]["tag"], "b:a")
+
+    def test_slots_count_reviewing_and_final(self):
+        b = make([item("a"), item("b")], concurrency={"claude": 1, "codex": 1})
+        b, _ = tick(b)
+        b["items"][0].update(state="reviewing", review={"agent": "claude", "model": "m"})
+        self.assertEqual(B._slots(b).get("claude"), 2)  # a's reviewer + b's builder
+        b["final"] = {"state": "spawned", "agent": "codex"}
+        self.assertEqual(B._slots(b).get("codex"), 1)
+
+
 class Persistence(unittest.TestCase):
     def test_t9_restart_no_duplicate_spawn(self):
         b = make([item("a"), item("b")], concurrency={"claude": 9, "codex": 9})

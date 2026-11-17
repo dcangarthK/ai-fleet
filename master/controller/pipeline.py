@@ -257,7 +257,7 @@ def step(pipeline: dict, event: dict) -> tuple[dict, list[dict]]:
         budget = p.setdefault("budget", {})
         if state != "blocked":
             budget.pop("waiting_approval", None)  # the task left blocked
-            budget.pop("waiting_since", None): the controller's auto-approve resumed it
+            budget.pop("waiting_since", None)  # the task left blocked: the controller's auto-approve resumed it
         if state == "awaiting_approval":
             p["state"] = "escalated"
             _history(p, "escalated", note="owner approval needed: the builder task is awaiting approval")

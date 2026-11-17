@@ -35,6 +35,8 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
 - **All work through the fleet** (docs/SPEC-live-monitor.md 2.2): every build, fix, review, test, merge or benchmark
   is a fleet task, with a `kind`, a `profile` where the account matters (e.g. `spare`), `parent_id`/`link` into
   its work item, and a `stage` for Live. Describe an ad-hoc chain once with `set_chain`.
+  Split work into several tasks only when the pieces can run in parallel; a sequential chain of small edits is one
+  task, not several.
 - In-session subagents only for reading and planning that changes nothing; post them with `report_activity` so
   they show on Live as "self-reported".
 - A review or test on a model that built the work is refused unless spawned with `independence="waived"` and a
@@ -98,6 +100,8 @@ machines and alerts.
    diff again.
 5. **Match effort to the job.** Reviews and fix rounds run at medium effort, re-reviews at low, and final or
    security reviews at high. Codex otherwise inherits `high` from the owner's config for everything.
+   Change a kind's effort only after a benchmark run compares the current level with one level up and one down
+   on the harness-eval set, with tokens logged per run.
 6. **Don't ask agents to re-run the gate.** The runner runs the gate after every build. Ask a builder for one gate
    run, not two; fix flaky tests instead of re-running them.
 7. **No paid availability checks.** When a task fails on a usage limit, wait for the reset time in the error

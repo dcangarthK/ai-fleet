@@ -71,7 +71,30 @@ class OrchestratorProfileTests(unittest.TestCase):
                 lines = f.read().split("\n")[:-1]
             self.assertEqual(os.path.realpath(lines[0]), os.path.realpath(ROOT))
             self.assertEqual(lines[1:], ["--strict-mcp-config", "--mcp-config", "orchestrator/mcp.json",
-                                         "--settings", "orchestrator/settings.json", "-p", "a b", "x"])
+                                         "--settings", "orchestrator/settings.json",
+                                         "--setting-sources", "project,local", "-p", "a b", "x"])
+
+    def test_restated_user_settings(self):
+        s = json.loads(read("orchestrator/settings.json"))
+        self.assertEqual(s["autoCompactWindow"], 200000)
+        self.assertEqual(s["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "200000")
+        self.assertEqual(s["permissions"]["deny"], ["Bash(git push *)"])
+        self.assertEqual(s["permissions"]["defaultMode"], "auto")
+        self.assertNotIn("allow", s["permissions"])
+        for event, script in (("SessionStart", "caveman-activate.js"),
+                              ("UserPromptSubmit", "caveman-mode-tracker.js")):
+            groups = s["hooks"][event]
+            self.assertEqual(len(groups), 1)
+            self.assertNotIn("matcher", groups[0])
+            h = groups[0]["hooks"][0]
+            self.assertEqual(h["type"], "command")
+            self.assertEqual(h["command"], 'node "$HOME/.claude/hooks/%s"' % script)
+        self.assertNotIn("/Users/", read("orchestrator/settings.json"))
+
+    def test_user_source_excluded_claude_mem_on(self):
+        self.assertIn("--setting-sources project,local", read("scripts/orchestrator.sh"))
+        ep = json.loads(read("orchestrator/settings.json"))["enabledPlugins"]
+        self.assertIs(ep.get("claude-mem@thedotmack"), True)
 
 
 if __name__ == "__main__":

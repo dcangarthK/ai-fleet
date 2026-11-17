@@ -76,6 +76,19 @@ class G2(unittest.TestCase):
                   "(cd /etc && ls)", "cd && ls", "cd 'a b/~' && ls"):
             self.asks(c.replace("\\n", "\n"))
 
+    def test_heredoc_write_denied_with_hint(self):
+        for c in ("cat > x <<EOF\nhi\nEOF", "cat >> x <<'EOF'\nhi\nEOF", "cd %s; cat > f <<'EOF'\nhi\nEOF" % self.wt,
+                  "cat <<EOF > x\nhi\nEOF", "tee x <<EOF\nhi\nEOF"):
+            h = self.run_hook(c)
+            self.assertEqual(h["permissionDecision"], "deny", c)
+            self.assertIn("Write/Edit", h["permissionDecisionReason"])
+
+    def test_plain_cat_passes_and_sed_i_not_rewritten(self):
+        self.assertIsNone(self.run_hook("cat x"))
+        self.assertIsNone(self.run_hook("sed -i s/a/b/ f"))
+        self.assertIsNone(self.run_hook("npx tsc -b"))
+        self.assertIsNone(self.run_hook("npm run typecheck 2>&1 | tail -8"))
+
     def test_deny_does_not_end_the_run(self):
         # The hook exits 0 with a deny reply (a refused tool call with a reason), never a non-zero exit.
         import io

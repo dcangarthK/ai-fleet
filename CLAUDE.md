@@ -99,8 +99,9 @@ machines and alerts.
 4. **Re-reviews get the delta.** Send the fix diff since the last review plus the previous findings, not the whole
    diff again.
 5. **Match effort to the job.** Reviews and fix rounds run at medium effort, re-reviews at low, and final or
-   security reviews at high. Codex otherwise inherits `high` from the owner's config for everything. Change a kind's effort only after a benchmark run compares
-   the current level with one level up and one down on the harness-eval set, with tokens logged per run.
+   security reviews at high. Codex otherwise inherits `high` from the owner's config for everything.
+   Change a kind's effort only after a benchmark run compares the current level with one level up and one down
+   on the harness-eval set, with tokens logged per run.
 6. **Don't ask agents to re-run the gate.** The runner runs the gate after every build. Ask a builder for one gate
    run, not two; fix flaky tests instead of re-running them.
 7. **No paid availability checks.** When a task fails on a usage limit, wait for the reset time in the error

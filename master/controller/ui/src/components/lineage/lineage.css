@@ -44,8 +44,15 @@ input.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent)
 .lin-scrub-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: lin-live-dot 1.6s ease-in-out infinite; }
 @keyframes lin-live-dot { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .lin-scrub-dot { animation: none; } }
-.lin-scrub-clock { min-width: 64px; text-align: right; color: var(--ink-2); }
-.lin-scrub-note { margin: var(--s2) 0 0; font-size: var(--fs-sm); color: var(--ink-2); overflow-wrap: anywhere; }
+.lin-scrub-clock { min-width: 8ch; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.lin-scrub-end { display: grid; justify-items: end; align-items: center; flex: none; }
+.lin-scrub-end > * { grid-area: 1 / 1; transition: opacity .15s; }
+.lin-scrub-end > [data-on="false"] { opacity: 0; visibility: hidden; }
+.lin-scrub-replay { display: inline-flex; align-items: center; gap: var(--s2); }
+.lin-scrub-play { min-width: 76px; }
+input.lin-range:focus-visible { outline-offset: 2px; border-radius: var(--r); }
+input.lin-range:focus:not(:focus-visible) { outline: none; }
+.lin-scrub-note { margin: var(--s2) 0 0; min-height: 1.5em; font-size: var(--fs-sm); color: var(--ink-2); overflow-wrap: anywhere; }
 @media (pointer: coarse) { .lin-scrub .btn-sm { min-height: var(--h-lg); } }
 
 /* ---------------------------------------------------------------- intelligence */
@@ -260,3 +267,4 @@ input.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent)
 }
 @media (max-width: 640px), (pointer: coarse) { .graph-actions .quiet { display: none; } }
 @media (max-width: 640px) { .graph-wrap { height: 60vh; min-height: 420px; } }
+@media (max-width: 900px) { .lin-scrub-note { min-height: 3em; } }

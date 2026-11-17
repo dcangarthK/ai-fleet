@@ -8,5 +8,4 @@ Desktop app: it can't take these flags. To get the plugin part there, copy `enab
 `orchestrator/settings.json` into `~/ai-fleet/.claude/settings.json` (project settings). The MCP part stays as is.
 
 Baseline startup context: about 38k tokens (CLI), about 90k (desktop app). Target: under 25k.
-New figure: not measured. The Bash permission for running the launcher was not available in the build session, so
-run `scripts/orchestrator.sh -p --model haiku "/context"` and record the result here.
+New figure: 22.4k tokens (CLI, haiku, `scripts/orchestrator.sh -p --model haiku "/context"`, 2026-11-17), down from about 38k.

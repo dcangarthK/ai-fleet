@@ -454,11 +454,12 @@ class ResponseTests(StallBase):
     def test_no_free_slot_waits_and_the_sweep_retries(self):
         body = rules()
         for key in body["models"]:
-            if key != "claude:claude-opus-*":
-                body["models"][key]["kinds"] = ["review"]  # only Opus may build
+            if key != "claude:claude-sonnet-*":
+                body["models"][key]["kinds"] = ["review"]  # only Sonnet may build (the model guard bars Opus)
+        body["models"]["claude:claude-sonnet-*"]["max_concurrent"] = 1
         self.put_rules(body)
-        t = self.running()
-        other = self.build()  # Opus on the spare account: the only other build slot is now busy
+        t = self.running(model=SONNET)
+        other = self.build(model=SONNET)  # Sonnet on the spare account: the only other build slot is now busy
         self.assertEqual(other["profile"], "spare")
         self.set_jobs(job(t["id"], alive=False), job(other["id"]))
         self.sweep()
@@ -696,6 +697,9 @@ class RankTests(StallBase):
         self.assertIn(FABLE, [s["model"] for s in self.slots("review")])
 
     def test_busy_slots_rank_after_idle_ones(self):
+        body = rules()
+        body["models"]["claude:claude-sonnet-*"]["max_concurrent"] = 2  # busy, not full
+        self.put_rules(body)
         self.build(model=SONNET)  # on the fleet account
         ranked = [(s["model"], s["profile"]) for s in self.slots("build")]
         self.assertEqual(ranked[0], (SONNET, "spare"))

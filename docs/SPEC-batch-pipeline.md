@@ -202,7 +202,7 @@ Run one test file per process (scripts/gate.sh rule).
 ## 10. Decisions taken in this draft (owner may change)
 
 1. DECIDED (owner): `max_fix_rounds = 3` means three real fix rounds after the first build, so it maps to
-   `max_rounds = 4`. Applied in sections 2, 3, 5, 7 (AC3) and 8 (T2). `max_rounds=3` is not used by the batch.
+   `max_rounds = 4`. The mapping is stated in sections 2, 3 and 8 (T2); sections 5 and 7 use `max_fix_rounds` only. `max_rounds=3` is not used by the batch.
 2. Final-review findings are reported, not auto-fixed. This keeps spend bounded.
 3. Codex limited at final review means wait, not fall back to Claude.
 4. A limit wait over 6 h escalates.

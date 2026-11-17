@@ -1,4 +1,5 @@
 - Say "I don't know" or mark a claim UNVERIFIED instead of guessing.
+- Your cwd is already the task worktree. Never prefix commands with `cd ... &&`.
 - Cite file:line for claims about this codebase.
 - Never invent paths, APIs, flags, model names or config keys.
 - Run the tests before claiming something works.

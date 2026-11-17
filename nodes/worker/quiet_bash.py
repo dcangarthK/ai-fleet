@@ -30,7 +30,7 @@ _private_dir = None
 
 
 def split_segments(cmd):
-    """Split on && || ; | outside quotes."""
+    """Split on && || ; | and a lone & (background) outside quotes; `2>&1`, `>&2` and `&>f` stay whole."""
     segs, cur, quote, i = [], [], None, 0
     while i < len(cmd):
         c = cmd[i]
@@ -49,7 +49,9 @@ def split_segments(cmd):
             i += 1
             cur.append(cmd[i])
         elif c in ";|&":
-            if c != "&" or (i + 1 < len(cmd) and cmd[i + 1] == "&"):
+            nxt = cmd[i + 1] if i + 1 < len(cmd) else ""
+            redirect = c == "&" and (nxt == ">" or (i > 0 and cmd[i - 1] in "<>"))  # 2>&1, >&2, &>f
+            if not redirect:
                 segs.append("".join(cur))
                 cur = []
                 if i + 1 < len(cmd) and cmd[i + 1] == c:
@@ -82,24 +84,27 @@ def git_kind(cmd):
 
 
 _SEG = r"(?:^|[;&|(\n`]|\$\()\s*"
-_ENV = r"(?:\w+=\S*\s+)*"                                  # VAR=x assignments before a command
+# what may stand before a command word: VAR=x, builtin/command, ! { and shell keywords
+_PRE = r"(?:(?:\w+=\S*|builtin|command|time|then|do|else|elif|if|while|until|!|\{)\s+)*"
 _FILE = r"(?:'[^']*'|\"[^\"]*\"|[^\s<>]+)"
-_DELIM = r"(?:'[^']*'|\"[^\"]*\"|[^\s<>]+)"
+_DELIM = _FILE
 HEREDOC_RES = (
-    re.compile(_SEG + _ENV + r"cat[ \t]*>>?\|?[ \t]*" + _FILE + r"[ \t]*<<"),                  # cat > f <<EOF, cat >| f <<EOF
-    re.compile(_SEG + _ENV + r"cat[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]*>>?\|?[ \t]*[^\s<]"),   # cat <<EOF > f, cat<<EOF>f
-    re.compile(_SEG + _ENV + r"tee[ \t]+(?:-\w+[ \t]+)*" + _FILE + r"[ \t]*<<"),                # tee f <<EOF
-    re.compile(_SEG + _ENV + r"tee[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]+(?:-\w+[ \t]+)*[^\s<>]"),  # tee <<EOF f
+    re.compile(_SEG + _PRE + r"cat[ \t]*>>?\|?[ \t]*" + _FILE + r"[ \t]*<<"),                  # cat > f <<EOF, cat >| f <<EOF
+    re.compile(_SEG + _PRE + r"cat[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]*>>?\|?[ \t]*[^\s<]"),   # cat <<EOF > f, cat<<EOF>f
+    re.compile(_SEG + _PRE + r"tee[ \t]+(?:-\w+[ \t]+)*" + _FILE + r"[ \t]*<<"),                # tee f <<EOF
+    re.compile(_SEG + _PRE + r"tee[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]+(?:-\w+[ \t]+)*[^\s<>]"),  # tee <<EOF f
 )
-# cd/pushd at the start of a command, also behind env assignments, builtin/command, ! { and shell keywords
-CD_WORD_RE = re.compile(_SEG + r"(?:(?:\w+=\S*|builtin|command|time|then|do|else|elif|if|while|until|!|\{)\s+)*"
-                        r"(?:cd|pushd)(?=\s|$)")
+# cd/pushd at the start of a command, also behind the prefixes above
+CD_WORD_RE = re.compile(_SEG + _PRE + r"(?:cd|pushd)(?=\s|$)")
 # unquoted dir stops at whitespace and shell separators; a quoted dir is taken whole
 CD_RE = re.compile(r"^\s*cd\s+('[^']*'|\"[^\"]*\"|[^\s;&|'\"]+)[ \t]*(&&|;)[ \t]*(.+)$", re.S)
 CD_UNSAFE = set("~$`*?[\\\n\r{}!<>()")
 CD_ASK = {"hookSpecificOutput": {
     "hookEventName": "PreToolUse", "permissionDecision": "ask",
     "permissionDecisionReason": "cd to a directory outside the task worktree (or one that can't be resolved safely)"}}
+WRAPPER_ASK = {"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+    "permissionDecisionReason": "quiet_bash.py wrapper call that is not exactly a wrapped test command"}}
 
 
 def is_heredoc_write(cmd):
@@ -292,19 +297,29 @@ def deny_repeat():
                                     "the runner runs the gate once after you finish)" % MAX_TEST_RUNS}}
 
 
-def trusted_wrapper(cmd):
-    """The inner command when `cmd` is exactly what rewrite_command() produces (`python3 <this script> --wrap|--head
-    LOG -- <quoted command>`, one simple command, every token quoted as shlex.quote would), else None."""
+def wrapper_state(cmd):
+    """None when cmd is not a call of a quiet_bash.py wrapper; ("ok", inner) when it is exactly what rewrite_command()
+    produces (this script, one simple command, tokens quoted as shlex.quote would) AND the inner command is a pure
+    test command (--wrap) or a flags-only `git diff` (--head); ("bad", None) for any other wrapper-shaped call, which
+    must not be exempt from the checks (it would run anything under Bash(python3:*))."""
     try:
         toks = shlex.split(cmd)
     except ValueError:
         return None
-    if len(toks) < 5 or toks[0] != "python3" or toks[1] != os.path.abspath(__file__) \
-            or toks[2] not in ("--wrap", "--head") or toks[4] != "--":
+    if len(toks) < 3 or toks[0] != "python3" or os.path.basename(toks[1]) != "quiet_bash.py" \
+            or toks[2] not in ("--wrap", "--head"):
         return None
+    bad = ("bad", None)
+    if len(toks) < 6 or toks[1] != os.path.abspath(__file__) or toks[4] != "--":
+        return bad
     if " ".join(shlex.quote(t) for t in toks) != cmd.strip():
-        return None
-    return " ".join(toks[5:])
+        return bad
+    inner = " ".join(toks[5:])
+    if toks[2] == "--wrap":
+        good = is_test_command(inner) and can_wrap(inner)
+    else:
+        good = git_kind(inner) == "diff"
+    return ("ok", inner) if good else bad
 
 
 def can_wrap(cmd):
@@ -321,10 +336,10 @@ def hook_output(payload):
         return None
     ti = payload.get("tool_input") or {}
     cmd = ti.get("command") or ""
-    inner = trusted_wrapper(cmd)
-    if inner is not None:
+    wstate = wrapper_state(cmd)
+    if wstate and wstate[0] == "ok":
         # The model called the wrapper itself. The hook doesn't rewrite it, but the test command inside still counts.
-        if is_test_command(inner) and repeat_count(inner) > MAX_TEST_RUNS:
+        if is_test_command(wstate[1]) and repeat_count(wstate[1]) > MAX_TEST_RUNS:
             return deny_repeat()
         return None
     if is_heredoc_write(cmd):
@@ -338,12 +353,19 @@ def hook_output(payload):
     prefix, body = "", cmd
     if action == "rewrite":
         prefix, body = "cd %s %s " % (shlex.quote(target), sep), rest
+        wstate = wrapper_state(body)
+    if wstate and wstate[0] == "bad":
+        return WRAPPER_ASK
     new = dict(ti)
     gk = git_kind(body)
     if gk == "log":
         new["command"] = prefix + "git log -n 30"
     elif gk == "diff":
         new["command"] = prefix + rewrite_command(body, new_log_path(), "--head")
+    elif wstate:  # a valid wrapper call behind an in-tree cd
+        if is_test_command(wstate[1]) and repeat_count(wstate[1]) > MAX_TEST_RUNS:
+            return deny_repeat()
+        new["command"] = prefix + body
     elif is_test_command(body):
         if repeat_count(body) > MAX_TEST_RUNS:
             return deny_repeat()

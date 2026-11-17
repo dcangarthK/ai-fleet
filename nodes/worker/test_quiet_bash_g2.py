@@ -1,5 +1,6 @@
 """G2: leading-cd strip, heredoc deny, new Bash rules. Run: python3 -m unittest nodes.worker.test_quiet_bash_g2"""
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -147,6 +148,35 @@ class G2(unittest.TestCase):
                   "if cd a; then ls; fi", "ls && then cd a", "time cd a && ls", "while cd a; do ls; done",
                   "ls; else cd a", "x; do cd a", "pushd a && ls", "cd a && ls; FOO=1 cd b"):
             self.asks(c)
+
+    def test_lone_ampersand_is_a_separator(self):  # HIGH-A
+        for c in ("python3 -m unittest a1 & cat ~/.ssh/id_rsa", "python3 -m unittest a2 |& cat ~/.ssh/id_rsa",
+                  "python3 -m unittest a3 &cat ~/.ssh/id_rsa", "cat ~/.ssh/id_rsa & python3 -m unittest a4"):
+            self.assertIsNone(self.run_hook(c), c)  # not wrapped
+        self.assertEqual(quiet_bash.split_segments("a & b"), ["a ", " b"])
+        # redirects keep working and a pure test command with them is still wrapped
+        self.assertEqual(len(quiet_bash.split_segments("python3 -m unittest x 2>&1")), 1)
+        self.assertEqual(len(quiet_bash.split_segments("python3 -m unittest x >&2")), 1)
+        self.assertEqual(len(quiet_bash.split_segments("python3 -m unittest x &>/dev/null")), 1)
+        self.assertIn("--wrap", self.new_cmd("python3 -m unittest a5 2>&1"))
+
+    def test_wrapper_inner_must_be_a_test_command(self):  # HIGH-B
+        q = os.path.abspath(quiet_bash.__file__)
+        for inner in ("cd /etc && cat x", "cat ~/.ssh/id_rsa", "python3 -m unittest x; cat y", "ls"):
+            self.asks("python3 %s --wrap /tmp/l -- %s" % (q, shlex.quote(inner)))
+        self.asks("python3 %s --head /tmp/l -- 'cat ~/x'" % q)
+        self.asks("python3 %s --head /tmp/l -- 'git diff x; ls'" % q)
+        # behind an in-tree cd too
+        self.asks("cd %s && python3 %s --wrap /tmp/l -- 'cat x'" % (self.wt, q))
+        # valid ones still pass
+        self.assertIsNone(self.run_hook("python3 %s --head /tmp/l -- 'git diff'" % q))
+        self.assertIn("--wrap", self.new_cmd("cd %s && python3 %s --wrap /tmp/l -- 'python3 -m unittest x'" % (self.wt, q)))
+
+    def test_heredoc_after_keywords_denied(self):  # LOW-C
+        for c in ("if true; then cat > f <<EOF\nhi\nEOF", "{ cat > f <<EOF\nhi\nEOF", "for i in 1; do cat > f <<EOF\nhi\nEOF",
+                  "if false; then :; else tee f <<EOF\nhi\nEOF", "! cat > f <<EOF\nhi\nEOF"):
+            h = self.run_hook(c)
+            self.assertEqual(h and h.get("permissionDecision"), "deny", c)
 
     def test_deny_does_not_end_the_run(self):
         # The hook exits 0 with a deny reply (a refused tool call with a reason), never a non-zero exit.

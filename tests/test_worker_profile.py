@@ -53,8 +53,8 @@ class Settings(unittest.TestCase):
             self.assertEqual(json.load(f), {"mcpServers": {}})
 
 
-def run_cmd(cmd, job):
-    """Drive the real hook, then run the rewritten command."""
+def run_cmd(cmd, job, cwd=None):
+    """Drive the real hook, then run the rewritten command (in cwd; no out-of-tree `cd`, G2 asks about those)."""
     env = dict(os.environ, FLEET_JOB_DIR=job)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
     h = subprocess.run([sys.executable, os.path.join(W, "quiet_bash.py")], input=payload,
@@ -62,7 +62,7 @@ def run_cmd(cmd, job):
     if not h.stdout.strip():
         return None, h
     new = json.loads(h.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
-    return subprocess.run(["bash", "-c", new], capture_output=True, text=True, env=env), h
+    return subprocess.run(["bash", "-c", new], capture_output=True, text=True, env=env, cwd=cwd), h
 
 
 class BashRules(unittest.TestCase):
@@ -92,10 +92,10 @@ class Filter(unittest.TestCase):
         self.job = os.path.join(d, "job")
 
     def cmd(self, mod):
-        return "cd %s && python3 -m unittest %s" % (self.tmp.name, mod)
+        return "python3 -m unittest %s" % mod
 
     def test_failing(self):
-        r, _ = run_cmd(self.cmd("t_fail"), self.job)
+        r, _ = run_cmd(self.cmd("t_fail"), self.job, self.tmp.name)
         self.assertEqual(r.returncode, 1)
         lines = r.stdout.splitlines()
         self.assertLessEqual(len(lines), 100)
@@ -109,7 +109,7 @@ class Filter(unittest.TestCase):
         self.assertTrue(lines[-1].startswith("full output: "))
 
     def test_full_log_written(self):
-        r, _ = run_cmd(self.cmd("t_fail"), self.job)
+        r, _ = run_cmd(self.cmd("t_fail"), self.job, self.tmp.name)
         path = r.stdout.splitlines()[-1].split("full output: ", 1)[1]
         self.assertTrue(path.startswith(self.job))
         with open(path) as f:
@@ -118,7 +118,7 @@ class Filter(unittest.TestCase):
         self.assertIn("Ran 302 tests", log)
 
     def test_passing_one_line(self):
-        r, _ = run_cmd(self.cmd("t_ok"), self.job)
+        r, _ = run_cmd(self.cmd("t_ok"), self.job, self.tmp.name)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(len(r.stdout.splitlines()), 1)
         self.assertIn("exit=0 ok", r.stdout)
@@ -144,6 +144,10 @@ class Filter(unittest.TestCase):
         self.assertIsNone(quiet_bash.hook_output({"tool_name": "Bash", "tool_input": {"command": "grep vitest ."}}))
 
     def test_no_permission_decision(self):
+        old = os.environ.get("FLEET_JOB_DIR")  # a private job dir: the repeat counter must start empty
+        os.environ["FLEET_JOB_DIR"] = self.job
+        self.addCleanup(lambda: os.environ.pop("FLEET_JOB_DIR", None) if old is None
+                        else os.environ.__setitem__("FLEET_JOB_DIR", old))
         out = quiet_bash.hook_output({"tool_name": "Bash", "tool_input": {"command": "python3 -m unittest t"}})
         self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
         self.assertIn("updatedInput", out["hookSpecificOutput"])
@@ -160,8 +164,8 @@ class Filter(unittest.TestCase):
         subprocess.run("cd %s && git init -q && git config user.email a@b && git config user.name a && "
                        "printf 'x\\n' > f && git add f && git commit -qm i && "
                        "seq 1 1000 > f" % d, shell=True, check=True, env=env)
-        r, _ = run_cmd("cd %s && git diff" % d, self.job)
-        self.assertIsNone(r)  # compound command is left alone
+        out = quiet_bash.hook_output({"tool_name": "Bash", "tool_input": {"command": "cd %s && git diff" % d}})
+        self.assertNotIn("updatedInput", out["hookSpecificOutput"])  # out-of-tree cd asks and is never wrapped
         o = quiet_bash.rewrite_command("git diff", os.path.join(self.job, "x.log"), "--head")
         os.makedirs(self.job, exist_ok=True)
         r = subprocess.run(["bash", "-c", o], cwd=d, capture_output=True, text=True, env=env)

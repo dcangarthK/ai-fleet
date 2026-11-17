@@ -26,7 +26,7 @@ whatever N is. The controller runs the build, gate, review and fix loop for ever
   Trusted findings are kept in `budget.last_findings` for the delta re-review (pipeline.py:160-162).
 - **Round arithmetic gap.** `round` starts at 1. With `max_rounds=3` the sequence is build(1), CHANGES, build(2),
   CHANGES, build(3), CHANGES, escalate. That is two fix rounds, not three. The policy in section 3 asks for three fix
-  rounds, so the batch submits `max_rounds = max_fix_rounds + 1`.
+  rounds, so the batch submits `max_rounds = max_fix_rounds + 1` (decided, section 10 item 1).
 - `set_chain` (master/mcp/server.py:553-557; master/controller/live.py:201-238) is descriptive only. It never starts,
   admits or advances anything, so it cannot drive a batch. It stays as the Live label.
 - `pipeline_status` (server.py:668-670) is a read. It does not wait.
@@ -201,9 +201,12 @@ Run one test file per process (scripts/gate.sh rule).
 
 ## 10. Decisions taken in this draft (owner may change)
 
-1. `max_fix_rounds = 3` is mapped to `max_rounds = 4`. The alternative is `max_rounds=3` meaning three builds in all.
+1. DECIDED (owner): `max_fix_rounds = 3` means three real fix rounds after the first build, so it maps to
+   `max_rounds = 4`. Applied in sections 2, 3, 5, 7 (AC3) and 8 (T2). `max_rounds=3` is not used by the batch.
 2. Final-review findings are reported, not auto-fixed. This keeps spend bounded.
 3. Codex limited at final review means wait, not fall back to Claude.
 4. A limit wait over 6 h escalates.
 5. A security-sensitive item gets Codex as its single reviewer, at high effort.
 6. The batch stops at `ready`. Merging stays with the owner or a later merge task.
+7. OPEN (owner has not decided): whether the blocked and awaiting_approval branch in `pipeline.step` (section 2,
+   section 9) lands before the batch build starts.

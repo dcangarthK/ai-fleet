@@ -41,6 +41,10 @@
 .lin-scrub-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 .lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); height: var(--h-sm); }
 input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; background: transparent; }
+.lin-scrub-live { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+.lin-scrub-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: lin-live-dot 1.6s ease-in-out infinite; }
+@keyframes lin-live-dot { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .lin-scrub-dot { animation: none; } }
 .lin-scrub-clock { min-width: 64px; text-align: right; color: var(--ink-2); }
 .lin-scrub-note { margin: var(--s2) 0 0; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 @media (pointer: coarse) { .lin-scrub .btn-sm { min-height: var(--h-lg); } }
@@ -193,7 +197,11 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-side { min-width: 0; }
 .lin-panel { min-width: 0; }
 .lin-panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); margin: 0 0 var(--s2); }
-.lin-panel-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.lin-panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s3); }
+.lin-panel-head > div { flex: 1; min-width: 0; }
+.lin-panel-head > div h2 { overflow-wrap: anywhere; }
+.lin-panel-head > button.icon { flex: none; width: 36px; height: 36px; min-height: 36px; padding: 0; font-size: 20px; line-height: 1; border-radius: 50%; margin: -4px -4px 0 0; }
+@media (pointer: coarse) { .lin-panel-head > button.icon { width: 44px; height: 44px; } }
 .lin-panel-title { margin: var(--s1) 0 var(--s3); color: var(--ink-2); overflow-wrap: anywhere; }
 .lin-tokens { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: var(--s2); margin: 0; }
 .lin-tokens div { background: var(--sunken); border-radius: var(--r); padding: var(--s2) var(--s3); }

@@ -10,7 +10,7 @@ export function ChainStrip({ chain, selected, onSelect }: { chain: ChainStage[];
         <li key={s.name}>
           <button
             type="button" disabled={!s.taskId} aria-current={s.taskId === selected ? "true" : undefined}
-            className={s.taskId === selected ? "primary" : undefined} onClick={() => s.taskId && onSelect(s.taskId)}
+            className={s.taskId === selected ? "chain-btn primary" : "chain-btn"} onClick={() => s.taskId && onSelect(s.taskId)}
             title={[s.model, s.account, s.node].filter(Boolean).join(" · ")}
           >
             <span aria-hidden="true">{MARK[s.status]}</span> <b>{s.label}</b> <span className="muted">{s.detail}{s.model ? ` · ${s.model}` : ""}</span>

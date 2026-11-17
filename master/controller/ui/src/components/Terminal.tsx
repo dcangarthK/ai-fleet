@@ -83,7 +83,7 @@ export function Terminal({ title, text, live = false, height = 360, idPrefix = "
   const searchId = useId();
   const [follow, setFollow] = useState(live);
   const [atBottom, setAtBottom] = useState(true);
-  const [wrap, setWrap] = useState(defaultWrap);
+  const [wrap, setWrap] = useState(() => defaultWrap || (typeof matchMedia === "function" && matchMedia("(max-width: 640px)").matches));
   const [full, setFull] = useState(false);
   const [copied, setCopied] = useState(false);
   const [searching, setSearching] = useState(false);

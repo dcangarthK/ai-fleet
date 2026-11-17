@@ -49,8 +49,9 @@ export function Scrubber({ t0, t1, steps, events, nodes, cursor, setCursor }: {
           aria-label="Replay position" aria-valuetext={cursor === null ? "Live" : `as of ${fmtClock(cursor, false, true)}`}
           onChange={(e) => { setPlaying(false); const v = Number(e.target.value); setCursor(v >= t1 ? null : v); }}
         />
-        <span className="lin-scrub-clock mono" aria-live="off">{cursor === null ? "Live" : fmtClock(cursor, false, true)}</span>
-        <Button size="sm" variant={cursor === null ? "ghost" : "primary"} disabled={cursor === null} onClick={() => { setPlaying(false); setCursor(null); }}>Back to live</Button>
+        {cursor === null
+          ? <span className="lin-scrub-live" aria-live="off"><span className="lin-scrub-dot" aria-hidden="true" />Live</span>
+          : <><span className="lin-scrub-clock mono" aria-live="off">{fmtClock(cursor, false, true)}</span><Button size="sm" variant="primary" onClick={() => { setPlaying(false); setCursor(null); }}>Back to live</Button></>}
       </div>
       {cursor !== null && (
         <p className="lin-scrub-note" role="status">

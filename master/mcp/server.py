@@ -444,6 +444,22 @@ def drain_node(node: str) -> str:
 
 # ---------- agent tasks ----------
 
+ROW_KEYS = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
+
+
+def _trim_row(out: str, trim: bool) -> str:
+    """Trim a controller task row to ROW_KEYS when trim is true; error strings pass through unchanged."""
+    if not trim or not _trim_on(False):
+        return out
+    try:
+        row = json.loads(out)
+    except (ValueError, TypeError):
+        return out  # an error string
+    if not isinstance(row, dict):
+        return out
+    return json.dumps({k: row[k] for k in ROW_KEYS if k in row}, indent=2)
+
+
 def _q(value: str) -> str:
     return quote(value, safe="")
 
@@ -481,14 +497,7 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
         if v:
             body[k] = v
     out = _controller("POST", "/api/tasks", body, scope="operate")
-    if not _trim_on(False):
-        return out
-    try:
-        row = json.loads(out)
-        keys = ("id", "state", "agent", "model", "kind", "node_id", "branch", "account", "budget_wait", "routed_from")
-        return json.dumps({k: row[k] for k in keys if k in row}, indent=2)
-    except (ValueError, TypeError):
-        return out  # an error string
+    return _trim_row(out, True)
 
 
 @mcp.tool()
@@ -606,21 +615,21 @@ def message_task(task_id: str, text: str) -> str:
 
 
 @mcp.tool()
-def cancel_task(task_id: str) -> str:
-    """Stop a task (kills the agent process)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/cancel")
+def cancel_task(task_id: str, full: bool = False) -> str:
+    """Stop a task (kills the agent process). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cancel"), not full)
 
 
 @mcp.tool()
-def complete_task(task_id: str) -> str:
-    """Mark a reviewed task as done (accepted)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/complete")
+def complete_task(task_id: str, full: bool = False) -> str:
+    """Mark a reviewed task as done (accepted). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/complete"), not full)
 
 
 @mcp.tool()
-def cleanup_task(task_id: str) -> str:
-    """Remove a settled task's worktree (its branch is kept for merging)."""
-    return _controller("POST", f"/api/tasks/{_q(task_id)}/cleanup")
+def cleanup_task(task_id: str, full: bool = False) -> str:
+    """Remove a settled task's worktree (its branch is kept for merging). Returns a trimmed row; full=True for the raw row."""
+    return _trim_row(_controller("POST", f"/api/tasks/{_q(task_id)}/cleanup"), not full)
 
 
 @mcp.tool()

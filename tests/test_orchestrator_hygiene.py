@@ -167,6 +167,38 @@ class Fallbacks(unittest.TestCase):
         v = server.trim_task({"id": "t", "state": "review", "result": text})
         self.assertEqual(len(v["findings"]), 1)
 
+class LifecycleTrim(unittest.TestCase):
+    ROW = {"id": "t-1", "state": "done", "agent": "claude", "model": "m", "kind": "build", "node_id": "n",
+           "branch": "fleet/t-1", "account": "a", "budget_wait": None, "routed_from": None,
+           "prompt": "big " * 50, "result": "long"}
+    TOOLS = ("complete_task", "cleanup_task", "cancel_task")
+
+    def call(self, tool, ret, **kw):
+        saved = server._controller
+        server._controller = lambda *a, **k: ret
+        try:
+            return getattr(server, tool)("t-1", **kw)
+        finally:
+            server._controller = saved
+
+    def test_trimmed(self):
+        raw = json.dumps(self.ROW)
+        for tool in self.TOOLS:
+            v = json.loads(self.call(tool, raw))
+            self.assertEqual(set(v), set(server.ROW_KEYS), tool)
+
+    def test_full(self):
+        raw = json.dumps(self.ROW)
+        for tool in self.TOOLS:
+            self.assertEqual(self.call(tool, raw, full=True), raw, tool)
+
+    def test_errors_pass_through(self):
+        for tool in self.TOOLS:
+            for err in ("error 404: task not found", "controller unreachable (ConnectError); is it running on the master?"):
+                self.assertEqual(self.call(tool, err), err, tool)
+                self.assertEqual(self.call(tool, err, full=True), err, tool)
+
+
 class Docs(unittest.TestCase):
     def test_documented(self):
         for f in ("CLAUDE.md", "docs/MASTER-INSTRUCTIONS.md"):

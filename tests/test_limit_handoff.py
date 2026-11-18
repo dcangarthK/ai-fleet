@@ -139,8 +139,16 @@ class HandoffBase(unittest.TestCase):
         """Settle the task as a limit failure without touching its runner job (so no poll triggers anything)."""
         values = {"state": "failed", "exit_code": 1, "result": CLAUDE_LIMIT, "failure_reason": "limit",
                   "resets_at": time.time() + 3600, "ended_at": time.time()} | fields
-        with db() as c:
-            c.execute(f"UPDATE tasks SET {', '.join(k + '=?' for k in values)} WHERE id=?", (*values.values(), task_id))
+        # Take the task lock: the controller's background poll loop may be mid-poll on this still-"working" task
+        # (it read the row, is awaiting the runner), and its unguarded update() of a running job's fields
+        # (tasks._poll_task, new == "working") would overwrite result/exit_code written here, so the task stops
+        # looking like a limit failure. Holding the lock lets that poll finish first; later polls see "failed".
+        async def write():
+            async with tasks._locks[task_id]:
+                with db() as c:
+                    c.execute(f"UPDATE tasks SET {', '.join(k + '=?' for k in values)} WHERE id=?",
+                              (*values.values(), task_id))
+        self.c.portal.call(write)
 
     def get(self, task_id):
         return self.c.get(f"/api/tasks/{task_id}").json()

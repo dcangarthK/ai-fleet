@@ -1,0 +1,63 @@
+/* M4 page motion (docs/UI-MOTION-SCOPE-2026-11-18.md). Only transform/opacity animate; filter only on offline desaturate. */
+.mini-graph { color: var(--accent); display: block; }
+
+/* Plan: the current item is the page's one pulse (a faint breathe on its status pill). */
+@keyframes plan-breathe { 50% { opacity: 0.5; } }
+.plan-current { animation: plan-breathe 2.4s var(--ease-in-out) infinite; }
+.plan-current.paused { animation: none; }
+@keyframes settle-pop { from { transform: scale(0.92); opacity: 0.4; } to { transform: none; opacity: 1; } }
+.settle-pop { display: inline-block; animation: settle-pop var(--dur-3) var(--ease-out) both; }
+
+/* Bars fill with an ease-out (transform, not width). */
+.bar-fill { transform-origin: left center; transition: transform var(--dur-count) var(--ease-out); }
+@keyframes bar-warn { from { opacity: 0.5; } to { opacity: 1; } }
+.bar-fill.warn-once { animation: bar-warn var(--dur-3) var(--ease-out) 1 both; }
+
+/* Live: queue rows leave to the right once started. */
+@keyframes row-leave { to { transform: translateX(24px); opacity: 0; } }
+.row-leave { animation: row-leave var(--dur-3) var(--ease-in) both; }
+
+/* Think: a load shimmer, only while the node reports a real load state. */
+@keyframes load-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.loading-shimmer { position: relative; overflow: hidden; }
+.loading-shimmer::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--accent-soft), transparent);
+  animation: load-shimmer 1.4s linear infinite;
+}
+.loading-shimmer.paused::after { animation: none; opacity: 0; }
+
+/* Nodes: heartbeat ring per `seen` update; offline desaturates over 600ms and stops pulsing. */
+@keyframes beat-ring { from { transform: scale(1); opacity: 0.6; } to { transform: scale(2.4); opacity: 0; } }
+.beat { position: relative; display: inline-block; border-radius: 50%; }
+.beat.ping::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--ok); pointer-events: none;
+  animation: beat-ring 1.6s var(--ease-out) 1 both;
+}
+.node-fade { transition: filter 600ms var(--ease-in-out), opacity 600ms var(--ease-in-out); }
+.node-offline { filter: saturate(0); opacity: 0.7; }
+.node-offline .beat::after { animation: none; opacity: 0; }
+
+/* Settle: one highlight for a new best score, and a save check. */
+@keyframes best-flash { from { transform: scale(1.12); background-color: var(--accent-soft); } to { transform: none; background-color: transparent; } }
+.best-flash { display: inline-block; animation: best-flash 1.2s var(--ease-out) 1 both; }
+@keyframes check-draw { from { stroke-dashoffset: 16; } to { stroke-dashoffset: 0; } }
+.check-draw { stroke-dasharray: 16; animation: check-draw var(--dur-3) var(--ease-out) both; }
+
+/* Activity: sticky time group headers. */
+.sticky-group { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--bg)); }
+
+/* Lineage graph: new nodes grow in (rect scale, not the group's positioning transform); a changed state settles. */
+@keyframes node-grow { from { transform: scale(0.9); opacity: 0.4; } to { transform: none; opacity: 1; } }
+@keyframes node-shake { 25% { transform: translateX(-2px); } 75% { transform: translateX(2px); } }
+@keyframes mark-pop { from { transform: scale(0.4); opacity: 0; } to { transform: none; opacity: 1; } }
+.graph-node.is-new rect { transform-box: fill-box; transform-origin: center; animation: node-grow var(--dur-3) var(--ease-out) both; }
+.graph-node.settled .graph-tick, .graph-node.settled .graph-fail { transform-box: fill-box; transform-origin: center; animation: mark-pop var(--dur-3) var(--ease-out) both; }
+.graph-node.settled.failed rect { animation: node-shake var(--dur-3) var(--ease-in-out) 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-current, .loading-shimmer::after { animation: none !important; }
+  .beat.ping::after { animation: none !important; opacity: 0; }
+  .node-fade { transition: none; }
+  .bar-fill { transition: none; }
+}

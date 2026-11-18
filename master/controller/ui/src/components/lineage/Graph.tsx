@@ -1,6 +1,31 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent, type WheelEvent } from "react";
 import { focusSet, fmtDur, fmtTokens, layoutGraph, spanOf, tokenTotal, type LEdge, type LNode } from "../../lib/lineageGraph";
 
+import { useArrivals } from "../motion/Arrive";
+import "../motion/pages-motion.css";
+
+/** Ids whose state changed since the last snapshot, for ~1s (Settle). Source: the nodes' own state/ended_at.
+ *  The first snapshot is a baseline, so nothing settles on load. */
+function useSettled(nodes: LNode[]): ReadonlySet<string> {
+  const prev = useRef<Map<string, string> | null>(null);
+  const [hot, setHot] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    const next = new Map<string, string>();
+    const changed: string[] = [];
+    for (const n of nodes) {
+      const s = n.ended_at === null ? "running" : n.state;
+      next.set(n.id, s);
+      const before = prev.current?.get(n.id);
+      if (before !== undefined && before !== s) changed.push(n.id);
+    }
+    prev.current = next;
+    if (!changed.length) return;
+    setHot(new Set(changed));
+    setTimeout(() => setHot(new Set()), 1000);
+  }, [nodes]);
+  return hot;
+}
+
 const CARD_W = 220, CARD_H = 64;
 const hue = (agent: string | null) => agent === "claude" ? "graph-claude" : agent === "ollama" ? "graph-ollama" : "graph-codex";
 
@@ -29,6 +54,8 @@ export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[
   const panFromMini = (e: PointerEvent<SVGSVGElement>) => { const r = e.currentTarget.getBoundingClientRect(), x = (e.clientX - r.left) / r.width * layout.width, y = (e.clientY - r.top) / r.height * layout.height; setView((old) => ({ ...old, x: VIEW_W / 2 - x * old.z, y: VIEW_H / 2 - y * old.z })); };
   useEffect(() => { fit(); }, [layout.width, layout.height, size.w, size.h]); // reset only when the graph itself changes
   const hoverNode = hovered ? byId.get(hovered) ?? null : null;
+  const isNew = useArrivals(nodes.map((n) => n.id));
+  const settled = useSettled(nodes);
   return <div className="graph-wrap">
     <div className="graph-actions"><button onClick={fit}>Fit</button><span className="quiet">Scroll to zoom · drag to pan · select a card to focus</span></div>
     <svg ref={svgRef} className={dragging ? "graph-svg dragging" : "graph-svg"} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} onWheel={onWheel} onPointerDown={(e) => down(e)} onPointerMove={move} onPointerUp={() => { drag.current = null; setDragging(false); }} onPointerCancel={() => { drag.current = null; setDragging(false); }}>
@@ -36,7 +63,7 @@ export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[
       <rect width="100%" height="100%" className="graph-bg" /><g transform={`translate(${view.x} ${view.y}) scale(${view.z})`}>
         {layout.groups.map((g) => <g key={g.root}><rect x={g.x} y={g.y} width={g.w} height={g.h} rx="10" className="graph-band"/><text x={g.x + 16} y={g.y + 20} className="graph-band-label">{g.root}</text></g>)}
         {edges.map((e) => { const a = byId.get(e.from), b = byId.get(e.to); if (!a || !b || !layout.place[a.id] || !layout.place[b.id]) return null; const p = at(a.id), q = at(b.id), x1 = p.x + CARD_W, y1 = p.y + CARD_H / 2, x2 = q.x, y2 = q.y + CARD_H / 2, d = `M${x1} ${y1} C${x1 + 48} ${y1} ${x2 - 48} ${y2} ${x2} ${y2}`, failed = a.state === "failed" || b.state === "failed", running = a.ended_at === null || b.ended_at === null, hot = !!selected && focused.has(a.id) && focused.has(b.id); return <g key={`${e.from}-${e.to}`} className={`graph-edge ${failed ? "bad" : running ? "running" : "quiet"}${hot ? " hot" : ""}`}><path d={d} markerEnd={`url(#graph-arrow-${failed ? "bad" : running ? "accent" : "quiet"})`}/>{running && <><circle r="3"><animateMotion dur="1.4s" repeatCount="indefinite" path={d}/></circle><circle r="3"><animateMotion dur="1.4s" begin=".7s" repeatCount="indefinite" path={d}/></circle></>}{(e.link === "retry" || e.link === "fix") && <g transform={`translate(${(x1 + x2) / 2} ${(y1 + y2) / 2 - 12})`} className="graph-link"><rect x="-20" y="-10" width="40" height="18" rx="9"/><text textAnchor="middle" y="3">{e.link}</text></g>}</g>; })}
-        {nodes.map((n) => { const p = at(n.id), s = spanOf(n, now), dim = !!selected && !focused.has(n.id), state = n.state === "failed" ? "failed" : n.state === "cancelled" ? "cancelled" : n.ended_at === null ? "running" : "done"; return <g key={n.id} transform={`translate(${p.x} ${p.y})`} style={{ animationDelay: `${layout.place[n.id].col * 70}ms` }} className={`graph-node ${state} ${hue(n.agent)}${dim ? " dim" : ""}`} tabIndex={0} role="button" onPointerEnter={() => setHovered(n.id)} onPointerLeave={() => setHovered((id) => id === n.id ? null : id)} onPointerDown={(e) => { e.stopPropagation(); down(e, n); }} onClick={(e) => { e.stopPropagation(); onSelect(n); }} onKeyDown={(e) => { if (e.key === "Enter") onSelect(n); }}><rect width={CARD_W} height={CARD_H} rx="10"/><circle cx="20" cy="22" r="11"/><text x="20" y="26" textAnchor="middle" className="graph-initial">{(n.agent ?? "?").slice(0, 1).toUpperCase()}</text><text x="38" y="22" className="graph-title">{trim(n.stage && n.stage !== n.kind ? `${n.kind ?? "task"} · ${n.stage}` : (n.kind ?? n.stage ?? "task"), 21)}</text><text x="38" y="44" className="graph-sub">{trim(`${n.model ?? n.agent ?? "agent"} · ${fmtDur(s.start ? s.end - s.start : s.wait)} · ${fmtTokens(tokenTotal(n.tokens))}`, 31)}</text>{state === "done" && <text x="198" y="25" className="graph-tick">✓</text>}{state === "failed" && <text x="198" y="25" className="graph-fail">×</text>}</g>; })}
+        {nodes.map((n) => { const p = at(n.id), s = spanOf(n, now), dim = !!selected && !focused.has(n.id), state = n.state === "failed" ? "failed" : n.state === "cancelled" ? "cancelled" : n.ended_at === null ? "running" : "done"; return <g key={n.id} transform={`translate(${p.x} ${p.y})`} style={{ animationDelay: `${layout.place[n.id].col * 70}ms` }} className={`graph-node ${state} ${hue(n.agent)}${dim ? " dim" : ""}${isNew(n.id) ? " is-new" : ""}${settled.has(n.id) ? " settled" : ""}`} tabIndex={0} role="button" onPointerEnter={() => setHovered(n.id)} onPointerLeave={() => setHovered((id) => id === n.id ? null : id)} onPointerDown={(e) => { e.stopPropagation(); down(e, n); }} onClick={(e) => { e.stopPropagation(); onSelect(n); }} onKeyDown={(e) => { if (e.key === "Enter") onSelect(n); }}><rect width={CARD_W} height={CARD_H} rx="10"/><circle cx="20" cy="22" r="11"/><text x="20" y="26" textAnchor="middle" className="graph-initial">{(n.agent ?? "?").slice(0, 1).toUpperCase()}</text><text x="38" y="22" className="graph-title">{trim(n.stage && n.stage !== n.kind ? `${n.kind ?? "task"} · ${n.stage}` : (n.kind ?? n.stage ?? "task"), 21)}</text><text x="38" y="44" className="graph-sub">{trim(`${n.model ?? n.agent ?? "agent"} · ${fmtDur(s.start ? s.end - s.start : s.wait)} · ${fmtTokens(tokenTotal(n.tokens))}`, 31)}</text>{state === "done" && <text x="198" y="25" className="graph-tick">✓</text>}{state === "failed" && <text x="198" y="25" className="graph-fail">×</text>}</g>; })}
         {hoverNode && (() => { const p = at(hoverNode.id), s = spanOf(hoverNode, now); return <g className="graph-hover" transform={`translate(${p.x} ${p.y + CARD_H + 8})`}><rect width="238" height="88" rx="8"/><text x="12" y="20" className="graph-hover-title">{trim(hoverNode.title ?? hoverNode.kind ?? "Task attempt", 31)}</text><text x="12" y="39">{hoverNode.state}</text><text x="12" y="57">{trim(hoverNode.model ?? hoverNode.agent ?? "agent", 31)}</text><text x="12" y="75">{fmtDur(s.start ? s.end - s.start : s.wait)} · {fmtTokens(tokenTotal(hoverNode.tokens))} tokens</text></g>; })()}
       </g>
     </svg>

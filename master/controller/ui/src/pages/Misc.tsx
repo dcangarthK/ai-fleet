@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent } from "react";
+import { useState, type ChangeEvent, type ReactElement } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, get, post, put, type NotifyRule } from "../lib/api";
 import { Link } from "react-router-dom";
@@ -7,6 +7,10 @@ import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
 import { Button, Card, Empty, Panel, Select, Table, useConfirm } from "../components/ui";
 import { describeRequest } from "../lib/request";
 import { Terminal } from "../components/Terminal";
+import { SettleCheck } from "../components/motion/MiniGraph";
+import { useArrivals } from "../components/motion/Arrive";
+import { timeGroup } from "../lib/pageMotion";
+import type { FleetEvent } from "../lib/api";
 
 function when(ts: number) {
   return new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -39,6 +43,30 @@ function describe(type: string, data: Record<string, unknown> | null): string {
   return map[type] ?? type;
 }
 
+/** Feed rows. Mounted only once events are loaded, so "arrived later" means a real new event (source: the events feed).
+ *  Time group headers are sticky. */
+function ActivityRows({ all, rows }: { all: FleetEvent[]; rows: FleetEvent[] }) {
+  const isNew = useArrivals(all.map((e) => String(e.id)));
+  const now = Math.floor(Date.now() / 1000);
+  let group = "";
+  const out: ReactElement[] = [];
+  for (const e of rows.slice(0, 500)) {
+    const g = timeGroup(e.ts, now);
+    if (g !== group) {
+      group = g;
+      out.push(<tr key={`g-${g}`}><th colSpan={3} className="small quiet sticky-group" scope="colgroup" style={{ textAlign: "left" }}>{g}</th></tr>);
+    }
+    out.push(
+      <tr key={e.id} className={isNew(String(e.id)) ? "arrive" : undefined}>
+        <td className="small quiet" style={{ whiteSpace: "nowrap" }}>{when(e.ts)}</td>
+        <td>{describe(e.type, e.data)}<div className="sub mono">{e.type}</div></td>
+        <td className="hide-sm">{e.task_id && <Link className="mono small" to={`/tasks?tab=all&task=${e.task_id}`}>{e.task_id}</Link>}</td>
+      </tr>,
+    );
+  }
+  return <tbody>{out}</tbody>;
+}
+
 export function ActivityPage() {
   const events = useEvents();
   const [filter, setFilter] = useState("");
@@ -55,15 +83,7 @@ export function ActivityPage() {
       <div className="panel">
         <table>
           <thead><tr><th>When</th><th>What happened</th><th className="hide-sm">Task</th></tr></thead>
-          <tbody>
-            {rows.slice(0, 500).map((e) => (
-              <tr key={e.id}>
-                <td className="small quiet" style={{ whiteSpace: "nowrap" }}>{when(e.ts)}</td>
-                <td>{describe(e.type, e.data)}<div className="sub mono">{e.type}</div></td>
-                <td className="hide-sm">{e.task_id && <Link className="mono small" to={`/tasks?tab=all&task=${e.task_id}`}>{e.task_id}</Link>}</td>
-              </tr>
-            ))}
-          </tbody>
+          {events.data ? <ActivityRows all={events.data} rows={rows} /> : <tbody />}
         </table>
         {!events.isLoading && rows.length === 0 && <div className="empty">No activity recorded yet.</div>}
       </div>
@@ -127,7 +147,7 @@ function Notifications({ admin }: { admin: boolean }) {
   return (
     <Section title="Notifications" aside="Which events reach your notification plugins">
       <ErrorBanner error={error} onDismiss={clearError} />
-      {sent && <div className="banner note" role="status">{sent}</div>}
+      {sent && <div className="banner note arrive" role="status"><SettleCheck label="Sent" />{sent}</div>}
       <Panel>
         <Table
           caption="Notification rules" rows={rules.data ?? []} rowKey={(r) => r.id}
@@ -186,7 +206,7 @@ function Backup() {
   return (
     <Section title="Backup and restore" aside="Catalog, roles, policies, skills and rules; never tokens">
       <ErrorBanner error={error} onDismiss={clearError} />
-      {done && <div className="banner note" role="status">{done}</div>}
+      {done && <div className="banner note arrive" role="status"><SettleCheck label="Restored" />{done}</div>}
       <div className="row">
         <Button disabled={busy} onClick={download}>Download configuration</Button>
         <label className="row" style={{ gap: 8 }}><span className="small">Restore from a file:</span><input type="file" accept="application/json,.json" onChange={choose} /></label>

@@ -5,6 +5,14 @@
 
 :root {
   color-scheme: light dark;
+  /* Motion tokens (docs/UI-MOTION-SCOPE-2026-11-18.md "Tokens"). */
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+  --dur-count: 600ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
   --bg: light-dark(#fafaf8, #141517);
   --surface: light-dark(#ffffff, #1b1d20);
   --sunken: light-dark(#f2f2ee, #101113);
@@ -714,4 +722,26 @@ a.live-row:hover { background: var(--sunken); }
 /* Wide score tables scroll sideways: keep the model column pinned so the row stays identifiable. */
 .evals-scroll th:first-child, .evals-scroll td:first-child {
   position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line);
+}
+
+/* Motion: reduced-motion tokens, global stop, and the Arrive wash (M1). */
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-1: 0ms; --dur-2: 0ms; --dur-3: 80ms; --dur-count: 0ms; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+@keyframes arrive {
+  from { transform: translateY(4px); background-color: var(--accent-soft); }
+  to { transform: translateY(0); background-color: transparent; }
+}
+@keyframes arrive-reduced {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.arrive { animation: arrive 1.2s var(--ease-out) both; }
+@media (prefers-reduced-motion: reduce) {
+  .arrive { animation: arrive-reduced 80ms linear both !important; }
 }

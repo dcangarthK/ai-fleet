@@ -184,13 +184,14 @@ class G2(unittest.TestCase):
                   "python3 -m unittest $VAR", "python3 -m unittest x > out", "python3 -m unittest x < in",
                   "python3 -m unittest 'a$b'", "python3 -m unittest \"a\\b\"", "python3 -m unittest x || ls",
                   "python3 -m unittest {a,b}", "python3 -m unittest x # c", "python3 -m unittest !x",
-                  "(python3 -m unittest x)", "python3 -m unittest x &"):
+                  "(python3 -m unittest x)", "python3 -m unittest x &",
+                  "python3 -m unittest a | tee out"):  # a pipe into a non-test command is never wrapped (round 3)
             self.assertIsNone(self.run_hook(c), c)
             self.assertFalse(quiet_bash.can_wrap(c), c)
 
     def test_allowlist_still_wrapped(self):
         for c in ("python3 -m unittest a.b", "npx vitest run x", "python3 -m unittest a.b 2>&1",
-                  "scripts/gate.sh && python3 -m unittest 'a b'", "FOO=x python3 -m unittest a | tee out",
+                  "scripts/gate.sh && python3 -m unittest 'a b'", "FOO=x python3 -m unittest a",
                   "python3 -m unittest \"a b\" ; scripts/gate.sh"):
             self.assertIn("--wrap", self.new_cmd(c), c)
 

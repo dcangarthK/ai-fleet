@@ -531,13 +531,19 @@ class QuietBashRepeat(unittest.TestCase):
             cmd = "python3 -m unittest tests/a.py"
             self.run_hook(cmd, d)
             self.run_hook(cmd, d)
-            wrapped = "python3 %s --wrap /tmp/x.log -- %s" % (self.HOOK, cmd)
+            wrapped = "python3 %s --wrap %s -- %s" % (self.HOOK, os.path.join(d, "x.log"), cmd)
             out = self.run_hook(wrapped, d)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_first_direct_wrapper_call_is_left_alone(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d))
+            wrapped = "python3 %s --wrap %s -- python3 -m unittest tests/a.py" % (self.HOOK, os.path.join(d, "x.log"))
+            self.assertIsNone(self.run_hook(wrapped, d))
+
+    def test_a_wrapper_call_with_a_logfile_outside_the_job_dir_is_not_exempt(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_non_test_commands_are_never_counted(self):
         with tempfile.TemporaryDirectory() as d:

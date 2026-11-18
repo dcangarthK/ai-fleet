@@ -302,6 +302,9 @@ def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[d
         if budget.rule0_blocks(agent, resolved, task.get("kind") or "draft") or \
                 budget.rule0_blocks(agent, key, task.get("kind") or "draft"):
             continue  # rule 0, whatever the fallbacks say
+        if budget.model_guard(agent, resolved, task.get("kind") or "draft", None) or \
+                budget.model_guard(agent, key, task.get("kind") or "draft", None):
+            continue  # model guard (spec G1.6): a fallback on a refused identity is skipped
         ident = budget.identity(agent, resolved)
         for slot in tasks.node_slots(node, agent, flags):
             if not tasks.usable(slot) or (agent, model, slot["account"]) in seen or slot["account"] in frozen:

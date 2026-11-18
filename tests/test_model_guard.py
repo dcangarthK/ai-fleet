@@ -196,5 +196,35 @@ class ModelGuardHttpTests(unittest.TestCase):
         self.assertTrue(json.loads(rows[0][0])["routed_why"].startswith("owner override: "))
 
 
+class ModelGuardHandoffTests(unittest.TestCase):
+    def test_limit_handoff_skips_a_fallback_onto_a_guard_refused_identity(self):
+        import handoff
+        import tasks
+        node = {"id": "master", "runner": {"agents": {"codex": True, "claude": True}}}
+        task = {"id": "t-x", "agent": "codex", "model": None, "kind": "build", "budget_key": "codex"}
+        rules = {"limits": {"allow_cross_vendor": True,
+                            "fallbacks": {"codex": ["claude:claude-fable-5-2", "claude:claude-opus-5-5"]}}}
+        slot = {"account": "a1", "profile": "p", "label": "l"}
+        with mock.patch.object(tasks, "node_of", return_value=node), \
+                mock.patch.object(tasks, "profile_support", return_value=True), \
+                mock.patch.object(handoff, "_offline", return_value=False), \
+                mock.patch.object(tasks, "signed_out", return_value=set()), \
+                mock.patch.object(tasks, "node_slots", return_value=[slot]), \
+                mock.patch.object(tasks, "usable", return_value=True), \
+                mock.patch.object(budget, "held_accounts", return_value=set()), \
+                mock.patch.object(budget, "task_account", return_value="src"), \
+                mock.patch.object(budget, "limit_snapshot", return_value={}), \
+                mock.patch.object(budget, "blocked_by", return_value=(0, None)), \
+                mock.patch.object(budget, "running_count", return_value=0), \
+                mock.patch.object(budget, "match_key", side_effect=lambda r, a, m: f"{a}:{m}"), \
+                mock.patch.object(budget, "kind_allowed", return_value=True), \
+                mock.patch.object(budget, "node_default_model", return_value="gpt-5.6-terra"), \
+                mock.patch.object(budget, "rule0_blocks", return_value=None):
+            out = handoff.candidate_slots(task, rules, now=0)
+        # Only the source's own Codex target may remain; the Fable and Opus fallbacks are skipped.
+        self.assertEqual([(c["agent"], c["model"]) for c in out], [("codex", None)])
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ class G2(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.wt = os.path.realpath(self.tmp.name)
+        self.log = os.path.join(self.wt, "l.log")
         for key, val in (("CLAUDE_PROJECT_DIR", self.wt), ("FLEET_JOB_DIR", self.wt)):
             old = os.environ.get(key)
             os.environ[key] = val
@@ -97,17 +98,17 @@ class G2(unittest.TestCase):
         q = os.path.abspath(quiet_bash.__file__)
         good = quiet_bash.rewrite_command("python3 -m unittest x", os.path.join(self.wt, "l.log"))
         self.assertIsNone(self.run_hook(good))
-        self.assertIsNone(self.run_hook(quiet_bash.rewrite_command("git diff", "/tmp/l.log", "--head")))
+        self.assertIsNone(self.run_hook(quiet_bash.rewrite_command("git diff", os.path.join(self.wt, "l.log"), "--head")))
         for c in ("cd /etc && cat x; : quiet_bash.py --wrap",
                   "cd /etc && cat x; : quiet_bash.py --head",
-                  "python3 %s --wrap /tmp/l -- ls; cd /etc; cat x" % q,
+                  "python3 %s --wrap %s -- ls; cd /etc; cat x" % (q, self.log),
                   "cd /etc; %s" % good):
             self.asks(c)
         # trailing command after the wrapper: not trusted, so not exempt from heredoc checks either
-        h = self.run_hook("python3 %s --wrap /tmp/l -- ls; cat > f <<EOF\nx\nEOF" % q)
+        h = self.run_hook("python3 %s --wrap %s -- ls; cat > f <<EOF\nx\nEOF" % (q, self.log))
         self.assertEqual(h["permissionDecision"], "deny")
         # another copy of the script is not trusted
-        self.asks("cd /etc && python3 /tmp/quiet_bash.py --wrap /tmp/l -- ls")
+        self.asks("cd /etc && python3 /tmp/quiet_bash.py --wrap %s -- ls" % self.log)
 
     def test_wrapper_repeat_still_counted(self):
         good = quiet_bash.rewrite_command("python3 -m unittest zz", os.path.join(self.wt, "l.log"))
@@ -120,9 +121,8 @@ class G2(unittest.TestCase):
                   "python3 -m unittest x\ncat ~/.ssh/id_rsa", "python3 -m unittest x $(cat ~/.ssh/id_rsa)",
                   "python3 -m unittest x `id`"):
             self.assertIsNone(self.run_hook(c), c)  # left unchanged, no wrap
-        c = self.new_cmd("cd %s && python3 -m unittest a; cat ~/.ssh/id_rsa" % self.wt)
-        self.assertEqual(c, "cd %s && python3 -m unittest a; cat ~/.ssh/id_rsa" % self.wt)
-        self.assertNotIn("--wrap", c)
+        # after a cd, a rest that fails the allowlist (here `~`) asks instead of being rewritten
+        self.asks("cd %s && python3 -m unittest a; cat ~/.ssh/id_rsa" % self.wt)
 
     def test_all_test_segments_wrapped(self):
         c = self.new_cmd("python3 -m unittest a && scripts/gate.sh")
@@ -163,18 +163,73 @@ class G2(unittest.TestCase):
     def test_wrapper_inner_must_be_a_test_command(self):  # HIGH-B
         q = os.path.abspath(quiet_bash.__file__)
         for inner in ("cd /etc && cat x", "cat ~/.ssh/id_rsa", "python3 -m unittest x; cat y", "ls"):
-            self.asks("python3 %s --wrap /tmp/l -- %s" % (q, shlex.quote(inner)))
-        self.asks("python3 %s --head /tmp/l -- 'cat ~/x'" % q)
-        self.asks("python3 %s --head /tmp/l -- 'git diff x; ls'" % q)
+            self.asks("python3 %s --wrap %s -- %s" % (q, self.log, shlex.quote(inner)))
+        self.asks("python3 %s --head %s -- 'cat ~/x'" % (q, self.log))
+        self.asks("python3 %s --head %s -- 'git diff x; ls'" % (q, self.log))
         # behind an in-tree cd too
-        self.asks("cd %s && python3 %s --wrap /tmp/l -- 'cat x'" % (self.wt, q))
+        self.asks("cd %s && python3 %s --wrap %s -- 'cat x'" % (self.wt, q, self.log))
         # valid ones still pass
-        self.assertIsNone(self.run_hook("python3 %s --head /tmp/l -- 'git diff'" % q))
-        self.assertIn("--wrap", self.new_cmd("cd %s && python3 %s --wrap /tmp/l -- 'python3 -m unittest x'" % (self.wt, q)))
+        self.assertIsNone(self.run_hook("python3 %s --head %s -- 'git diff'" % (q, self.log)))
+        self.assertIn("--wrap", self.new_cmd("cd %s && python3 %s --wrap %s -- 'python3 -m unittest x'" % (self.wt, q, self.log)))
 
     def test_heredoc_after_keywords_denied(self):  # LOW-C
         for c in ("if true; then cat > f <<EOF\nhi\nEOF", "{ cat > f <<EOF\nhi\nEOF", "for i in 1; do cat > f <<EOF\nhi\nEOF",
                   "if false; then :; else tee f <<EOF\nhi\nEOF", "! cat > f <<EOF\nhi\nEOF"):
+            h = self.run_hook(c)
+            self.assertEqual(h and h.get("permissionDecision"), "deny", c)
+
+    def test_allowlist_not_wrapped(self):  # round 5 HIGH
+        for c in ("python3 -m unittest x $'a\\'b' ; cat ~/.ssh/id_rsa", "python3 -m unittest x $'a\\'b' ; ls",
+                  "python3 -m unittest a*", "python3 -m unittest a?", "python3 -m unittest ~/x",
+                  "python3 -m unittest $VAR", "python3 -m unittest x > out", "python3 -m unittest x < in",
+                  "python3 -m unittest 'a$b'", "python3 -m unittest \"a\\b\"", "python3 -m unittest x || ls",
+                  "python3 -m unittest {a,b}", "python3 -m unittest x # c", "python3 -m unittest !x",
+                  "(python3 -m unittest x)", "python3 -m unittest x &"):
+            self.assertIsNone(self.run_hook(c), c)
+            self.assertFalse(quiet_bash.can_wrap(c), c)
+
+    def test_allowlist_still_wrapped(self):
+        for c in ("python3 -m unittest a.b", "npx vitest run x", "python3 -m unittest a.b 2>&1",
+                  "scripts/gate.sh && python3 -m unittest 'a b'", "FOO=x python3 -m unittest a | tee out",
+                  "python3 -m unittest \"a b\" ; scripts/gate.sh"):
+            self.assertIn("--wrap", self.new_cmd(c), c)
+
+    def test_wrapper_inner_allowlist_asks(self):
+        q = os.path.abspath(quiet_bash.__file__)
+        for inner in ("python3 -m unittest x $'a\\'b' ; ls", "python3 -m unittest a*", "python3 -m unittest ~/x",
+                      "python3 -m unittest $V", "python3 -m unittest x > o"):
+            self.asks("python3 %s --wrap %s -- %s" % (q, self.log, shlex.quote(inner)))
+
+    def test_cd_rest_must_pass_allowlist(self):
+        os.makedirs(os.path.join(self.wt, "a"))
+        for c in ("cd a && echo $HOME", "cd a && ls *.py", "cd a && cat ~/x", "cd a && ls > f", "cd a; ls &",
+                  "cd a && python3 -m unittest x $'a\\'b' ; ls", "cd a && ls $(id)"):
+            self.asks(c)
+        self.assertEqual(self.new_cmd("cd a && ls 'x y' | head"), "cd %s && ls 'x y' | head" % os.path.join(self.wt, "a"))
+
+    def test_test_re_end_and_path(self):
+        for c in ("vitest/../x", "scripts/gate.sh.evil", "python3 -m unittest.evil", "npx vitest-evil"):
+            self.assertFalse(quiet_bash.is_test_command(c), c)
+        for c in ("vitest", "npx vitest run", "scripts/gate.sh", "python3 -m unittest"):
+            self.assertTrue(quiet_bash.is_test_command(c), c)
+
+    def test_bad_logfile_asks(self):
+        q = os.path.abspath(quiet_bash.__file__)
+        for log in ("/tmp/l", "/etc/passwd", "rel.log", os.path.join(self.wt, "..", "x.log"),
+                    os.path.join(self.wt, "a", "..", "..", "x.log")):
+            self.asks("python3 %s --wrap %s -- 'python3 -m unittest x'" % (q, log))
+            self.asks("python3 %s --head %s -- 'git diff'" % (q, log))
+        link = os.path.join(self.wt, "lnk")
+        os.symlink("/tmp", link)
+        self.asks("python3 %s --wrap %s -- 'python3 -m unittest x'" % (q, os.path.join(link, "l.log")))
+
+    def test_heredoc_after_exec_prefixes_denied(self):
+        for pre in ("env X=1 ", "timeout 5 ", "nohup ", "exec ", "env -i X=1 ", "timeout -s KILL 5 ",
+                    "exec env X=1 timeout 5 ", "ls && nohup "):
+            c = pre + "cat > f <<EOF\nhi\nEOF"
+            h = self.run_hook(c)
+            self.assertEqual(h and h.get("permissionDecision"), "deny", c)
+            c = pre + "tee f <<EOF\nhi\nEOF"
             h = self.run_hook(c)
             self.assertEqual(h and h.get("permissionDecision"), "deny", c)
 

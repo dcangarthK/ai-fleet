@@ -403,7 +403,10 @@ def hook_output(payload):
     if action == "rewrite":
         if not strict_ok(rest):
             return CD_REST_ASK
-        prefix, body = "cd %s %s " % (shlex.quote(target), sep), rest
+        if os.path.realpath(target) == worktree_root(payload):
+            prefix, body = "", rest  # spec G2.1: cd to the root itself is a no-op
+        else:
+            prefix, body = "cd %s %s " % (shlex.quote(target), sep), rest
         wstate = wrapper_state(body)
     if wstate and wstate[0] == "bad":
         return WRAPPER_ASK

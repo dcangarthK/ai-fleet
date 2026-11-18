@@ -37,9 +37,9 @@ class G2(unittest.TestCase):
         self.assertNotIn("updatedInput", h, cmd)
 
     def test_strip_root(self):
-        # MED-3: the cd is always kept, as an absolute path (the shell's cwd may differ from the payload's)
-        self.assertEqual(self.new_cmd("cd %s && ls" % self.wt), "cd %s && ls" % self.wt)
-        self.assertEqual(self.new_cmd("cd %s; ls src | head" % self.wt), "cd %s ; ls src | head" % self.wt)
+        # G2.1: a cd that resolves to the worktree root is stripped entirely
+        self.assertEqual(self.new_cmd("cd %s && ls" % self.wt), "ls")
+        self.assertEqual(self.new_cmd("cd %s; ls src | head" % self.wt), "ls src | head")
 
     def test_subdir_absolute_and_separator_kept(self):
         ui = os.path.join(self.wt, "master", "controller", "ui")
@@ -55,7 +55,7 @@ class G2(unittest.TestCase):
         os.makedirs(os.path.join(sub, "inner"))
         inner = os.path.join(sub, "inner")
         self.assertEqual(self.new_cmd("cd inner && ls", cwd=sub), "cd %s && ls" % inner)
-        self.assertEqual(self.new_cmd("cd .. && ls", cwd=sub), "cd %s && ls" % self.wt)
+        self.assertEqual(self.new_cmd("cd .. && ls", cwd=sub), "ls")
         self.assertEqual(self.new_cmd("cd . && ls", cwd=sub), "cd %s && ls" % sub)
         self.asks("cd ../.. && ls", cwd=sub)
 

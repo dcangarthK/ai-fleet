@@ -12,6 +12,8 @@ export interface Column<T> {
   truncate?: boolean;
   /** Hide this column in the stacked layout. */
   hideStacked?: boolean;
+  /** Hide this column above the stacked layout. */
+  hideWide?: boolean;
 }
 
 /**
@@ -34,7 +36,7 @@ export function Table<T>({ columns, rows, rowKey, onRowClick, selectedKey, capti
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c.key} scope="col" className={cx(c.numeric && "n")}>{c.header}</th>
+              <th key={c.key} scope="col" className={cx(c.numeric && "n", c.hideWide && "hide-wide")}>{c.header}</th>
             ))}
           </tr>
         </thead>
@@ -46,7 +48,7 @@ export function Table<T>({ columns, rows, rowKey, onRowClick, selectedKey, capti
                 key={key}
                 className={cx(onRowClick && "click", selectedKey === key && "selected")}
                 tabIndex={onRowClick ? 0 : undefined}
-                aria-selected={onRowClick ? selectedKey === key : undefined}
+                aria-current={onRowClick && selectedKey === key ? "true" : undefined}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 onKeyDown={onRowClick ? (e) => {
                   if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
@@ -59,7 +61,7 @@ export function Table<T>({ columns, rows, rowKey, onRowClick, selectedKey, capti
                   <td
                     key={c.key}
                     data-label={c.label ?? (typeof c.header === "string" ? c.header : "")}
-                    className={cx(c.numeric && "n", c.truncate && "cell-trunc", c.hideStacked && "hide-sm")}
+                    className={cx(c.numeric && "n", c.truncate && "cell-trunc", c.hideStacked && "hide-sm", c.hideWide && "hide-wide")}
                   >
                     {c.truncate ? <span className="trunc" style={{ maxWidth: "100%" }}>{c.cell(row)}</span> : c.cell(row)}
                   </td>

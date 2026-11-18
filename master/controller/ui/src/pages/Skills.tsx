@@ -4,6 +4,7 @@ import { del, get, post, put, type Scope, type Skill } from "../lib/api";
 import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import { SettleCheck } from "../components/motion/MiniGraph";
 
 const AGENTS = ["claude", "codex", "ollama"] as const;
 const BLANK = { id: "", description: "", agents: [...AGENTS] as Skill["agents"], body: "" };
@@ -83,7 +84,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
     <Section title={isNew ? "New skill" : `Skill: ${skill.id}`} aside={!isNew && "version" in skill ? `version ${skill.version}` : undefined}>
       <form className="panel" style={{ padding: 16 }} onSubmit={save}>
         <ErrorBanner error={error} onDismiss={clearError} />
-        {saved && <div className="banner note" role="status">{saved}</div>}
+        {saved && <div className="banner note settle-pop" role="status"><SettleCheck />{saved}</div>}
         <div className="grid-form">
           <label className="field">Id
             <input className="mono" value={id} onChange={(e) => setId(e.target.value)} disabled={!isNew} required pattern="[a-z][a-z0-9-]{1,40}" title="Lowercase letters, digits and dashes" />
@@ -105,7 +106,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
         </label>
         <div className="row" style={{ marginTop: 12 }}>
           {can.admin && <button className="primary" disabled={busy || !agents.length}>{isNew ? "Create skill" : "Save new version"}</button>}
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
         </div>
 
         {!isNew && (

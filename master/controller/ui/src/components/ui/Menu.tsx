@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { Button, type ButtonProps } from "./Button";
 import { cx } from "./util";
 
@@ -22,16 +22,27 @@ export function Menu({ label, items, align = "right", variant = "secondary", siz
   const wrap = useRef<HTMLDivElement>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const id = useId();
+  // Fixed positioning keeps the popup from being clipped by a scrolling panel or table wrapper.
+  const [pos, setPos] = useState<CSSProperties>({});
 
   const enabled = () => Array.from(wrap.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
 
   useEffect(() => {
     if (!open) return;
+    const r = btn.current?.getBoundingClientRect();
+    if (r) setPos(align === "left" ? { top: r.bottom + 4, left: r.left } : { top: r.bottom + 4, right: window.innerWidth - r.right });
     enabled()[0]?.focus();
     const away = (e: MouseEvent) => { if (!wrap.current?.contains(e.target as Node)) setOpen(false); };
+    const close = () => setOpen(false);
     document.addEventListener("mousedown", away);
-    return () => document.removeEventListener("mousedown", away);
-  }, [open]);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [open, align]);
 
   function onKey(e: KeyboardEvent) {
     const els = enabled();
@@ -54,7 +65,7 @@ export function Menu({ label, items, align = "right", variant = "secondary", siz
         {label}
       </Button>
       {open && (
-        <div className={cx("menu", align === "left" && "left")} role="menu" id={id} onKeyDown={onKey}>
+        <div className="menu" style={pos} role="menu" id={id} onKeyDown={onKey}>
           {items.map((it) => (
             <button
               key={it.id} type="button" role="menuitem" disabled={it.disabled} className={cx(it.danger && "danger")}

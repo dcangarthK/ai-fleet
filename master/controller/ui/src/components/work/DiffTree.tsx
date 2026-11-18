@@ -23,7 +23,7 @@ export function DiffTree({ taskId }: { taskId: string }) {
   }
 
   return (
-    <div className="stack" style={{ gap: 8 }}>
+    <div className="stack tight">
       <ErrorBanner error={error} onDismiss={clearError} />
       {!shown && <div><Button disabled={busy} onClick={load}>Show changes</Button></div>}
       {shown && files.length === 0 && <p className="muted">This attempt has no changes.</p>}

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Button } from "./Button";
+import { Button, IconButton } from "./Button";
 import { cx } from "./util";
 
 const FOCUSABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
@@ -62,10 +62,10 @@ export function Dialog({ open, onClose, title, hideTitle, size = "md", footer, c
         {title && !hideTitle && (
           <div className="dlg-head">
             <h2 id={titleId}>{title}</h2>
-            <Button variant="ghost" size="sm" aria-label="Close dialog" onClick={onClose}>Close</Button>
+            <IconButton label="Close" className="dlg-close" onClick={onClose}><span aria-hidden="true">×</span></IconButton>
           </div>
         )}
-        <div className="dlg-body" style={size === "palette" ? { padding: 0 } : undefined}>{children}</div>
+        <div className="dlg-body">{children}</div>
         {footer && <div className="dlg-foot">{footer}</div>}
       </div>
     </div>,

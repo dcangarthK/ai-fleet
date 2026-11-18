@@ -5,7 +5,10 @@ import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
 import { describeRequest } from "../lib/request";
-import { Button, Empty, Panel, Table, useConfirm, type Column } from "../components/ui";
+import "../components/motion/pages-motion.css";
+import { useLiveSignal } from "../components/motion/useLiveSignal";
+import { useVisible } from "../components/motion/useVisible";
+import { Button, Empty, Panel, ProgressBar, Table, useConfirm, type Column } from "../components/ui";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
 
@@ -43,7 +46,7 @@ export function ModelsPage() {
     { key: "model", header: "Model", cell: (m) => (
       <>
         <b>{m.display_name || m.reference}</b>
-        <div className="sub mono wrap-any">{m.reference}</div>
+        {(m.display_name && m.display_name !== m.reference) && <div className="sub mono wrap-any">{m.reference}</div>}
         {roleTags(assignments.filter((a) => a.model === m.reference).map((a) => a.role))}
         {m.trusted_reviewer && <span className="tag tone-ok" title={TRUSTED_RULE} tabIndex={0}>Trusted reviewer</span>}
         {m.derived_trusted_reviewer && (
@@ -59,10 +62,12 @@ export function ModelsPage() {
     ) },
     { key: "size", header: "Size", numeric: true, hideStacked: true, cell: (m) => (m.download_gb ? `${m.download_gb.toFixed(1)} GB` : "—") },
     { key: "evals", header: "Eval scores", hideStacked: true, cell: (m) => <span className="small">{scores(m.evals)}</span> },
+    { key: "availability", header: "On nodes", hideWide: true, cell: (m) => <span className="small">{nodes.filter((n) => m.nodes[n.id]?.installed || m.nodes[n.id]?.state === "ready").map((n) => n.name).join(", ") || <span className="quiet">Not installed</span>}</span> },
     ...nodes.map((n): Column<CatalogModel> => ({
       key: `node-${n.id}`,
       header: <span className="row" style={{ gap: "var(--s2)" }}><NodeLight node={n} />{n.name}</span>,
       label: n.name,
+      hideStacked: true,
       cell: (m) => (
         <InstallCell state={m.nodes[n.id]} busy={busy || !can.operate}
           onInstall={() => setInstalling({ model: m, node: n.id })}
@@ -133,15 +138,6 @@ function scores(evals: Record<string, number> | null): ReactNode {
   ));
 }
 
-function ProgressBar({ value }: { value: number | null }) {
-  return (
-    <span className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100}
-          aria-valuenow={value == null ? undefined : Math.round(value * 100)}>
-      <span style={{ width: value == null ? "30%" : `${Math.round(value * 100)}%` }} className={value == null ? "indeterminate" : ""} />
-    </span>
-  );
-}
-
 function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
   state: NodeModelState | undefined;
   busy: boolean;
@@ -149,13 +145,16 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
   onRemove: () => void;
   onRetry: () => void;
 }) {
+  const visible = useVisible();
+  const settled = useLiveSignal(state?.state, 400); // Settle: the node's reported install state just changed
   if (!state) return <span className="quiet">—</span>;
   const fit = FIT_LABEL[state.fit] ?? FIT_LABEL.unknown;
   const s = state.state ?? undefined;
   if (s && BUSY.has(s)) {
     const frac = progressFraction(state.progress);
     return (
-      <div className="small">
+      // Think: the load shimmer runs only while the node reports a busy load state; paused when the tab is hidden.
+      <div className={`small loading-shimmer${visible ? "" : " paused"}`}>
         <span className={`state tone-${INSTALL_LABEL[s].tone}`}>{INSTALL_LABEL[s].label}{frac != null && ` ${Math.round(frac * 100)}%`}</span>
         <ProgressBar value={s === "pulling" ? frac : null} />
       </div>
@@ -173,7 +172,7 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
   if (state.installed || s === "ready") {
     return (
       <div className="small">
-        <span className="state tone-ok">Installed</span>
+        <span className={`state tone-ok${settled ? " settle-pop" : ""}`}>Installed</span>
         {state.ownership === "pre-existing" && <div className="sub">was already on the node</div>}
         <div><Button variant="ghost" size="sm" disabled={busy} onClick={onRemove}>Remove</Button></div>
       </div>

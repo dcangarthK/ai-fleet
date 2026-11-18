@@ -1,4 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
+import "../components/motion/pages-motion.css";
+import { useVisible } from "../components/motion/useVisible";
 import { Link } from "react-router-dom";
 import { del, post, put, type Assignment, type FleetNode } from "../lib/api";
 import { useCan, useFleet, useModels, useRun } from "../lib/data";
@@ -73,6 +75,12 @@ export function RolesPage() {
     return list.map((a, i) => ({ key: r + a.node_id + a.model, role: r, first: i === 0, a: a as Assignment | null, st: routing(a, fleet.data?.nodes.find((x) => x.id === a.node_id), reasonFor(a)) }));
   });
 
+  // Arrive: a role-to-model pairing that appeared after the first load (the reassigned model chip slides in).
+  const seen = useRef<ReadonlySet<string> | null>(null);
+  if (seen.current === null && fleet.data) seen.current = new Set(rows.map((r) => r.key));
+  const isNew = (key: string) => seen.current !== null && !seen.current.has(key);
+  const visible = useVisible();
+
   return (
     <>
       <PageHead
@@ -89,9 +97,9 @@ export function RolesPage() {
           rowKey={(r) => r.key}
           columns={[
             { key: "role", header: "Role", cell: (r) => (r.first ? <b>{r.role}</b> : null) },
-            { key: "model", header: "Model", cell: (r) => r.a ? <span className="mono">{r.a.model}</span> : <span className="quiet">No model assigned. Calls to this role fail until you assign one.</span> },
+            { key: "model", header: "Model", cell: (r) => r.a ? <span className={`mono${isNew(r.key) ? " arrive" : ""}`} style={{ display: "inline-block" }}>{r.a.model}</span> : <span className="quiet">No model assigned. Calls to this role fail until you assign one.</span> },
             { key: "node", header: "Node", cell: (r) => r.a ? (r.a.node ?? r.a.node_id) : null },
-            { key: "routing", header: "Routing", cell: (r) => r.st ? <><span className={`state tone-${r.st.tone}`}>{r.st.label}</span>{r.st.why && <div className="sub" style={{ maxWidth: 300 }}>{r.st.why}</div>}</> : null },
+            { key: "routing", header: "Routing", cell: (r) => r.st ? <><span className={`state tone-${r.st.tone}${r.a?.state === "pending_install" ? ` loading-shimmer${visible ? "" : " paused"}` : ""}`}>{r.st.label}</span>{r.st.why && <div className="sub" style={{ maxWidth: 300 }}>{r.st.why}</div>}</> : null },
             { key: "act", header: "Actions", label: "", cell: (r) => r.a && can.admin ? <Button size="sm" variant="danger" disabled={busy} onClick={() => remove(r.a!)}>Remove</Button> : null },
           ]}
         />

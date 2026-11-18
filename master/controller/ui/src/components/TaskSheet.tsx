@@ -5,7 +5,7 @@ import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../li
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
 import { Terminal } from "./Terminal";
-import { Button, Dialog, Field, Input, useConfirm } from "./ui";
+import { Button, Dialog, Field, IconButton, Input, useConfirm } from "./ui";
 import { isCommitHash } from "../lib/work";
 import { displayOf } from "../lib/lineage";
 import { handoffSlotName, plannedText, type HandoffSlot } from "../lib/handoff";
@@ -43,10 +43,10 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
     <dialog ref={ref} className="sheet" aria-labelledby="sheet-title" onClose={onClose}
             onClick={(e) => e.target === e.currentTarget && onClose()}>
         <div className="sheet-head">
-          <div style={{ minWidth: 0 }}>
+          <div className="min-w-0">
             <h2 id="sheet-title">{task?.title ?? "Loading task…"}</h2>
             {task && (
-              <div className="row small quiet" style={{ marginTop: 4 }}>
+              <div className="row small quiet mt-1">
                 <StateLabel state={task.state} />
                 {task.display && <StatusPill display={task.display} />}
                 <span>{task.agent}{task.model ? ` (${task.model})` : ""} on {nodeName(nodes, task.node_id)}</span>
@@ -55,19 +55,18 @@ export function TaskSheet({ id, onClose }: { id: string; onClose: () => void }) 
               </div>
             )}
           </div>
-          <button type="button" onClick={onClose} autoFocus aria-label="Close task details">Close</button>
+          <IconButton label="Close" className="dlg-close" onClick={onClose} autoFocus><span aria-hidden="true">×</span></IconButton>
         </div>
         <div className="sheet-body">
           <ErrorBanner error={error instanceof Error ? error.message : null} />
           <ErrorBanner error={actionError} onDismiss={clearError} />
           {task && <TaskBody task={task} busy={busy} act={act} diff={diff} loadDiff={() => run(async () => setDiff(await get(`/api/tasks/${id}/diff`)))} />}
           {task && can.operate && taskActions(task).message && (
-            <form onSubmit={send} className="row" style={{ marginTop: 8 }}>
-              <label className="field" style={{ flex: 1, minWidth: 220 }}>
-                Follow-up instructions (resumes the same session)
-                <input value={message} onChange={(e) => setMessage(e.target.value)} required />
-              </label>
-              <button className="primary" disabled={busy || !message.trim()} style={{ alignSelf: "flex-end" }}>Send</button>
+            <form onSubmit={send} className="row end mt-2">
+              <Field className="grow" label="Follow-up instructions (resumes the same session)">
+                {(p) => <Input {...p} name="message" autoComplete="off" value={message} onChange={(e) => setMessage(e.target.value)} required />}
+              </Field>
+              <Button type="submit" variant="primary" disabled={busy || !message.trim()}>Send</Button>
             </form>
           )}
           <h3>Agent activity</h3>
@@ -114,12 +113,12 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
     <>
       <Dialog open={elsewhere} onClose={() => setElsewhere(false)} title="Mark done elsewhere"
         footer={<><Button onClick={() => setElsewhere(false)}>Cancel</Button><Button variant="primary" disabled={!!byErr || !!commitErr} onClick={submitElsewhere}>Continue</Button></>}>
-        <div className="stack" style={{ gap: 8 }}>
+        <div className="stack tight">
           <Field label="Who finished this?" hint="For example: Sonnet 5.5 (orchestrator session)">{(p) => <Input {...p} value={by} onChange={(e) => setBy(e.target.value)} />}</Field>
           <Field label="Commit (optional)" error={commitErr}>{(p) => <Input {...p} value={commit} placeholder="7 to 40 hex characters" onChange={(e) => setCommit(e.target.value)} />}</Field>
         </div>
       </Dialog>
-      <div className="row" style={{ marginBottom: 14 }}>
+      <div className="row mb-3">
         {can.approve && <button className="primary" disabled={busy} onClick={() => act("approve")}>Approve</button>}
         {can.reject && <button className="danger" disabled={busy} onClick={() => act("reject")}>Reject</button>}
         {can.cancel && <button className="danger" disabled={busy} onClick={() => act("cancel")}>Cancel task</button>}

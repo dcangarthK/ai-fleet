@@ -65,7 +65,7 @@ export function Palette({ open, onClose }: { open: boolean; onClose: () => void 
         {groups.map((g) => (
           <li key={g.name} role="presentation">
             <h3 className="palette-group">{g.name}</h3>
-            <ul role="presentation" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            <ul role="presentation" className="list-reset">
               {g.items.map(({ item, index }) => (
                 <li
                   key={item.id} id={`${listId}-${index}`} role="option" aria-selected={index === active} className="palette-item"

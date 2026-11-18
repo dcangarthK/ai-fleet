@@ -6,6 +6,7 @@ import "../components/now/intentProvider";
 import { Anomalies, Briefing, Forecasts, NextActions, Operations, Section } from "../components/now/Sections";
 import { useNowData } from "../components/now/data";
 import "../components/now/now.css";
+import { Constellation } from "../components/motion/Constellation";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRun } from "../lib/data";
 import { anomalies, briefing, forecasts, nextActions } from "../lib/insights";
@@ -28,6 +29,7 @@ export function NowPage() {
   return (
     <>
       <PageHead title="Now" intro="What needs you, what is likely next, and the state of the fleet. Every proposal shows its evidence and waits for your confirmation." />
+      <Constellation fleet={d.fleet.data} live={d.live.data} />
       <IntentHost onError={onIntentError} />
       <div className="now">
         <ErrorBanner error={runError ?? intentError} onDismiss={() => { clearError(); setIntentError(null); }} />

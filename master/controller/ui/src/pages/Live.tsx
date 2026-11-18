@@ -1,10 +1,17 @@
 // Live (docs/SPEC-live-monitor.md 5): who is doing what, where, with which model, on which account, right now.
 // Read-only: actions stay on the existing pages, which every row links to. The one button, "Check now", only asks a
 // node's runner to re-read its firewall state (no change is applied).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, post } from "../lib/api";
+import { useEvents } from "../lib/data";
+import { announce } from "../components/motion/announce";
+import { useArrivals } from "../components/motion/Arrive";
+import { useCountUp } from "../components/motion/useCountUp";
+import { MiniGraph } from "../components/motion/MiniGraph";
+import "../components/motion/pages-motion.css";
+import { departed, eventsPerMinute } from "../lib/pageMotion";
 import { LoadError, PageHead, Section } from "../components/bits";
 import { ago, duration } from "../lib/format";
 import { clockTime } from "../lib/budget";
@@ -35,6 +42,42 @@ function usePhone(): boolean {
   return phone;
 }
 
+/** A number that counts to its new value (source: the live snapshot field passed in). KPI-style numbers only. */
+function CountNum({ value }: { value: number }) {
+  return <span style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(useCountUp(value))}</span>;
+}
+
+/** Events per minute over the last 15 minutes, from the same events feed Activity shows. Renders nothing without events. */
+function RateGraph({ now }: { now: number }) {
+  const events = useEvents();
+  const list = events.data ?? [];
+  if (list.length === 0) return null;
+  const series = eventsPerMinute(list.map((e) => e.ts), now, 15);
+  return (
+    <div className="row small quiet" style={{ gap: 8, marginBottom: 8 }}>
+      <span>Events per minute, last 15 min</span>
+      <MiniGraph values={series} label={`Events per minute, last 15 minutes; latest ${series[series.length - 1]}`} />
+    </div>
+  );
+}
+
+/** Rows that just left `items` stay for `ms` with a leaving flag so they can slide out (source: the queue list). */
+function useLeaving<T>(items: T[], key: (t: T) => string, ms = 320): { row: T; leaving: boolean }[] {
+  const prev = useRef<T[]>(items);
+  const [gone, setGone] = useState<T[]>([]);
+  useEffect(() => {
+    const left = departed(prev.current.map(key), items.map(key));
+    const rows = prev.current.filter((r) => left.includes(key(r)));
+    prev.current = items;
+    if (rows.length === 0) return undefined;
+    setGone((g) => [...g, ...rows]);
+    const id = setTimeout(() => setGone((g) => g.filter((r) => !rows.includes(r))), ms);
+    return () => clearTimeout(id);
+  }, [items]); // eslint-disable-line react-hooks/exhaustive-deps
+  const keys = new Set(items.map(key));
+  return [...items.map((row) => ({ row, leaving: false })), ...gone.filter((r) => !keys.has(key(r))).map((row) => ({ row, leaving: true }))];
+}
+
 function useNow(seconds = 5): number {
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {
@@ -62,6 +105,7 @@ export function LivePage() {
       {!data && live.isLoading && <p className="quiet">Loading…</p>}
       {data && (
         <div className="live">
+          <RateGraph now={now} />
           <PresenceSection data={data} now={now} showResolved={showResolved} onShowResolved={setShowResolved} />
           <AccountsSection data={data} />
           <WorkersSection data={data} now={now} phone={phone} />
@@ -117,7 +161,7 @@ function AccountsSection({ data }: { data: Live }) {
           <div key={a.account} className="live-row" title={a.account}>
             <b>{a.agent} · {a.label ?? a.account}</b>
             <span className={`state tone-${accountTone(a)}`}>{a.status}</span>
-            <span className="small">running {a.running}</span>
+            <span className="small">running <CountNum value={a.running} /></span>
             <span className="small quiet">
               since {a.last_limit ? `limit at ${clockTime(a.last_limit.at)}` : "5 h ago"}: in {a.tokens_since.input ?? 0} · out {a.tokens_since.output ?? 0}
               {" "}· cached {a.tokens_since.cached ?? 0}
@@ -241,12 +285,17 @@ function ChainsSection({ data }: { data: Live }) {
 }
 
 function QueueSection({ data, phone }: { data: Live; phone: boolean }) {
+  // Arrive: ids not present on first render. Leave: rows that started slide out right (ease-in).
+  const isNew = useArrivals(data.queue.map((q) => q.task_id));
+  const arrived = data.queue.filter((q) => isNew(q.task_id)).length;
+  useEffect(() => { if (arrived > 0) announce(`${arrived} new queued task${arrived === 1 ? "" : "s"}`); }, [arrived]);
+  const rows = useLeaving(data.queue, (q) => q.task_id);
   return (
     <Section title="Queue" aside={`${data.queue.length} waiting`}>
       {data.queue.length === 0 && <p className="empty panel">Nothing waiting: every task has started or settled.</p>}
       <div className={rowsClass(phone)}>
-        {data.queue.map((q) => (
-          <Link key={q.task_id} to={`/tasks?task=${q.task_id}`} className="live-row">
+        {rows.map(({ row: q, leaving }) => (
+          <Link key={q.task_id} to={`/tasks?task=${q.task_id}`} className={`live-row${leaving ? " row-leave" : isNew(q.task_id) ? " arrive" : ""}`} aria-hidden={leaving || undefined}>
             <b className="live-title">{q.title}</b>
             <span className="small">{q.agent}{q.model ? ` · ${q.model}` : ""}{q.account_label ? ` · ${q.account_label}` : ""}</span>
             <span className={`state small ${q.wait === "approval" ? "tone-warn" : "tone-quiet"}`}>{queueText(q)}</span>
@@ -260,10 +309,11 @@ function QueueSection({ data, phone }: { data: Live; phone: boolean }) {
 
 function Meter({ label, used, total, unit }: { label: string; used: number | null; total: number | null; unit: string }) {
   const f = fill(used, total);
+  const counted = useCountUp(used ?? 0); // Count: source is the machine's reported usage
   const tone = f == null ? "quiet" : f > 0.9 ? "bad" : f > 0.75 ? "warn" : "ok";
   return (
     <span className="live-meter">
-      <span className="small">{label} {used == null ? "unknown" : `${used}${total ? ` / ${total}` : ""} ${unit}`}</span>
+      <span className="small">{label} {used == null ? "unknown" : `${Math.round(counted * 10) / 10}${total ? ` / ${total}` : ""} ${unit}`}</span>
       <span className="meter" role="meter" aria-label={label} aria-valuenow={used ?? undefined} aria-valuemax={total ?? undefined}>
         <span className={`fill tone-bg-${tone}`} style={{ width: `${Math.round((f ?? 0) * 100)}%` }} />
       </span>

@@ -27,18 +27,18 @@ export function Ask({ root }: { root: string }) {
   }
 
   return (
-    <div className="stack" style={{ gap: 8 }}>
+    <div className="stack tight">
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
-      <form className="row" style={{ gap: 8 }} onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
+      <form className="row" onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
         <Input aria-label="Ask about this work" placeholder="Ask about this work" value={q} onChange={(e) => setQ(e.target.value)} />
         <Button type="submit" variant="primary" disabled={busy || !q.trim()}>{busy ? "Asking…" : "Ask"}</Button>
       </form>
-      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+      <div className="row">
         {ASK_SUGGESTIONS.map((s) => <Button key={s} size="sm" disabled={busy} onClick={() => { setQ(s); void ask(s); }}>{s}</Button>)}
       </div>
       {res && (
         <div role="status">
-          <p style={{ whiteSpace: "pre-wrap" }}>
+          <p className="pre-wrap">
             {splitCitations(res.answer).map((p, i) => p.kind === "text" ? <span key={i}>{p.text}</span>
               : <button key={i} type="button" className="mono" aria-label={`Jump to log line ${p.line}`} onClick={() => jumpToLine(p.line)}>L{p.line}</button>)}
           </p>

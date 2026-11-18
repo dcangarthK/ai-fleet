@@ -1,5 +1,8 @@
 import { Fragment, memo, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { parseAnsi, stripAnsi, type AnsiSpan, type ParsedLine } from "../lib/ansi";
+import { useLiveSignal } from "./motion/useLiveSignal";
+import { useVisible } from "./motion/useVisible";
+import "./motion/work-motion.css";
 
 /** Split `text` around case-insensitive matches of `q` (empty q = one plain piece). */
 function pieces(text: string, q: string): { t: string; hit: boolean }[] {
@@ -37,8 +40,8 @@ function withoutPrompt(spans: AnsiSpan[]): AnsiSpan[] {
   return out;
 }
 
-const Line = memo(function Line({ n, line, q, anchorId, selected, current, cursor }: {
-  n: number; line: ParsedLine; q: string; anchorId: string; selected: boolean; current: boolean; cursor: boolean;
+const Line = memo(function Line({ n, line, q, anchorId, selected, current, cursor, streaming, paused }: {
+  n: number; line: ParsedLine; q: string; anchorId: string; selected: boolean; current: boolean; cursor: boolean; streaming: boolean; paused: boolean;
 }) {
   const isCmd = line.plain.startsWith("$ ");
   const spans = isCmd ? withoutPrompt(line.spans) : line.spans;
@@ -53,7 +56,7 @@ const Line = memo(function Line({ n, line, q, anchorId, selected, current, curso
       <span className="term-text">
         {isCmd && <><span className="prompt">$</span>{" "}</>}
         {body}
-        {cursor && <span className="term-cursor" aria-hidden="true" />}
+        {cursor && <span className={`term-cursor${streaming ? "" : " idle"}${paused ? " paused" : ""}`} aria-hidden="true" />}
         {"\n"}
       </span>
     </div>
@@ -83,7 +86,7 @@ export function Terminal({ title, text, live = false, height = 360, idPrefix = "
   const searchId = useId();
   const [follow, setFollow] = useState(live);
   const [atBottom, setAtBottom] = useState(true);
-  const [wrap, setWrap] = useState(defaultWrap);
+  const [wrap, setWrap] = useState(() => defaultWrap || (typeof matchMedia === "function" && matchMedia("(max-width: 640px)").matches));
   const [full, setFull] = useState(false);
   const [copied, setCopied] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -91,6 +94,9 @@ export function Terminal({ title, text, live = false, height = 360, idPrefix = "
   const [cur, setCur] = useState(0);
   const [hash, setHash] = useState(() => (typeof location === "undefined" ? "" : location.hash));
 
+  // Think: the caret blinks only while the output length keeps changing (the log poll is 2s, so hold 2.5s).
+  const streaming = useLiveSignal(text.length, 2500) && live;
+  const visible = useVisible();
   const lines = useMemo(() => (text ? parseAnsi(text) : []), [text]);
   const q = query.toLowerCase();
   const matches = useMemo(() => (q ? lines.flatMap((l, i) => (l.plain.toLowerCase().includes(q) ? [i] : [])) : []), [lines, q]);
@@ -141,7 +147,9 @@ export function Terminal({ title, text, live = false, height = 360, idPrefix = "
     if (!el) return;
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     setAtBottom(bottom);
+    // Scrolling up pauses follow; coming back to the bottom of a live log resumes it.
     if (!bottom && follow) setFollow(false);
+    else if (bottom && live && !follow) setFollow(true);
   }
 
   function jump() {
@@ -233,10 +241,10 @@ export function Terminal({ title, text, live = false, height = 360, idPrefix = "
           style={{ ["--term-h" as string]: typeof height === "number" ? `${height}px` : height }}
         >
           {lines.length === 0 ? (
-            <div className="term-empty">{empty}{live && <span className="term-cursor" aria-hidden="true" />}</div>
+            <div className="term-empty">{empty}{live && <span className={`term-cursor${streaming ? "" : " idle"}${visible ? "" : " paused"}`} aria-hidden="true" />}</div>
           ) : (
             lines.map((l, i) => (
-              <Line key={i} n={i + 1} line={l} q={q} anchorId={anchor(i + 1)} selected={hashLine === i + 1} current={curLine === i} cursor={live && i === lines.length - 1} />
+              <Line key={i} n={i + 1} line={l} q={q} anchorId={anchor(i + 1)} selected={hashLine === i + 1} current={curLine === i} cursor={live && i === lines.length - 1} streaming={streaming} paused={!visible} />
             ))
           )}
         </div>

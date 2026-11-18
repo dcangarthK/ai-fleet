@@ -42,21 +42,27 @@ export function Scrubber({ t0, t1, steps, events, nodes, cursor, setCursor }: {
     <div className="lin-scrub" role="group" aria-label="Replay">
       <div className="lin-scrub-row">
         <Button size="sm" disabled={disabled} onClick={() => { setPlaying(false); const p = prevStep(cursor ?? t1 + 1); if (p !== null) setCursor(p); }} aria-label="Previous event">‹ Step</Button>
-        <Button size="sm" disabled={disabled} onClick={() => { if (playing) setPlaying(false); else { if (cursor === null) setCursor(t0 - 1); setPlaying(true); } }} aria-pressed={playing}>{playing ? "Pause" : "Replay"}</Button>
+        <Button size="sm" disabled={disabled} onClick={() => { if (playing) setPlaying(false); else { if (cursor === null) setCursor(t0 - 1); setPlaying(true); } }} aria-pressed={playing} className="lin-scrub-play">{playing ? "Pause" : "Replay"}</Button>
         <Button size="sm" disabled={disabled || cursor === null} onClick={() => { setPlaying(false); const n = nextStep(cursor ?? t1); setCursor(n); }} aria-label="Next event">Step ›</Button>
         <input
           type="range" className="lin-range" min={t0} max={Math.max(t1, t0 + 1)} step={1} value={Math.min(Math.max(value, t0), Math.max(t1, t0 + 1))}
           aria-label="Replay position" aria-valuetext={cursor === null ? "Live" : `as of ${fmtClock(cursor, false, true)}`}
           onChange={(e) => { setPlaying(false); const v = Number(e.target.value); setCursor(v >= t1 ? null : v); }}
         />
-        <span className="lin-scrub-clock mono" aria-live="off">{cursor === null ? "Live" : fmtClock(cursor, false, true)}</span>
-        <Button size="sm" variant={cursor === null ? "ghost" : "primary"} disabled={cursor === null} onClick={() => { setPlaying(false); setCursor(null); }}>Back to live</Button>
+        {/* Both states share one grid cell, so the slot keeps the width of the wider one and the range never resizes mid-drag. */}
+        <div className="lin-scrub-end">
+          <span className="lin-scrub-live" aria-hidden={cursor !== null} data-on={cursor === null}><span className="lin-scrub-dot" aria-hidden="true" />Live</span>
+          <span className="lin-scrub-replay" data-on={cursor !== null} aria-hidden={cursor === null}>
+            <span className="lin-scrub-clock mono">{cursor === null ? "--:--:--" : fmtClock(cursor, false, true)}</span>
+            <Button size="sm" variant="primary" tabIndex={cursor === null ? -1 : 0} onClick={() => { setPlaying(false); setCursor(null); }}>Back to live</Button>
+          </span>
+        </div>
       </div>
-      {cursor !== null && (
-        <p className="lin-scrub-note" role="status">
-          Replaying: showing the fleet as it was at {fmtClock(cursor, false, true)}.{last ? <> Last event: <span className="mono">{describeEvent(last, byId)}</span> at {fmtClock(last.ts, false, true)}.</> : null}
-        </p>
-      )}
+      <p className="lin-scrub-note" role="status">
+        {cursor === null
+          ? "Live: showing the fleet now. Drag the slider or press Replay to go back in time."
+          : <>Replaying: showing the fleet as it was at {fmtClock(cursor, false, true)}.{last ? <> Last event: <span className="mono">{describeEvent(last, byId)}</span> at {fmtClock(last.ts, false, true)}.</> : null}</>}
+      </p>
     </div>
   );
 }

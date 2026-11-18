@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentRows, buildNarrative, criticalPath, findAnomalies, findBottleneck, flagMap, layoutRiver, layoutTrace, marksFor,
-  mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
+  focusSet, gateLabel, layoutGraph, mergeIntervals, niceTicks, packLane, snapshotAt, spanOf, stageOf, stageRank, STAGES, stepTimes, zoomView, panView,
   type LEvent, type LNode,
 } from "./lineageGraph";
 
@@ -95,6 +95,78 @@ describe("critical path", () => {
   it("survives a parent cycle", () => {
     const nodes = [node({ id: "a", parent_id: "b", ended_at: T0 + 9 }), node({ id: "b", parent_id: "a", ended_at: T0 + 5 })];
     expect(criticalPath(nodes, T0 + 20).length).toBe(2);
+  });
+});
+
+describe("lineage focus", () => {
+  it("keeps the focused attempt plus every upstream and downstream dependency", () => {
+    const nodes = [
+      node({ id: "root" }),
+      node({ id: "build", parent_id: "root" }),
+      node({ id: "sibling", parent_id: "build" }),
+      node({ id: "fix", parent_id: "build" }),
+      node({ id: "merge", parent_id: "fix" }),
+      node({ id: "other" }),
+    ];
+    expect([...focusSet(nodes, [], "fix")].sort()).toEqual(["root", "build", "fix", "merge"].sort());
+  });
+
+  it("returns every node when no attempt is focused and handles cycles", () => {
+    const nodes = [node({ id: "a", parent_id: "b" }), node({ id: "b", parent_id: "a" }), node({ id: "c" })];
+    expect([...focusSet(nodes, [], null)].sort()).toEqual(["a", "b", "c"]);
+    expect([...focusSet(nodes, [], "a")].sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("graph layout", () => {
+  it("places children one column after their parent and siblings on separate rows", () => {
+    const nodes = [node({ id: "a" }), node({ id: "b", parent_id: "a" }), node({ id: "c", parent_id: "a" }), node({ id: "d", parent_id: "b" })];
+    const graph = layoutGraph(nodes, []);
+    expect(graph.place.b.col).toBe(graph.place.a.col + 1);
+    expect(graph.place.d.col).toBe(graph.place.b.col + 1);
+    expect(graph.place.b.y).not.toBe(graph.place.c.y);
+    expect(graph.height).toBeGreaterThan(100);
+  });
+
+  it("packs many single-attempt work items into a readable grid", () => {
+    const nodes = Array.from({ length: 27 }, (_, i) => node({ id: `single-${i}`, root_id: `root-${i}`, created_at: T0 + i }));
+    const graph = layoutGraph(nodes, []);
+    expect(graph.width / graph.height).toBeGreaterThan(0.8);
+    expect(graph.width / graph.height).toBeLessThan(3);
+  });
+
+  it("keeps every card inside its work-item block", () => {
+    const nodes = [
+      node({ id: "alpha", root_id: "work-a" }),
+      node({ id: "alpha-review", root_id: "work-a", parent_id: "alpha" }),
+      node({ id: "beta", root_id: "work-b", created_at: T0 + 10 }),
+    ];
+    const graph = layoutGraph(nodes, []);
+    for (const n of nodes) {
+      const block = graph.groups.find((g) => g.root === n.root_id)!;
+      const place = graph.place[n.id];
+      const x = block.x + place.x, y = block.y + place.y;
+      expect(x).toBeGreaterThanOrEqual(block.x);
+      expect(y).toBeGreaterThanOrEqual(block.y);
+      expect(x + 220).toBeLessThanOrEqual(block.x + block.w);
+      expect(y + 64).toBeLessThanOrEqual(block.y + block.h);
+    }
+  });
+
+  it("leaves no more than 40px between neighbouring blocks on a shelf", () => {
+    const nodes = [
+      node({ id: "wide-a", root_id: "wide" }),
+      node({ id: "wide-b", root_id: "wide", parent_id: "wide-a" }),
+      node({ id: "wide-c", root_id: "wide", parent_id: "wide-b" }),
+      ...["one", "two", "three", "four"].map((id, i) => node({ id, root_id: id, created_at: T0 + 10 + i })),
+    ];
+    const graph = layoutGraph(nodes, []);
+    const shelves = new Map<number, typeof graph.groups>();
+    for (const group of graph.groups) shelves.set(group.y, [...(shelves.get(group.y) ?? []), group]);
+    for (const shelf of shelves.values()) {
+      const ordered = [...shelf].sort((a, b) => a.x - b.x);
+      for (let i = 1; i < ordered.length; i++) expect(ordered[i].x - (ordered[i - 1].x + ordered[i - 1].w)).toBeLessThanOrEqual(40);
+    }
   });
 });
 
@@ -236,10 +308,10 @@ describe("agent heartbeats", () => {
     const now = T0 + 1000;
     const tk = { turns: 1, input: 600, output: 0, cache_read: 0, cache_write: 0 };
     const nodes = [
-      node({ id: "a", started_at: T0, ended_at: T0 + 60, tokens: tk }),
-      node({ id: "b", started_at: T0 + 30, ended_at: T0 + 120 }),
-      node({ id: "c", started_at: T0 + 300, ended_at: null, state: "working" }),
-      node({ id: "d", agent: "codex", model: "gpt", started_at: T0 + 10, ended_at: T0 + 20 }),
+      node({ id: "a", created_at: T0, started_at: T0, ended_at: T0 + 60, tokens: tk }),
+      node({ id: "b", created_at: T0, started_at: T0 + 30, ended_at: T0 + 120 }),
+      node({ id: "c", created_at: T0, started_at: T0 + 300, ended_at: null, state: "working" }),
+      node({ id: "d", created_at: T0, agent: "codex", model: "gpt", started_at: T0 + 10, ended_at: T0 + 20 }),
     ];
     const rows = agentRows(nodes, now, { t0: T0, t1: T0 + 600 }, 10);
     const sonnet = rows.find((r) => r.model === "claude-sonnet")!;
@@ -267,5 +339,21 @@ describe("time view", () => {
     expect(ticks.length).toBeGreaterThan(2);
     expect(ticks.length).toBeLessThanOrEqual(9);
     expect(ticks.every((t) => t.ts >= T0 && t.ts <= T0 + 3600)).toBe(true);
+  });
+});
+
+describe("gateLabel (detail panel)", () => {
+  const gate = (passed: boolean | null) => ({ passed, tail: "" });
+  it("shows the gate only for finished attempts", () => {
+    expect(gateLabel(node({ id: "a", state: "done", gate: gate(true) }))).toBe("Passed");
+    expect(gateLabel(node({ id: "b", state: "review", gate: gate(true) }))).toBe("Passed");
+    expect(gateLabel(node({ id: "c", state: "failed", gate: gate(false) }))).toBe("Failed");
+    expect(gateLabel(node({ id: "d", state: "done", gate: null }))).toBe("No gate");
+  });
+  it("shows a dash for cancelled, running and queued attempts, whatever the gate says", () => {
+    for (const state of ["cancelled", "working", "starting", "queued"]) {
+      expect(gateLabel(node({ id: state, state, gate: gate(null) }))).toBe("—");
+      expect(gateLabel(node({ id: `${state}-2`, state, gate: null }))).toBe("—");
+    }
   });
 });

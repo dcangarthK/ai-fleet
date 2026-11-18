@@ -88,9 +88,9 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
   }
 
   return (
-    <div className="stack" style={{ gap: 8 }}>
+    <div className="stack tight">
       <ErrorBanner error={error} onDismiss={clearError} />
-      <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+      <div className="row">
         <Input aria-label="Message to the agent" placeholder="Message this attempt" value={text} disabled={!RESUMABLE.has(attempt.state)} onChange={(e) => setText(e.target.value)} />
         <Button disabled={busy || !text.trim() || !RESUMABLE.has(attempt.state)} onClick={send}>Send</Button>
         <Button variant="danger" disabled={busy || !live} onClick={cancel}>Cancel</Button>
@@ -103,7 +103,7 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
         <Button aria-expanded={follow} onClick={() => setFollow((v) => !v)}>Spawn follow-up</Button>
       </div>
       {resolving && (
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div className="row">
           <Field label="Resolution">{(p) => <Select {...p} value={resKind} onChange={(e) => setResKind(e.target.value)}>{["dismissed", "done_elsewhere"].map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
           <Field label="Resolved by">{(p) => <Input {...p} value={resBy} placeholder="who finished it" onChange={(e) => setResBy(e.target.value)} />}</Field>
           <Field label="Commit (optional)">{(p) => <Input {...p} value={resCommit} onChange={(e) => setResCommit(e.target.value)} />}</Field>
@@ -111,15 +111,15 @@ export function Actions({ root, attempt, repo }: { root: string; attempt: Detail
         </div>
       )}
       {outcomeOpen && (
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div className="row">
           <Field label="Outcome">{(p) => <Select {...p} value={outKind} onChange={(e) => setOutKind(e.target.value)}>{["merged", "done", "abandoned"].map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
           <Field label="Commit (needed for merged)">{(p) => <Input {...p} value={outCommit} onChange={(e) => setOutCommit(e.target.value)} />}</Field>
           <Button variant="primary" disabled={busy} onClick={outcome}>Record outcome</Button>
         </div>
       )}
       {follow && (
-        <div className="stack" style={{ gap: 8 }}>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div className="stack tight">
+          <div className="row">
             <Field label="Kind">{(p) => <Select {...p} value={kind} onChange={(e) => setKind(e.target.value)}>{FOLLOW_KINDS.map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
             <Field label="Agent">{(p) => <Select {...p} value={agent} onChange={(e) => setAgent(e.target.value)}>{["claude", "codex", "ollama"].map((k) => <option key={k}>{k}</option>)}</Select>}</Field>
           </div>

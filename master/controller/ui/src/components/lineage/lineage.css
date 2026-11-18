@@ -2,12 +2,29 @@
 
 .lin-controls { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s4); }
 .lin-controls .tabs { flex: 1 1 280px; min-width: 0; }
-.lin-range select { min-width: 160px; }
+.lin-range-select select { min-width: 160px; }
 .lin-openlink { white-space: nowrap; font-weight: 550; }
-.lin-summary { color: var(--ink-2); margin: 0 0 var(--s3); font-size: 13px; }
+.lin-summary { color: var(--ink-2); margin: 0 0 var(--s3); font-size: var(--fs-md); }
 .lin-summary b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.lin-insight-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin: 0 0 var(--s3); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--line); }
+.lin-insight-strip span { padding: var(--s2) var(--s3); background: var(--surface); color: var(--ink-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.lin-insight-strip b { display: block; color: var(--ink); font-size: 15px; }
+.lin-river-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: var(--s3); align-items: start; }
+.lin-river-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); }
+.graph-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: var(--s3); align-items: start; }.graph-insights, .graph-layout .lin-river-panel { border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s3); background: var(--surface); }.graph-insights summary { cursor: pointer; font-weight: 700; color: var(--ink); }.graph-insights .lin-intel { margin-top: var(--s3); }
+.graph-wrap { position: relative; width: 100%; height: max(70vh, 520px); min-height: 520px; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--surface); }
+.graph-svg { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+.graph-svg:active { cursor: grabbing; }
+.graph-bg { fill: url(#graph-dots); } #graph-dots circle { fill: var(--line-strong); opacity: .55; }
+.graph-band { fill: color-mix(in srgb, var(--accent) 6%, var(--surface)); stroke: var(--line); }
+.graph-band-label { fill: var(--ink-2); font-size: var(--fs-sm); font-family: var(--mono); font-weight: 700; }
+.graph-actions { position: absolute; z-index: 2; top: var(--s2); left: var(--s2); display: flex; align-items: center; gap: var(--s2); background: color-mix(in srgb, var(--surface) 88%, transparent); border-radius: var(--r); padding: 2px; }
+.graph-actions button { min-height: var(--h-sm); background: var(--surface); }
+.graph-edge path { fill: none; stroke: var(--ink-3); stroke-width: 1.6; opacity: .8; }.graph-edge.hot path { stroke: var(--accent); stroke-width: 3; opacity: 1; }.graph-edge.bad path { stroke: var(--bad); }.graph-edge.running path { stroke: var(--accent); stroke-dasharray: 7 6; animation: graph-flow 1s linear infinite; }.graph-edge circle { fill: var(--accent); stroke: var(--surface); }.graph-edge.bad circle { fill: var(--bad); }.graph-arrow { fill: var(--ink-3); }.graph-arrow.accent { fill: var(--accent); }.graph-arrow.bad { fill: var(--bad); } @keyframes graph-flow { to { stroke-dashoffset: -13; } }
+.graph-link rect { fill: var(--surface); stroke: var(--line-strong); }.graph-link text { fill: var(--ink); font-size: var(--fs-xs); font-weight: 700; }
+.graph-node { cursor: pointer; animation: graph-enter .36s both; }.graph-node rect { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.5; }.graph-node:hover rect { filter: drop-shadow(0 6px 8px rgba(0,0,0,.22)); stroke: var(--accent); }.graph-node.dim { opacity: .25; }.graph-node.running rect { stroke: var(--accent); }.graph-node.running circle { filter: drop-shadow(0 0 5px var(--accent)); animation: graph-pulse 1.5s infinite; }.graph-node.failed rect { stroke: var(--bad); }.graph-node.cancelled rect { stroke-dasharray: 5 4; stroke: var(--ink-3); }.graph-node circle { fill: var(--accent); }.graph-node.graph-claude circle { fill: var(--info); }.graph-node.graph-ollama circle { fill: var(--ok); }.graph-initial { fill: light-dark(#fff,#0b1626); font-weight: 800; font-size: var(--fs-xs); }.graph-title { fill: var(--ink); font-size: var(--fs-sm); font-weight: 700; }.graph-sub { fill: var(--ink-2); font-size: var(--fs-xs); }.graph-tick { fill: var(--ok); font-size: 19px; font-weight: 800; }.graph-fail { fill: var(--bad); font-size: 20px; font-weight: 800; }.graph-hover { pointer-events: none; }.graph-hover rect { fill: var(--surface); stroke: var(--line-strong); filter: drop-shadow(0 6px 10px rgba(0,0,0,.2)); }.graph-hover text { fill: var(--ink-2); font-size: var(--fs-xs); }.graph-hover .graph-hover-title { fill: var(--ink); font-weight: 700; font-size: var(--fs-sm); } @keyframes graph-pulse { 50% { opacity: .5; } } @keyframes graph-enter { from { opacity: 0; } to { opacity: 1; } }.graph-mini { position: absolute; right: var(--s2); bottom: var(--s2); z-index: 2; width: 132px; height: 82px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--surface); cursor: pointer; }.graph-mini-bg { fill: var(--surface); }.graph-mini-band { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); }.graph-mini-node { fill: var(--accent); }.graph-mini-node.bad { fill: var(--bad); }.graph-mini-viewport { fill: none; stroke: var(--ink); stroke-width: 12; }
 .lin-toolbar { margin-bottom: var(--s3); }
-.lin-hint, .lin-hint-inline { font-size: 12px; }
+.lin-hint, .lin-hint-inline { font-size: var(--fs-sm); }
 .lin-hint { margin-top: var(--s3); max-width: 80ch; }
 .lin-hint-inline { margin-left: var(--s2); }
 
@@ -22,10 +39,20 @@
 /* ---------------------------------------------------------------- scrubber */
 .lin-scrub { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s2) var(--s3); margin-bottom: var(--s3); }
 .lin-scrub-row { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
-.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); height: var(--h-sm); }
-input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; background: transparent; }
-.lin-scrub-clock { min-width: 64px; text-align: right; color: var(--ink-2); }
-.lin-scrub-note { margin: var(--s2) 0 0; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+input.lin-range { flex: 1 1 200px; min-width: 120px; accent-color: var(--accent); height: var(--h-sm); padding: 0; border: 0; background: transparent; }
+.lin-scrub-live { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: var(--fs-sm); font-weight: 600; color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+.lin-scrub-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: lin-live-dot 1.6s ease-in-out infinite; }
+@keyframes lin-live-dot { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .lin-scrub-dot { animation: none; } }
+.lin-scrub-clock { min-width: 8ch; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.lin-scrub-end { display: grid; justify-items: end; align-items: center; flex: none; }
+.lin-scrub-end > * { grid-area: 1 / 1; transition: opacity .15s; }
+.lin-scrub-end > [data-on="false"] { opacity: 0; visibility: hidden; }
+.lin-scrub-replay { display: inline-flex; align-items: center; gap: var(--s2); }
+.lin-scrub-play { min-width: 76px; }
+input.lin-range:focus-visible { outline-offset: 2px; border-radius: var(--r); }
+input.lin-range:focus:not(:focus-visible) { outline: none; }
+.lin-scrub-note { margin: var(--s2) 0 0; min-height: 1.5em; font-size: var(--fs-sm); color: var(--ink-2); overflow-wrap: anywhere; }
 @media (pointer: coarse) { .lin-scrub .btn-sm { min-height: var(--h-lg); } }
 
 /* ---------------------------------------------------------------- intelligence */
@@ -34,7 +61,7 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-narrative { font-weight: 450; line-height: 1.55; overflow-wrap: anywhere; display: block; }
 .lin-intel .insight:has(.lin-narrative) { grid-column: 1 / -1; }
 .lin-more { margin-top: var(--s3); }
-.lin-more summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-bottom: var(--s2); }
+.lin-more summary { cursor: pointer; color: var(--ink-2); font-size: var(--fs-md); margin-bottom: var(--s2); }
 
 /* ---------------------------------------------------------------- chart card */
 .lin-chart-card { min-width: 0; }
@@ -45,26 +72,28 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-svg.grabbing, .lin-agents.grabbing { cursor: grabbing; }
 
 .lin-axis-bg { fill: var(--surface); }
-.lin-tick { fill: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.lin-tick { fill: var(--ink-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .lin-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .lin-group-bg { fill: var(--sunken); }
-.lin-group-label { fill: var(--ink); font-size: 12px; font-weight: 650; letter-spacing: 0.02em; }
+.lin-group-label { fill: var(--ink); font-size: var(--fs-sm); font-weight: 650; letter-spacing: 0.02em; }
 .lin-lane-line { stroke: var(--line); }
 .lin-label-bg { fill: var(--surface); }
-.lin-lane-name { fill: var(--ink); font-size: 12.5px; font-weight: 550; }
-.lin-lane-sub { fill: var(--ink-3); font-size: 11px; }
+.lin-lane-name { fill: var(--ink); font-size: var(--fs-sm); font-weight: 550; }
+.lin-lane-sub { fill: var(--ink-3); font-size: var(--fs-xs); }
 
 /* Bars */
-.lin-bar { cursor: pointer; outline: none; }
+.lin-bar { cursor: grab; outline: none; }
+.lin-bar.dim, .lin-edge.dim { opacity: 0.25; }
 .lin-hit { fill: transparent; }
 .lin-bar-body { fill: color-mix(in srgb, var(--c) 22%, var(--surface)); stroke: var(--c); stroke-width: 1; transition: fill 0.15s; }
 .lin-bar-edge { fill: var(--c); }
 .lin-bar.hot .lin-bar-body, .lin-bar:hover .lin-bar-body { fill: color-mix(in srgb, var(--c) 36%, var(--surface)); }
 .lin-bar:focus-visible .lin-bar-body, .lin-bar.sel .lin-bar-body { stroke-width: 2.5; stroke: var(--focus); }
 .lin-bar:focus-visible .lin-hit { stroke: var(--focus); stroke-width: 1.5; stroke-dasharray: 3 3; rx: 6; }
-.lin-bar-text { fill: var(--ink); font-size: 11.5px; font-family: var(--mono); pointer-events: none; }
+.lin-bar-text { fill: var(--ink); font-size: var(--fs-xs); font-family: var(--mono); pointer-events: none; }
+.lin-outside-label { fill: var(--ink); font-size: var(--fs-xs); font-weight: 800; font-family: var(--mono); pointer-events: none; }
 .lin-glyph rect { fill: var(--c); }
-.lin-glyph text { fill: var(--surface); font-size: 8.5px; font-weight: 800; font-family: var(--mono); pointer-events: none; }
+.lin-glyph text { fill: light-dark(#fff, #0b1626); font-size: 8.5px; font-weight: 800; font-family: var(--mono); pointer-events: none; }
 .lin-hatch-line { stroke: var(--ink-3); stroke-width: 1.4; opacity: 0.8; }
 .lin-wait { fill: url(#lin-hatch); stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.9; }
 .lin-wait-end { fill: url(#lin-hatch); stroke: var(--c); stroke-width: 1; }
@@ -79,52 +108,63 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-diamond.d-stall path { fill: var(--info); }
 .lin-diamond.d-gate path { fill: var(--bad); }
 .lin-flag circle { fill: var(--warn); stroke: var(--surface); stroke-width: 1.5; }
-.lin-flag text { fill: var(--surface); font-weight: 800; font-size: 11px; }
+.lin-flag text { fill: light-dark(#fff, #1d1300); font-weight: 800; font-size: var(--fs-xs); }
 
 /* Edges */
 .lin-edge path, .lin-tedge path { fill: none; stroke: var(--c, var(--ink-3)); stroke-width: 1.4; opacity: 0.75; }
 .lin-edge.hot path { stroke-width: 2.4; opacity: 1; }
-.lin-edge.t-warn { --c: var(--warn); } .lin-edge.t-info { --c: var(--info); } .lin-edge.t-ok { --c: var(--ok); }
+.lin-edge.t-warn { --c: var(--warn); } .lin-edge.t-info { --c: var(--info); } .lin-edge.t-ok { --c: var(--ok); } .lin-edge.t-bad { --c: var(--bad); }
 .lin-edge.t-accent { --c: var(--accent); } .lin-edge.t-quiet { --c: var(--ink-3); }
-.lin-edge-label { fill: var(--ink-2); font-size: 10.5px; paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.lin-particle { fill: var(--c, var(--accent)); stroke: var(--surface); stroke-width: 1; pointer-events: none; }
+.lin-edge-label { fill: var(--ink-2); font-size: var(--fs-xs); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
 .lin-arrow { fill: var(--ink-3); }
-.lin-arrow.t-warn { fill: var(--warn); } .lin-arrow.t-info { fill: var(--info); } .lin-arrow.t-ok { fill: var(--ok); }
+.lin-arrow.t-warn { fill: var(--warn); } .lin-arrow.t-info { fill: var(--info); } .lin-arrow.t-ok { fill: var(--ok); } .lin-arrow.t-bad { fill: var(--bad); }
 .lin-arrow.t-accent { fill: var(--accent); } .lin-arrow.t-quiet { fill: var(--ink-3); }
 
 /* Now line */
 .lin-now line { stroke: var(--accent); stroke-width: 1.5; }
 .lin-now rect { fill: var(--accent); }
-.lin-now text { fill: var(--accent-ink); font-size: 10px; font-weight: 700; }
+.lin-now text { fill: light-dark(#fff, #0b1626); font-size: var(--fs-xs); font-weight: 700; }
 .lin-now.follow line { stroke-dasharray: 5 4; animation: lin-dash 1s linear infinite; }
 @keyframes lin-dash { to { stroke-dashoffset: -9; } }
 
+.lin-minimap { position: absolute; top: var(--s2); right: var(--s2); width: 112px; height: 34px; z-index: 3; cursor: pointer; }
+.lin-minimap > rect:first-child { fill: color-mix(in srgb, var(--surface) 94%, transparent); stroke: var(--line-strong); }
+.lin-minimap line { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; opacity: 0.78; pointer-events: none; }
+.lin-minimap .lin-minimap-view { fill: color-mix(in srgb, var(--accent) 18%, transparent); stroke: var(--accent); stroke-width: 1.5; }
+
+.lin-river-panel { border-top: 1px solid var(--line); background: var(--surface); padding: var(--s4); }
+.lin-river-panel .kv { margin: var(--s3) 0; grid-template-columns: minmax(92px, 120px) minmax(0, 1fr); }
+.button-link { display: inline-flex; align-items: center; justify-content: center; min-height: var(--h-sm); padding: 0 var(--s2); border: 1px solid var(--line-strong); border-radius: var(--r); color: var(--ink); text-decoration: none; font-size: var(--fs-md); font-weight: 550; }
+.button-link:hover { border-color: var(--ink-3); background: var(--sunken); }
+
 /* Hover card */
-.lin-card { position: absolute; z-index: 5; transform: translateX(-50%); width: min(260px, calc(100% - 16px)); pointer-events: none; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: var(--s3); font-size: 12.5px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22); }
+.lin-card { position: absolute; z-index: 5; transform: translateX(-50%); width: min(260px, calc(100% - 16px)); pointer-events: none; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: var(--s3); font-size: var(--fs-sm); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22); }
 .lin-card-head { display: flex; justify-content: space-between; gap: var(--s2); align-items: center; }
 .lin-card-title { margin: var(--s1) 0 var(--s2); color: var(--ink-2); overflow-wrap: anywhere; }
 .lin-card dl, .lin-dl { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--s3); margin: 0; }
 .lin-card dt, .lin-dl dt { color: var(--ink-3); }
 .lin-card dd, .lin-dl dd { margin: 0; overflow-wrap: anywhere; }
-.lin-card-foot { margin-top: var(--s2); font-size: 11.5px; }
+.lin-card-foot { margin-top: var(--s2); font-size: var(--fs-xs); }
 
 /* Legend */
-.lin-legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); list-style: none; margin: var(--s3) 0 0; padding: 0; font-size: 12.5px; color: var(--ink-2); }
+.lin-legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); list-style: none; margin: var(--s3) 0 0; padding: 0; font-size: var(--fs-sm); color: var(--ink-2); }
 .lin-legend li { display: inline-flex; align-items: center; gap: 6px; }
 .lin-legend .sw { width: 14px; height: 10px; border-radius: 3px; background: color-mix(in srgb, var(--c) 22%, var(--surface)); border: 1px solid var(--c); display: inline-block; }
 .lin-legend .sw.hatch { background: repeating-linear-gradient(45deg, var(--ink-3) 0 1.4px, transparent 1.4px 5px); border: 1px dashed var(--ink-3); --c: var(--ink-3); }
-.lin-legend-flag { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--warn); color: var(--surface); font-weight: 800; font-size: 10px; }
+.lin-legend-flag { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--warn); color: var(--surface); font-weight: 800; font-size: var(--fs-xs); }
 
 /* ---------------------------------------------------------------- trace */
 .lin-trace-layout { display: grid; gap: var(--s4); grid-template-columns: minmax(0, 1fr) minmax(340px, 460px); align-items: start; }
 @media (max-width: 1023px) { .lin-trace-layout { grid-template-columns: minmax(0, 1fr); } }
 .lin-trace-scroll { overflow: auto; padding: var(--s3); max-height: 70vh; }
 .lin-trace { display: block; font-family: var(--sans); }
-.lin-col-head { fill: var(--ink-3); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.07em; }
+.lin-col-head { fill: var(--ink-3); font-size: var(--fs-xs); font-weight: 650; text-transform: uppercase; letter-spacing: 0.07em; }
 .lin-col-sep { stroke: var(--line); stroke-dasharray: 2 5; }
 .lin-pip { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
 .lin-pip.done { fill: var(--ok); stroke: var(--ok); }
 .lin-pip-tick { fill: none; stroke: var(--surface); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.lin-pip-text { fill: var(--ink-3); font-size: 10.5px; font-family: var(--mono); }
+.lin-pip-text { fill: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); }
 .lin-tedge path { stroke: var(--ink-3); stroke-width: 1.3; opacity: 0.4; }
 .lin-tedge.crit path { stroke: var(--accent); stroke-width: 2.6; opacity: 1; }
 .lin-tedge.ghost { opacity: 0.35; }
@@ -138,14 +178,14 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-tnode.crit .lin-tnode-body { stroke: var(--c); stroke-width: 1.6; }
 .lin-tnode:focus-visible .lin-tnode-body, .lin-tnode.sel .lin-tnode-body { stroke: var(--focus); stroke-width: 2.6; }
 .lin-tnode-edge { fill: var(--c); }
-.lin-tnode-id { fill: var(--ink); font-family: var(--mono); font-size: 12px; font-weight: 600; }
-.lin-tnode-sub { fill: var(--ink-2); font-size: 12px; }
-.lin-tnode-meta { fill: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.lin-tnode-id { fill: var(--ink); font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; }
+.lin-tnode-sub { fill: var(--ink-2); font-size: var(--fs-sm); }
+.lin-tnode-meta { fill: var(--ink-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .lin-gate rect { fill: var(--surface); stroke: var(--line-strong); }
-.lin-gate text { fill: var(--ink-2); font-size: 10px; font-weight: 650; }
+.lin-gate text { fill: var(--ink-2); font-size: var(--fs-xs); font-weight: 650; }
 .lin-gate.ok rect { stroke: var(--ok); } .lin-gate.ok text { fill: var(--ok); }
 .lin-gate.bad rect { stroke: var(--bad); } .lin-gate.bad text { fill: var(--bad); }
-.lin-crit-key { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.lin-crit-key { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
 .lin-crit-key i { width: 22px; height: 0; border-top: 3px solid var(--accent); display: inline-block; }
 
 /* Stacked steps below 640px */
@@ -156,27 +196,31 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-steps li.ghost { opacity: 0.35; }
 .lin-step { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 2px var(--s2); text-align: left; justify-content: stretch; height: auto; min-height: var(--h-lg); padding: var(--s2) var(--s3); white-space: normal; border-left: 4px solid var(--c); }
 .lin-step.sel { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
-.lin-step-stage { grid-column: 1 / -1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); }
+.lin-step-stage { grid-column: 1 / -1; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); }
 .lin-step .quiet { grid-column: 1 / -1; font-weight: 400; }
 
 /* Side panel */
 .lin-side { min-width: 0; }
 .lin-panel { min-width: 0; }
-.lin-panel h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); margin: 0 0 var(--s2); }
-.lin-panel-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.lin-panel h3 { font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); margin: 0 0 var(--s2); }
+.lin-panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s3); }
+.lin-panel-head > div { flex: 1; min-width: 0; }
+.lin-panel-head > div h2 { overflow-wrap: anywhere; }
+.lin-panel-head > button.icon { flex: none; width: 36px; height: 36px; min-height: 36px; padding: 0; font-size: 20px; line-height: 1; border-radius: 50%; margin: -4px -4px 0 0; }
+@media (pointer: coarse) { .lin-panel-head > button.icon { width: 44px; height: 44px; } }
 .lin-panel-title { margin: var(--s1) 0 var(--s3); color: var(--ink-2); overflow-wrap: anywhere; }
 .lin-tokens { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: var(--s2); margin: 0; }
 .lin-tokens div { background: var(--sunken); border-radius: var(--r); padding: var(--s2) var(--s3); }
-.lin-tokens dt { font-size: 11px; color: var(--ink-3); }
+.lin-tokens dt { font-size: var(--fs-xs); color: var(--ink-3); }
 .lin-tokens dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
-.lin-result { margin: 0; padding: var(--s3); background: var(--sunken); border-radius: var(--r); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.lin-result { margin: 0; padding: var(--s3); background: var(--sunken); border-radius: var(--r); font-family: var(--mono); font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
 
 /* Work-item chooser */
 .lin-pick { list-style: none; margin: var(--s3) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
 .lin-pick a { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; gap: var(--s1) var(--s3); align-items: center; padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-lg); color: var(--ink); text-decoration: none; background: var(--surface); }
 .lin-pick a:hover { border-color: var(--accent); background: var(--accent-soft); }
 .lin-pick-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
-.lin-pick .quiet { grid-column: 1 / -1; font-size: 12px; }
+.lin-pick .quiet { grid-column: 1 / -1; font-size: var(--fs-sm); }
 @media (max-width: 639px) { .lin-pick a { grid-template-columns: 1fr auto; } .lin-pick-title { grid-column: 1 / -1; white-space: normal; } }
 
 /* ---------------------------------------------------------------- agents */
@@ -186,7 +230,7 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-agent-list .lin-agent-row { border-top: 1px solid var(--line); }
 .lin-agent-axis { padding: 0 0 var(--s1); }
 .lin-agent-meta { display: flex; gap: var(--s3); align-items: flex-start; min-width: 0; }
-.lin-agent-sub { font-size: 12px; overflow-wrap: anywhere; }
+.lin-agent-sub { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .lin-beat { width: 10px; height: 10px; border-radius: 50%; background: var(--line-strong); margin-top: 5px; flex: none; }
 .lin-beat.on { background: var(--ok); animation: lin-beat 1.6s ease-out infinite; }
 @keyframes lin-beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 70%, 100% { box-shadow: 0 0 0 8px transparent; } }
@@ -197,11 +241,43 @@ input[type="range"].lin-range { height: var(--h-sm); padding: 0; border: 0; back
 .lin-rate { fill: color-mix(in srgb, var(--accent) 55%, var(--surface)); }
 .lin-busy { fill: var(--accent); }
 .lin-gap line { stroke: var(--ink-3); stroke-dasharray: 2 4; }
-.lin-gap text { fill: var(--ink-3); font-size: 10px; }
+.lin-gap text { fill: var(--ink-3); font-size: var(--fs-xs); }
 @media (max-width: 767px) { .lin-agent-row { grid-template-columns: minmax(0, 1fr); gap: var(--s2); } .lin-agent-axis > span { display: none; } }
 
 /* ---------------------------------------------------------------- reduced motion */
 @media (prefers-reduced-motion: reduce) {
   .lin-bar.live .lin-bar-edge, .lin-now.follow line, .lin-beat.on { animation: none; }
+  .lin-particle { display: none; }
   .lin-bar-body { transition: none; }
+  .graph-node, .graph-node.running circle, .graph-edge.running path { animation: none; }
+}
+
+@media (max-width: 1023px) {
+  .lin-insight-strip { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .lin-river-layout, .graph-layout { grid-template-columns: minmax(0, 1fr); }
+  .graph-insights { margin-top: var(--s3); }
+}
+@media (max-width: 639px) {
+  .lin-insight-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lin-river-layout { display: block; }
+  .graph-wrap { height: 70vh; min-height: 420px; }
+  .graph-layout { display: block; }.graph-insights { margin-top: var(--s3); }
+  .lin-minimap { display: none; }
+  .lin-river-panel { position: fixed; inset: auto 0 0; z-index: 45; max-height: min(62vh, 520px); overflow: auto; border: 1px solid var(--line-strong); border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: 0 -12px 32px var(--scrim); padding-bottom: max(var(--s4), env(safe-area-inset-bottom)); }
+}
+@media (max-width: 640px), (pointer: coarse) { .graph-actions .quiet { display: none; } }
+@media (max-width: 640px) { .graph-wrap { height: 60vh; min-height: 420px; } }
+@media (max-width: 900px) { .lin-scrub-note { min-height: 3em; } }
+/* Narrow: buttons + status share the top row (status right-aligned); the track takes its own full row below. */
+@media (max-width: 640px) {
+  .lin-scrub-row > input.lin-range { order: 9; flex-basis: 100%; }
+  .lin-scrub-end { margin-left: auto; }
+}
+@media (max-width: 640px) {
+  /* Track sits on its own row here, so the hidden slot can leave layout without resizing it. */
+  .lin-scrub-end > [data-on="false"] { display: none; }
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .lin-hint-how { display: none; }
+  .lin-hint-inline { margin-left: auto; }
 }

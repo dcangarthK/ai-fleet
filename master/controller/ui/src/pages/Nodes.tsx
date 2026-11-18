@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import "../components/motion/pages-motion.css";
+import { useLiveSignal } from "../components/motion/useLiveSignal";
+import { useVisible } from "../components/motion/useVisible";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { post, type Enrollment, type FleetNode, type Mode } from "../lib/api";
 import { useCan, useFleet, useRun, useTasks, useUsage } from "../lib/data";
@@ -7,6 +10,22 @@ import { ErrorBanner, LoadError, NodeLight, PageHead, Section, StateLabel, Tags 
 import { Button, Card, Empty, Loading, Panel, Select, Table, useConfirm, type Column } from "../components/ui";
 import { describeRequest } from "../lib/request";
 import { Terminal } from "../components/Terminal";
+
+/** NodeLight with a heartbeat ring on each `last_seen` update (the signal), and a 600ms desaturate when the node is
+ *  offline, which also stops the ring. `children` (the node name) fades with it. Loops never run: one ring per heartbeat. */
+function NodeBeat({ node, pulse = true, children }: { node: FleetNode; pulse?: boolean; children?: ReactNode }) {
+  const signal = nodeSignal(node);
+  const offline = signal === "down";
+  const visible = useVisible();
+  const beat = useLiveSignal(node.last_seen, 1700);
+  const ping = beat && pulse && visible && !offline && (signal === "up" || signal === "degraded");
+  return (
+    <span className={`row node-fade${offline ? " node-offline" : ""}`} style={{ gap: "var(--s2)" }}>
+      <span className={`beat${ping ? " ping" : ""}`}><NodeLight node={node} /></span>
+      {children}
+    </span>
+  );
+}
 
 function useNodeActions() {
   const { run, busy, error, clearError } = useRun();
@@ -62,10 +81,12 @@ export function NodesPage() {
   const nav = useNavigate();
   const a = useNodeActions();
   const nodes = fleet.data?.nodes ?? [];
+  // One pulse per viewport: only the most recently seen node rings.
+  const newest = nodes.reduce<FleetNode | null>((m, n) => (n.last_seen ?? -1) > (m?.last_seen ?? -1) ? n : m, null)?.id;
   const cols: Column<FleetNode>[] = [
     { key: "node", header: "Node", cell: (n) => (
       <>
-        <Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: "var(--s2)" }}><NodeLight node={n} /><b>{n.name}</b></Link>
+        <Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: "var(--s2)" }}><NodeBeat node={n} pulse={n.id === newest}><b>{n.name}</b></NodeBeat></Link>
         <div className="sub">{n.os} · <span className="mono">{n.ip}</span> · seen {ago(n.last_seen)}</div>
       </>
     ) },
@@ -152,7 +173,7 @@ export function NodeDetailPage() {
     <>
       <PageHead
         title={node.name}
-        intro={<span className="row" style={{ gap: 8 }}><NodeLight node={node} />{SIGNAL_LABEL[nodeSignal(node)]} · seen {ago(node.last_seen)}</span>}
+        intro={<span className="row" style={{ gap: 8 }}><NodeBeat node={node} />{SIGNAL_LABEL[nodeSignal(node)]} · seen {ago(node.last_seen)}</span>}
         actions={can.admin && node.id !== "master" && (node.status !== "approved"
           ? <Button variant="primary" disabled={a.busy} onClick={() => a.approve(node)}>Approve node</Button>
           : <Button disabled={a.busy} onClick={() => a.drain(node)}>Drain node</Button>)}

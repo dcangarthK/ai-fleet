@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { minuteTick } from "../lib/pageMotion";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../lib/api";
 import { PageHead } from "../components/bits";
@@ -30,7 +31,13 @@ function summary(status: BudgetStatus | undefined): string {
 export function BudgetPage() {
   const status = useQuery({ queryKey: ["budget", "status"], queryFn: () => get<BudgetStatus>("/api/budget/status") });
   const [tab, setTab] = useState("rules");
-  const now = useMemo(() => Math.floor(Date.now() / 1000), [status.dataUpdatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Reset countdowns re-render once a minute (plain text, no animation); the minute tick is the only source.
+  const [minute, setMinute] = useState(() => minuteTick(Date.now()));
+  useEffect(() => {
+    const id = setInterval(() => setMinute(minuteTick(Date.now())), 60_000);
+    return () => clearInterval(id);
+  }, []);
+  const now = useMemo(() => Math.floor(Date.now() / 1000), [status.dataUpdatedAt, minute]); // eslint-disable-line react-hooks/exhaustive-deps
   const s = status.data;
   const shared = (s?.profiles ?? []).filter((p) => p.codex_profile === "shared");
 

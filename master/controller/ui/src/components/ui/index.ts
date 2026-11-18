@@ -7,6 +7,7 @@ export { Tabs, TabPanel, type TabItem } from "./Tabs";
 export { Dialog, ConfirmProvider, useConfirm, type ConfirmOptions } from "./Dialog";
 export { Menu, type MenuItem } from "./Menu";
 export { Badge, StatusPill } from "./Badge";
+export { ProgressBar } from "./Progress";
 export { Confidence, EvidenceLinks, type Evidence } from "./Evidence";
 export { InsightCard, type InsightAction } from "./Insight";
 export { Loading, Empty, ErrorState } from "./States";

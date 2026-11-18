@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { Tabs } from "../components/ui/Tabs";
 import { NewTask } from "../components/NewTask";
 import { TaskSheet } from "../components/TaskSheet";
 import { LoadError, PageHead, StatusPill } from "../components/bits";
@@ -47,10 +48,8 @@ export function TasksPage() {
       <LoadError error={tasks.error ?? work.error} />
       <div className="panel">
         <div className="row view-switch">
-          <div className="tabs" role="tablist" aria-label="Task view">
-            <button role="tab" aria-selected={view === "work"} onClick={() => set("view", "work")}>Work items</button>
-            <button role="tab" aria-selected={view === "all"} onClick={() => set("view", "all")}>All attempts</button>
-          </div>
+          <Tabs label="Task view" value={view} onChange={(v) => set("view", v)}
+                tabs={[{ id: "work", label: "Work items" }, { id: "all", label: "All attempts" }]} />
           <label className="small quiet check">
             <input type="checkbox" checked={showChecks} onChange={(e) => set("checks", e.target.checked ? "1" : null)} /> Show checks
           </label>
@@ -60,13 +59,8 @@ export function TasksPage() {
                     openTask={(id) => set("task", id)} open={open} />
         ) : (
           <>
-            <div className="tabs" role="tablist" aria-label="Task filter">
-              {Object.entries(TASK_TABS).map(([key, t]) => (
-                <button key={key} role="tab" aria-selected={tab === key} onClick={() => set("tab", key)}>
-                  {t.label}<span className="n">{all.filter((x) => inView(x, key)).length}</span>
-                </button>
-              ))}
-            </div>
+            <Tabs label="Task filter" value={tab} onChange={(k) => set("tab", k)}
+                  tabs={Object.entries(TASK_TABS).map(([key, t]) => ({ id: key, label: t.label, count: all.filter((x) => inView(x, key)).length }))} />
             <table>
               <thead>
                 <tr><th>Task</th><th>Status</th><th className="hide-sm">Agent and node</th><th className="hide-sm">Mode</th><th>Updated</th></tr>

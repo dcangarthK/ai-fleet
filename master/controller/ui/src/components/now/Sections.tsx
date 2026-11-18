@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardGrid, Confidence, Empty, EvidenceLinks, InsightCard, StatusPill, Table, Truncate, cx, type Column } from "../ui";
 import { api } from "../../lib/api";
@@ -6,16 +6,31 @@ import { accountTone, alertText, machineWarnings, queueText, workerText, type Ac
 import { ago, duration } from "../../lib/format";
 import { anomalies as findAnomalies, type Anomaly, type Briefing as BriefingData, type Forecast, type Proposal } from "../../lib/insights";
 import { RequestPreview } from "./Request";
+import { Arrive, useArrivals } from "../motion/Arrive";
+import { useCountUp } from "../motion/useCountUp";
+import "../motion/now-motion.css";
+
+/** A number that counts from its previous value to `value` (the data source); snaps under reduced motion. */
+export function Count({ value }: { value: number }) {
+  return <span className="count-num">{Math.round(useCountUp(value))}</span>;
+}
+
+/** The briefing reveals sentence by sentence on the first load of the session only. */
+let briefingRevealed = false;
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return <section><h2 className="sec">{title}</h2>{children}</section>;
 }
 
 export function Briefing({ data }: { data: BriefingData }) {
+  const reveal = useRef(!briefingRevealed);
+  useEffect(() => { briefingRevealed = true; }, []);
   return (
     <Card title="Briefing">
       <div className="brief">
-        <p>{data.sentences.join(" ")}</p>
+        <p>{reveal.current
+          ? data.sentences.map((t, i) => <span key={i} className="reveal" style={{ "--i": i } as CSSProperties}>{t}{i < data.sentences.length - 1 ? " " : ""}</span>)
+          : data.sentences.join(" ")}</p>
         <div className="brief-foot">
           <Confidence value={data.confidence} />
           <span>Derived from live state, budget status and tasks. No model was called.</span>
@@ -26,22 +41,39 @@ export function Briefing({ data }: { data: BriefingData }) {
   );
 }
 
-/** Ranked proposals. Every button goes through InsightCard's useConfirm(); `run` is only called after Confirm. */
+/** Ranked proposals. Every button goes through InsightCard's useConfirm(); `run` is only called after Confirm.
+ *  Cards that appear after first load Arrive; a confirmed action Settles (check draws in, or one 2px shake on failure). */
 export function NextActions({ items, run }: { items: Proposal[]; run: (fn: () => Promise<unknown>) => Promise<unknown> }) {
+  const isNew = useArrivals(items.map((p) => p.id));
+  const [settled, setSettled] = useState<Record<string, "ok" | "bad">>({});
   if (!items.length) return <Card><Empty title="No suggested actions">Nothing is waiting on a decision. New proposals appear here as work changes state.</Empty></Card>;
   return (
     <CardGrid min={320}>
-      {items.map((p, i) => (
-        <InsightCard
-          key={p.id} kind={`${i + 1}. ${p.kind}`} title={p.title} tone={p.tone} confidence={p.confidence} evidence={p.evidence}
-          why={<>{p.why}<span className="cost">Expected cost: {p.cost}</span></>}
-          action={p.action && {
-            label: p.action.label, danger: p.action.danger,
-            confirmMessage: <RequestPreview request={p.action.request} note={<>{p.why} Nothing is sent until you confirm.</>} />,
-            run: () => run(() => api(p.action!.request.method, p.action!.request.path, p.action!.request.body)),
-          }}
-        />
-      ))}
+      {items.map((p, i) => {
+        const st = settled[p.id];
+        return (
+          <Arrive key={p.id} id={p.id} isNew={isNew} className={st ? `settle-wrap ${st}` : "settle-wrap"}>
+            <InsightCard
+              kind={`${i + 1}. ${p.kind}`} title={p.title} tone={p.tone} confidence={p.confidence} evidence={p.evidence}
+              why={<>{p.why}<span className="cost">Expected cost: {p.cost}</span></>}
+              action={p.action && {
+                label: p.action.label, danger: p.action.danger,
+                confirmMessage: <RequestPreview request={p.action.request} note={<>{p.why} Nothing is sent until you confirm.</>} />,
+                run: async () => {
+                  let ok = false;
+                  await run(async () => { const r = await api(p.action!.request.method, p.action!.request.path, p.action!.request.body); ok = true; return r; });
+                  setSettled((m) => ({ ...m, [p.id]: ok ? "ok" : "bad" }));
+                },
+              }}
+            />
+            {st && (
+              <svg className="settle-mark" viewBox="0 0 20 20" aria-hidden="true">
+                <path d={st === "ok" ? "M4 10.5l4 4 8-9" : "M5 5l10 10M15 5L5 15"} />
+              </svg>
+            )}
+          </Arrive>
+        );
+      })}
     </CardGrid>
   );
 }
@@ -109,11 +141,11 @@ export function Operations({ live }: { live: Live }) {
   ];
   return (
     <div className="ops">
-      <Card title={`Running (${running.length})`} bodyClassName="flush">{running.length ? <Table caption="Running tasks" columns={runCols} rows={running} rowKey={(w) => w.task_id!} /> : none("running tasks")}</Card>
-      <Card title={`Queue (${live.queue.length})`} bodyClassName="flush">{live.queue.length ? <Table caption="Queue" columns={queueCols} rows={live.queue} rowKey={(q) => q.task_id} /> : none("queued tasks")}</Card>
+      <Card title={<>Running (<Count value={running.length} />)</>} bodyClassName="flush">{running.length ? <Table caption="Running tasks" columns={runCols} rows={running} rowKey={(w) => w.task_id!} /> : none("running tasks")}</Card>
+      <Card title={<>Queue (<Count value={live.queue.length} />)</>} bodyClassName="flush">{live.queue.length ? <Table caption="Queue" columns={queueCols} rows={live.queue} rowKey={(q) => q.task_id} /> : none("queued tasks")}</Card>
       <Card title="Machines" bodyClassName="flush">{live.machines.length ? <Table caption="Machines" columns={machineCols} rows={live.machines} rowKey={(m) => m.node} /> : none("machines")}</Card>
       <Card title="Accounts" bodyClassName="flush">{live.accounts.length ? <Table caption="Accounts" columns={accountCols} rows={live.accounts} rowKey={(a) => a.account} /> : none("accounts")}</Card>
-      <Card title={`Alerts (${alerts.length})`} bodyClassName="flush">{alerts.length ? <Table caption="Open alerts" columns={alertCols} rows={alerts} rowKey={(a) => String(a.id)} /> : none("open alerts")}</Card>
+      <Card title={<>Alerts (<Count value={alerts.length} />)</>} bodyClassName="flush">{alerts.length ? <Table caption="Open alerts" columns={alertCols} rows={alerts} rowKey={(a) => String(a.id)} /> : none("open alerts")}</Card>
     </div>
   );
 }

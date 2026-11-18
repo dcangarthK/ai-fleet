@@ -75,6 +75,12 @@ def _kind_ok(entry: dict, kind: str) -> bool:
 
 # ---------- R1 ranking ----------
 
+def _guard(agent: str, model: str | None, key: str, kind: str) -> str | None:
+    """The hard model guard admission applies (budget.model_guard, no budget_override), so rank and admit agree."""
+    import budget
+    return budget.model_guard(agent, model, kind, None) or budget.model_guard(agent, key, kind, None)
+
+
 def rank(kind: str, *, rules: dict, stats: dict, headroom: dict, load: dict, prompt_bytes: int = 0,
          exclude=(), history=(), allowed=None) -> list[dict]:
     """`allowed(key, kind)` decides rules eligibility for a candidate; callers pass one that tests the concrete
@@ -92,6 +98,9 @@ def rank(kind: str, *, rules: dict, stats: dict, headroom: dict, load: dict, pro
         ok_by_rules = allowed(key, kind) if allowed else (entry is None or _kind_ok(entry, kind))
         if not ok_by_rules:
             no.append(f"{kind} not allowed for {key} by rules")
+        guard = _guard(agent, model, key, kind)
+        if guard:
+            no.append(guard)
         if agent == "claude" and "fable" in (model or "") and kind in FABLE_NEVER:
             no.append(f"rule 0: Fable never does {kind}")
         if agent == "codex" and kind not in CODEX_KINDS:

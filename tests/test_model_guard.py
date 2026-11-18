@@ -97,6 +97,23 @@ class ModelGuardTests(unittest.TestCase):
         self.assertFalse(any("fable" in k for pref in intel.KIND_PREFERENCE.values() for k in pref))
         self.assertEqual(intel.KIND_PREFERENCE["lead"], ["claude:claude-sonnet-5-5", "claude:claude-opus-5-5"])
 
+    def test_rank_never_returns_a_guard_refused_identity(self):
+        rules = {"models": {"*": {"tier": "standard", "kinds": ["*"]}, "claude:*": {"tier": "standard", "kinds": ["*"]}},
+                 "limits": {"near_limit_percent": 85}}
+        for kind in KINDS:
+            for c in intel.rank(kind, rules=rules, stats={}, headroom={}, load={}):
+                agent, model = intel.split_key(c["key"])
+                if budget.model_guard(agent, model, kind, None) or budget.model_guard(agent, c["key"], kind, None):
+                    self.assertFalse(c["eligible"], (kind, c["key"]))
+
+    def test_auto_draft_with_permissive_rules_and_cheap_tiers_down_never_opus_or_fable(self):
+        rules = {"models": {"*": {"tier": "standard", "kinds": ["*"]}}, "limits": {"near_limit_percent": 85}}
+        head = {"claude:claude-haiku-5-5": {"used_percent": 99}, "claude:claude-sonnet-5-5": {"used_percent": 99}}
+        cands = intel.rank("draft", rules=rules, stats={}, headroom=head, load={})
+        for c in cands:
+            if "opus" in c["key"] or "fable" in c["key"]:
+                self.assertFalse(c["eligible"], c["key"])
+
     def test_default_codex_fallback_is_opus(self):
         self.assertEqual(budget.DEFAULT_RULES["limits"]["fallbacks"]["codex"], ["claude:claude-opus-5-5"])
 

@@ -600,10 +600,14 @@ class ContinuationTests(HandoffBase):
 
     def blocked(self, task_id):
         self.assertIn(task_id, FakeRunner.jobs, self.get(task_id))
-        with db() as c:
-            c.execute("UPDATE tasks SET state='blocked', exit_code=0, denials=? WHERE id=?",
-                      (json.dumps([{"tool_name": "Read"}]), task_id))
-        FakeRunner.jobs[task_id].update(state="exited", exit_code=0)
+
+        async def write():  # under the task lock, like HandoffBase.fail_in_db: no background poll in flight
+            async with tasks._locks[task_id]:
+                with db() as c:
+                    c.execute("UPDATE tasks SET state='blocked', exit_code=0, denials=? WHERE id=?",
+                              (json.dumps([{"tool_name": "Read"}]), task_id))
+                FakeRunner.jobs[task_id].update(state="exited", exit_code=0)
+        self.c.portal.call(write)
 
     def limit_account(self, account="claude/owner-max", model=REVIEW_M):
         with db() as c:

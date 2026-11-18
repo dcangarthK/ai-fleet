@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS notify_rules (
 CREATE TABLE IF NOT EXISTS agent_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, task_id TEXT, run INTEGER, agent TEXT, model TEXT, kind TEXT,
     input INTEGER, output INTEGER, cached INTEGER, cost_usd REAL, prompt_bytes INTEGER, effort TEXT, outcome TEXT,
-    num_turns INTEGER, UNIQUE (task_id, run));
+    num_turns INTEGER, cost_source TEXT, UNIQUE (task_id, run));
 CREATE TABLE IF NOT EXISTS budget_rules (
     version INTEGER PRIMARY KEY, body TEXT, author TEXT, created_at REAL);
 CREATE TABLE IF NOT EXISTS review_agreement (
@@ -135,7 +135,8 @@ MIGRATIONS = {
     # the run's budget identity and, for a usage-limit failure, when it resets: the breaker's evidence, which
     # later cancelling, completing or resuming of the task cannot erase; `account` is whose limit it was
     # (null on older rows, which then hold every account of the agent)
-    "agent_usage": {"resets_at": "REAL", "identity": "TEXT", "account": "TEXT", "account_label": "TEXT"},
+    "agent_usage": {"resets_at": "REAL", "identity": "TEXT", "account": "TEXT", "account_label": "TEXT",
+                    "cost_source": "TEXT"},
     "call_usage": {"outcome": "TEXT", "logprob_min": "REAL", "logprob_mean": "REAL"},
     "pipelines": {"require_trusted": "INTEGER DEFAULT 1", "trusted_roles": "TEXT DEFAULT '[]'", "bypass": "INTEGER DEFAULT 0",
                   "budget": "TEXT DEFAULT '{}'"},

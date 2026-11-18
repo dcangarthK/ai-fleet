@@ -1968,7 +1968,100 @@ class JobManager:
                 usage["cached"] = self._add(usage["cached"], cached)
                 usage["output"] = self._add(usage["output"], found.get("output_tokens"))
                 usage["model"] = job.get("model")
+        if job.get("agent") == "claude":
+            transcript = self._claude_transcript_usage(job)
+            if transcript is not None:
+                for field in ("input", "output", "cached"):
+                    if transcript[field] is not None:
+                        usage[field] = max(usage[field], transcript[field]) if usage[field] is not None else transcript[field]
+                if usage["cost_usd"] is not None:
+                    usage["cost_source"] = "result"
+                elif transcript["cost_usd"] is not None:
+                    usage["cost_usd"] = transcript["cost_usd"]
+                    usage["cost_source"] = "transcript"
+                if usage["model"] is None:
+                    usage["model"] = transcript["model"]
+            elif usage["cost_usd"] is not None:
+                usage["cost_source"] = "result"
         return usage, turns
+
+    @staticmethod
+    def _claude_price(model):
+        """List prices per million tokens: input, output, cache read, cache write."""
+        prices = {
+            "opus": (5, 25, 0.5, 6.25),
+            "sonnet": (3, 15, 0.3, 3.75),
+            "haiku": (1, 5, 0.1, 1.25),
+            "fable": (15, 75, 1.5, 18.75),
+        }
+        model = model.lower() if isinstance(model, str) else ""
+        for name, price in prices.items():
+            if name in model:
+                return price
+        return None
+
+    def _claude_transcript_usage(self, job):
+        """Return this Claude run's de-duplicated assistant usage from its session transcript."""
+        session_id = job.get("session_id")
+        started = started_epoch(job)
+        cwd = job.get("cwd")
+        if not isinstance(session_id, str) or not session_id or started is None or not isinstance(cwd, str):
+            return None
+        config = self._agent_env("claude", os.environ, job.get("profile")).get("CLAUDE_CONFIG_DIR")
+        config = config or str(Path.home() / ".claude")
+        slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+        path = Path(os.path.expanduser(config)) / "projects" / slug / (session_id + ".jsonl")
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return None
+        totals = {"input": 0, "output": 0, "cached": 0, "cache_creation": 0}
+        messages = {}
+        for line in lines:
+            try:
+                event = json.loads(line)
+                stamp = event.get("timestamp") if isinstance(event, dict) else None
+                parsed = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")) if isinstance(stamp, str) else None
+                if parsed is not None and parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+                when = parsed.timestamp() if parsed is not None else None
+            except (OverflowError, ValueError, TypeError):
+                continue
+            if when is None or when < started or event.get("type") != "assistant":
+                continue
+            message = event.get("message")
+            if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+                continue
+            values = message.get("usage")
+            values = values if isinstance(values, dict) else {}
+            numbers = tuple(value if isinstance(value, int) and not isinstance(value, bool) else 0
+                            for value in (values.get("input_tokens"), values.get("output_tokens"),
+                                          values.get("cache_read_input_tokens"), values.get("cache_creation_input_tokens")))
+            model = message.get("model")
+            previous = messages.get(message["id"])
+            if previous is None:
+                messages[message["id"]] = {"numbers": numbers, "model": model}
+            else:
+                merged = tuple(max(old, new) for old, new in zip(previous["numbers"], numbers))
+                messages[message["id"]] = {"numbers": merged,
+                                             "model": model if numbers[1] >= previous["numbers"][1] else previous["model"]}
+        if not messages:
+            return None
+        models = {}
+        for message in messages.values():
+            numbers = message["numbers"]
+            totals["input"] += numbers[0] + numbers[3]
+            totals["output"] += numbers[1]
+            totals["cached"] += numbers[2]
+            totals["cache_creation"] += numbers[3]
+            if isinstance(message["model"], str):
+                models[message["model"]] = models.get(message["model"], 0) + numbers[1]
+        model = max(models, key=models.get) if models else None
+        price = self._claude_price(model)
+        cost = None if price is None else ((totals["input"] - totals["cache_creation"]) * price[0] +
+                                           totals["output"] * price[1] + totals["cached"] * price[2] +
+                                           totals["cache_creation"] * price[3]) / 1_000_000
+        return {key: totals[key] for key in ("input", "output", "cached")} | {"cost_usd": cost, "model": model}
 
     @staticmethod
     def _codex_error(job, lines):
@@ -2012,6 +2105,18 @@ class JobManager:
             offset = 0
         lines = data.decode("utf-8", errors="replace").split("\n")
         current = data[offset:].decode("utf-8", errors="replace").split("\n")
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") in ("system", "result") and event.get("session_id"):
+                session_id = event["session_id"]
+            if event.get("type") == "thread.started" and event.get("thread_id"):
+                session_id = event["thread_id"]
+        job["session_id"] = session_id or job.get("session_id")
         job["usage"], job["num_turns"] = self._usage(job, current)
         job["error"] = self._codex_error(job, current)
         job["max_turns_hit"] = self._hit_max_turns(current)

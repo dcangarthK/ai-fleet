@@ -4,9 +4,23 @@ import { get, post, type EvalRun, type LeaderRow, type Recommendation } from "..
 import { useCan, useFleet, useModels, useRun } from "../lib/data";
 import { ago, duration, isTrustedModel, pctText, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import "../components/motion/pages-motion.css";
+import { useCountUp } from "../components/motion/useCountUp";
+import { useLiveSignal } from "../components/motion/useLiveSignal";
+import { useVisible } from "../components/motion/useVisible";
+import { bestScore } from "../lib/pageMotion";
 
 const ROLES = ["coder", "reviewer", "fast"];
 const RUN_TONE: Record<EvalRun["state"], string> = { queued: "quiet", running: "accent", done: "ok", failed: "bad" };
+
+/** A leaderboard score. Only the best score for its role counts to a new value (the table doesn't tick every cell);
+ *  a new best gets one Settle highlight. `best` is the role's top score from /api/evals, the data source for both. */
+function ScoreCell({ score, isBest, best, tone }: { score: number; isBest: boolean; best: number; tone: string }) {
+  const counted = useCountUp(score);
+  const landed = useLiveSignal(best, 1300);
+  const flash = isBest && landed;
+  return <b className={`${isBest ? "tone-ok" : tone}${flash ? " best-flash" : ""}`} style={{ fontVariantNumeric: "tabular-nums" }}>{Math.round(isBest ? counted : score)}</b>;
+}
 
 export function EvalsPage() {
   const fleet = useFleet();
@@ -27,7 +41,8 @@ export function EvalsPage() {
   const catalog = useModels().data ?? [];
   const grounded = board.filter((x) => x.roles.grounded);
   const realReview = board.filter((x) => x.roles.reviewer_real);
-  const best = Object.fromEntries(ROLES.map((r) => [r, Math.max(...board.filter((x) => !x.errors?.length).map((x) => x.roles[r]?.score ?? 0), 0)]));
+  const best = Object.fromEntries(ROLES.map((r) => [r, bestScore(board.filter((x) => !x.errors?.length).map((x) => x.roles[r]?.score)) ?? 0]));
+  const visible = useVisible();
 
   async function start(e: FormEvent) {
     e.preventDefault();
@@ -62,7 +77,7 @@ export function EvalsPage() {
                 <td className="mono">{x.model}{x.errors?.length ? <div className="sub tone-warn">incomplete: {x.errors.length} case{x.errors.length > 1 ? "s" : ""} errored</div> : null}</td>
                 {ROLES.map((r) => {
                   const s = x.roles[r]?.score;
-                  return <td key={r} className="num">{s == null ? <span className="quiet">—</span> : <b className={s === best[r] && !x.errors?.length ? "tone-ok" : s < 60 ? "tone-bad" : ""}>{Math.round(s)}</b>}</td>;
+                  return <td key={r} className="num">{s == null ? <span className="quiet">—</span> : <ScoreCell score={s} isBest={s === best[r] && !x.errors?.length} best={best[r]} tone={s < 60 ? "tone-bad" : ""} />}</td>;
                 })}
                 <td className="num hide-sm">{x.size_gb ? `${x.size_gb.toFixed(1)} GB` : "—"}</td>
                 <td className="num hide-sm">{x.tokens_per_s ? `${Math.round(x.tokens_per_s)} tok/s` : "—"}</td>
@@ -197,7 +212,7 @@ export function EvalsPage() {
                 <tr key={r.id}>
                   <td className="mono">{r.model}</td>
                   <td>{fleet.data?.nodes.find((n) => n.id === r.node)?.name ?? r.node}</td>
-                  <td><span className={`state tone-${RUN_TONE[r.state]}`}>{r.state}</span>{r.errors?.length ? <div className="sub tone-bad">{r.errors[0]}</div> : null}</td>
+                  <td><span className={`state tone-${RUN_TONE[r.state]}${r.state === "running" ? ` loading-shimmer${visible ? "" : " paused"}` : ""}`}>{r.state}</span>{r.errors?.length ? <div className="sub tone-bad">{r.errors[0]}</div> : null}</td>
                   <td className="hide-sm small">{r.scores ? Object.entries(r.scores).map(([k, v]) => `${k} ${Math.round(v)}`).join(" · ") : "—"}</td>
                   <td className="small quiet">{r.started_at ? ago(r.started_at) : "waiting"}{r.started_at && r.ended_at ? ` · took ${duration(r.ended_at - r.started_at)}` : ""}</td>
                 </tr>

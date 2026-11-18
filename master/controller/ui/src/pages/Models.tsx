@@ -5,6 +5,9 @@ import { BUSY, useCan, useFleet, useModels, useRun } from "../lib/data";
 import { explainReason, FIT_LABEL, INSTALL_LABEL, progressFraction, TRUSTED_RULE } from "../lib/format";
 import { ErrorBanner, LoadError, NodeLight, PageHead, Section } from "../components/bits";
 import { describeRequest } from "../lib/request";
+import "../components/motion/pages-motion.css";
+import { useLiveSignal } from "../components/motion/useLiveSignal";
+import { useVisible } from "../components/motion/useVisible";
 import { Button, Empty, Panel, ProgressBar, Table, useConfirm, type Column } from "../components/ui";
 
 const ROLE_ORDER = ["coder", "reviewer", "fast"];
@@ -142,13 +145,16 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
   onRemove: () => void;
   onRetry: () => void;
 }) {
+  const visible = useVisible();
+  const settled = useLiveSignal(state?.state, 400); // Settle: the node's reported install state just changed
   if (!state) return <span className="quiet">—</span>;
   const fit = FIT_LABEL[state.fit] ?? FIT_LABEL.unknown;
   const s = state.state ?? undefined;
   if (s && BUSY.has(s)) {
     const frac = progressFraction(state.progress);
     return (
-      <div className="small">
+      // Think: the load shimmer runs only while the node reports a busy load state; paused when the tab is hidden.
+      <div className={`small loading-shimmer${visible ? "" : " paused"}`}>
         <span className={`state tone-${INSTALL_LABEL[s].tone}`}>{INSTALL_LABEL[s].label}{frac != null && ` ${Math.round(frac * 100)}%`}</span>
         <ProgressBar value={s === "pulling" ? frac : null} />
       </div>
@@ -166,7 +172,7 @@ function InstallCell({ state, busy, onInstall, onRemove, onRetry }: {
   if (state.installed || s === "ready") {
     return (
       <div className="small">
-        <span className="state tone-ok">Installed</span>
+        <span className={`state tone-ok${settled ? " settle-pop" : ""}`}>Installed</span>
         {state.ownership === "pre-existing" && <div className="sub">was already on the node</div>}
         <div><Button variant="ghost" size="sm" disabled={busy} onClick={onRemove}>Remove</Button></div>
       </div>

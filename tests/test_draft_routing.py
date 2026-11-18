@@ -20,12 +20,18 @@ class DraftRoutingTests(unittest.TestCase):
     def setUpClass(cls):
         store.init_db()
 
-    def test_explicit_sonnet_and_opus_drafts_go_to_haiku(self):
-        for model in ("claude-sonnet-5-5", "claude-opus-5-5"):
-            d = admit("draft", model)
-            self.assertEqual(d["model"], HAIKU)
-            self.assertEqual(d["routed_from"], budget.identity("claude", model))
-            self.assertEqual(d["routed_why"], "draft kind -> haiku")
+    def test_explicit_sonnet_draft_goes_to_haiku(self):
+        model = "claude-sonnet-5-5"
+        d = admit("draft", model)
+        self.assertEqual(d["model"], HAIKU)
+        self.assertEqual(d["routed_from"], budget.identity("claude", model))
+        self.assertEqual(d["routed_why"], "draft kind -> haiku")
+
+    def test_explicit_opus_draft_is_refused_by_guard_not_rewritten(self):
+        with self.assertRaises(budget.Refusal) as caught:
+            admit("draft", "claude-opus-5-5")
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(caught.exception.refused_by, "model_guard")
 
     def test_other_routes_have_no_draft_reason(self):
         self.assertIsNone(admit("build", "claude-sonnet-5-5")["routed_why"])

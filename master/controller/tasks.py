@@ -1932,6 +1932,9 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
                                                  "label": slot["label"] if slot else None, "node": node["id"],
                                                  "kind": kind,
                                                  "reason": decision.get("reason") or "placed by rank_slots"})
+            if (decision.get("routed_why") or "").startswith("owner override: "):
+                budget.log_decision("override", decision["routed_why"], task_id=task_id, title=part_title,
+                                    kind=kind, routed_why=decision["routed_why"], identity=decision["identity"])
             if decision["routed_from"]:
                 budget.log_decision("rerouted", decision.get("routed_why")
                                     or f"{decision['routed_from']} is limited; sent to {decision['identity']}",

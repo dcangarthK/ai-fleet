@@ -1172,10 +1172,14 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
             chosen = chosen or (account, "slot", f"waiting for a {label(of_key)} slot")
         return chosen, (first_watch if first_watch[0] is not None else first_limit)
     paid = agent in PAID_AGENTS
-    if kind == "check" and paid:
-        raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     resolved = model or (node_default_model(agent, node_id) if paid else None)
     key = match_key(rules, agent, resolved)
+    # The guard runs first for every kind (check and draft included), on the identity the caller named.
+    guard = model_guard(agent, resolved, kind, effort) or model_guard(agent, key, kind, effort)
+    if guard and not override:
+        raise Refusal(400, guard, refused_by="model_guard")
+    if kind == "check" and paid and not (guard and override):  # the owner override admits a guarded check
+        raise Refusal(400, "checks never run on paid models; use a local model (agent ollama) for availability checks")
     drafted_from = None
     # Drafts belong on Haiku (TOKEN-DEEPDIVE 2.5): an explicit sonnet/opus draft is admitted on Haiku and the
     # original identity recorded as routed_from. The owner's budget_override keeps the named model.
@@ -1184,9 +1188,6 @@ def admit(*, agent: str, model: str | None, kind: str, effort: str | None, overr
         drafted_from = identity(agent, model)
         model = resolved = KIND_DEFAULT_MODEL["draft"]
         key = match_key(rules, agent, resolved)
-    guard = model_guard(agent, resolved, kind, effort) or model_guard(agent, key, kind, effort)
-    if guard and not override:
-        raise Refusal(400, guard, refused_by="model_guard")
     # The owner's override admits a guarded identity, Fable on build/fix/test included (it supersedes rule 0).
     if not (guard and override) and (rule0_blocks(agent, resolved, kind) or rule0_blocks(agent, key, kind)):
         raise Refusal(400, f"{identity(agent, resolved)} never runs {kind} tasks (CLAUDE.md rule 0: Fable gives "

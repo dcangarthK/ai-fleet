@@ -5,7 +5,7 @@ import copy
 import unittest
 from unittest import mock
 
-from tests.test_controller import FakeRunner, W, fresh_loop_state, unmetered_claude_rules  # noqa: F401
+from tests.test_controller import FakeRunner, W, fresh_loop_state, unmetered_claude_rules, wait_for  # noqa: F401
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -16,7 +16,7 @@ import store  # noqa: E402
 
 FABLE, OPUS = "claude-fable-5-2", "claude-opus-5-5"
 KINDS = ["build", "fix", "test", "review", "re_review", "final_review", "security_review", "merge", "benchmark",
-         "draft", "lead"]
+         "draft", "check", "lead"]
 
 
 def admit(kind, model, effort=None, override=False, **kw):
@@ -62,6 +62,18 @@ class ModelGuardTests(unittest.TestCase):
         d = admit("build", OPUS, "medium", override=True)
         self.assertEqual(d["model"], OPUS)
         self.assertIn("owner override", d["routed_why"])
+
+    def test_opus_check_and_draft_refused_by_guard_and_override_admits(self):
+        for kind in ("check", "draft"):
+            refused(self, kind, OPUS, "low")
+        d = admit("draft", OPUS, "low", override=True)
+        self.assertEqual(d["model"], OPUS)
+        self.assertIn("owner override", d["routed_why"])
+        self.assertIsNone(d["routed_from"])
+
+    def test_check_with_opus_or_fable_is_refused_by_guard_first(self):
+        for model in (OPUS, FABLE):
+            refused(self, "check", model, "low")
 
     def test_opus_lead_and_reviews_default_to_low(self):
         for kind in ("lead", "review", "re_review"):
@@ -137,6 +149,8 @@ class ModelGuardHttpTests(unittest.TestCase):
         fresh_loop_state()
         cls.ctx = TestClient(controller.app, base_url="http://127.0.0.1")
         cls.c = cls.ctx.__enter__()
+        cls.c.post("/api/refresh", headers=W)
+        wait_for(lambda: any(n["id"] == "master" and n["runner_ok"] for n in cls.c.get("/api/fleet").json()["nodes"]))
 
     @classmethod
     def tearDownClass(cls):
@@ -150,6 +164,19 @@ class ModelGuardHttpTests(unittest.TestCase):
         detail = r.json()["detail"]
         self.assertEqual(detail["refused_by"], "model_guard")
         self.assertIn("fable is paid", detail["error"])
+
+    def test_override_admission_persists_routed_why_event(self):
+        import json
+        import store
+        r = self.c.post("/api/tasks", json={"prompt": "x", "agent": "claude", "model": OPUS, "kind": "build",
+                                            "effort": "medium", "mode": "read-only", "worktree": False,
+                                            "budget_override": "owner test"}, headers=W)
+        self.assertEqual(r.status_code, 200, r.text)
+        tid = r.json()["id"]
+        with store.db() as c:
+            rows = c.execute("SELECT data FROM events WHERE task_id=? AND type='budget.override'", (tid,)).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(json.loads(rows[0][0])["routed_why"].startswith("owner override: "))
 
 
 if __name__ == "__main__":

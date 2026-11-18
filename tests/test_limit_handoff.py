@@ -23,12 +23,12 @@ import tasks
 from store import db
 
 def _later_today(zone=None):
-    """A clock time later today (two hours ahead, at most 11:59 pm): a reset time that has passed is never rolled
-    to tomorrow, so a fixed time would make these fixtures fail once it is past."""
+    """A clock time two hours ahead, wrapping past midnight (lineage.parse_reset rolls a passed time to tomorrow
+    when it is within 5 h). Clamping to 11:59 pm made the fixture past or too near late in the evening."""
     import datetime
     from zoneinfo import ZoneInfo
     now = datetime.datetime.now(ZoneInfo(zone) if zone else None)
-    soon = min(now + datetime.timedelta(hours=2), now.replace(hour=23, minute=59, second=0, microsecond=0))
+    soon = now + datetime.timedelta(hours=2)
     return f"{soon.hour % 12 or 12}:{soon.minute:02d} {'AM' if soon.hour < 12 else 'PM'}"
 
 

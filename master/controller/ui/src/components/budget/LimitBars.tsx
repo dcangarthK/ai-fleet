@@ -1,10 +1,13 @@
+import { useEffect, useRef, useState } from "react";
 import { Card, CardGrid, Empty, StatusPill } from "../ui";
+import { useCountUp } from "../motion/useCountUp";
+import { createCrossingLatch } from "../../lib/pageMotion";
 import { clockTime, concurrencyText, formatTokens, meter, modelLabel, statusCard, type BudgetStatus, type ModelStatus, type RateWindow } from "../../lib/budget";
 import { countdown } from "../../lib/forecast";
 import { Bar, usedTone } from "./Bar";
 
 function WindowBar({ name, w, now, account }: { name: string; w: RateWindow; now: number; account: string }) {
-  const used = Math.round(w.used_percent);
+  const used = Math.round(useCountUp(w.used_percent)); // Count: source is the account's rate-limit window
   return (
     <div style={{ display: "grid", gap: 4 }}>
       <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
@@ -21,6 +24,12 @@ function WindowBar({ name, w, now, account }: { name: string; w: RateWindow; now
 function ModelCard({ m, now }: { m: ModelStatus; now: number }) {
   const card = statusCard(m);
   const gauge = meter(m.today_tokens, m.soft, m.hard);
+  // Soft-budget crossing: observed per status update, latched so it fires once and is never re-armed.
+  const latch = useRef(createCrossingLatch());
+  const [crossed, setCrossed] = useState(false);
+  useEffect(() => {
+    if (latch.current.observe(m.key, m.today_tokens, m.soft)) setCrossed(true);
+  }, [m.key, m.today_tokens, m.soft]);
   const accounts = m.accounts ?? [];
   return (
     <Card
@@ -31,7 +40,7 @@ function ModelCard({ m, now }: { m: ModelStatus; now: number }) {
       <div className="stack">
         <div className="small quiet mono wrap-any">{m.key} · {concurrencyText(m)}</div>
         <div style={{ display: "grid", gap: 4 }}>
-          <Bar pct={gauge.pct == null ? null : gauge.pct * 100} tone={gauge.tone} label={`${modelLabel(m.key)} tokens today`} valueText={gauge.label} />
+          <Bar pct={gauge.pct == null ? null : gauge.pct * 100} tone={gauge.tone} label={`${modelLabel(m.key)} tokens today`} valueText={gauge.label} crossed={crossed} />
           <span className="small quiet">Today: {gauge.label}</span>
         </div>
         {accounts.map((a) => {

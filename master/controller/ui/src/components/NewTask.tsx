@@ -3,8 +3,14 @@ import { post, type Mode, type Task } from "../lib/api";
 import { useFleet, useRun } from "../lib/data";
 import { ErrorBanner } from "./bits";
 import { SpawnPreview } from "./work/SpawnPreview";
+import { IconButton } from "./ui";
+import { KINDS, type Kind } from "../lib/budget";
 
 type Agent = "codex" | "claude" | "ollama";
+
+const MODELS: Record<Agent, readonly string[]> = {
+  codex: ["gpt-5.6-terra"], claude: ["sonnet", "opus", "haiku"], ollama: [],
+};
 
 /** "New task" dialog. Supervised and full modes go to the approval inbox before they start. */
 export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (t: Task) => void }) {
@@ -12,6 +18,7 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
   const fleet = useFleet();
   const { run, busy, error, clearError } = useRun();
   const [agent, setAgent] = useState<Agent>("codex");
+  const [kind, setKind] = useState<Kind>("build");
   const [mode, setMode] = useState<Mode>("auto-edit");
   const [node, setNode] = useState("");
   const [model, setModel] = useState("");
@@ -34,12 +41,12 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const body: Record<string, string | boolean> = { agent, mode, prompt };
+    const body: Record<string, string | boolean> = { agent, mode, prompt, kind };
     if (bypass && agent !== "ollama") body.trusted_bypass = true;
     if (node) body.node = node;
     if (repo.trim()) body.repo = repo.trim();
     if (gate.trim()) body.gate = gate.trim();
-    if (agent === "ollama" && model) body.model = model;
+    if (model && model !== "auto") body.model = model;
     const t = await run(() => post<Task>("/api/tasks", body));
     if (t) {
       setPrompt("");
@@ -50,55 +57,58 @@ export function NewTask({ open, onClose, onCreated }: { open: boolean; onClose: 
   return (
     <dialog ref={ref} className="modal" onClose={onClose} aria-labelledby="new-task-title">
       <form onSubmit={submit}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="modal-head">
           <h2 id="new-task-title">New task</h2>
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <IconButton label="Close" className="dlg-close" onClick={onClose}><span aria-hidden="true">×</span></IconButton>
         </div>
         <ErrorBanner error={error} onDismiss={clearError} />
+        <label className="field">What should the agent do?
+          <textarea name="prompt" autoComplete="off" value={prompt} onChange={(e) => setPrompt(e.target.value)} required autoFocus />
+        </label>
         <div className="grid-form">
+          <label className="field">Kind
+            <select name="kind" autoComplete="off" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+              {KINDS.map((value) => <option key={value} value={value}>{value.replace(/_/g, " ")}</option>)}
+            </select>
+          </label>
           <label className="field">Agent
-            <select value={agent} onChange={(e) => setAgent(e.target.value as Agent)}>
+            <select name="agent" autoComplete="off" value={agent} onChange={(e) => { setAgent(e.target.value as Agent); setModel("auto"); }}>
               <option value="codex">Codex</option>
               <option value="claude">Claude</option>
               <option value="ollama">Local model (Ollama)</option>
             </select>
           </label>
           <label className="field">Permission mode
-            <select value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
+            <select name="mode" autoComplete="off" value={mode} onChange={(e) => setMode(e.target.value as Mode)}>
               {(fleet.data?.modes ?? []).map((m) => <option key={m}>{m}</option>)}
             </select>
           </label>
           <label className="field">Node
-            <select value={node} onChange={(e) => setNode(e.target.value)}>
+            <select name="node" autoComplete="off" value={node} onChange={(e) => setNode(e.target.value)}>
               <option value="">Pick automatically</option>
               {nodes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
             </select>
           </label>
-          {agent === "ollama" && (
-            <label className="field">Model
-              <select value={model} onChange={(e) => setModel(e.target.value)} required>
-                <option value="" disabled>Choose a model</option>
-                {ollamaModels.map((m) => <option key={m}>{m}</option>)}
-              </select>
-            </label>
-          )}
+          <label className="field">Model
+            <select name="model" autoComplete="off" value={model || "auto"} onChange={(e) => setModel(e.target.value)}>
+              <option value="auto">Auto</option>
+              {(agent === "ollama" ? ollamaModels : MODELS[agent]).map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </label>
         </div>
         <div className="grid-form">
           <label className="field">Repository on the node (optional)
-            <input className="mono" value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="~/code/my-project" />
+            <input className="mono" name="repo" autoComplete="off" spellCheck={false} value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="~/code/my-project…" />
           </label>
           <label className="field">Gate (must pass before review)
-            <input list="gate-profiles" value={gate} onChange={(e) => setGate(e.target.value)} placeholder={profiles[0] ?? "none"} />
+            <input list="gate-profiles" name="gate" autoComplete="off" spellCheck={false} value={gate} onChange={(e) => setGate(e.target.value)} placeholder={`${profiles[0] ?? "none"}…`} />
             <datalist id="gate-profiles">{profiles.map((p) => <option key={p}>{p}</option>)}</datalist>
           </label>
         </div>
-        {agent !== "ollama" && <SpawnPreview kind="build" agent={agent} />}
-        <label className="field">What should the agent do?
-          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} required />
-        </label>
+        {agent !== "ollama" && <SpawnPreview kind={kind} agent={agent} />}
         {agent !== "ollama" && (
-          <label className="row small" style={{ gap: 8 }}>
-            <input type="checkbox" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />
+          <label className="check small">
+            <input type="checkbox" name="bypass" checked={bypass} onChange={(e) => setBypass(e.target.checked)} />
             <span>Skip permission prompts: {agent === "claude" ? "Claude" : "Codex"} runs in full mode without asking. Needs the node to allow full mode and a policy that pre-approves it.</span>
           </label>
         )}

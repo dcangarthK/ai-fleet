@@ -1,0 +1,49 @@
+/* M3 Work + Work detail motion. Only transform and opacity animate. Reduced motion: loops stop. */
+
+.wm-spark { color: var(--accent); vertical-align: middle; margin-left: 6px; opacity: 0.9; }
+
+/* Running row: thin progress bar (scaleX from real elapsed/expected) with a sheen sweeping while the tab is visible. */
+.wm-sheen { display: block; position: relative; height: 2px; margin-top: 6px; border-radius: 1px; overflow: hidden; background: rgba(127, 127, 127, 0.2); }
+.wm-sheen > i { position: absolute; inset: 0; background: var(--accent); transform-origin: left center; transform: scaleX(var(--p, 0)); transition: transform var(--dur-3) var(--ease-out); }
+.wm-sheen > b { position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); transform: translateX(-100%); animation: wm-sheen 1.8s var(--ease-in-out) infinite; }
+.wm-sheen.paused > b { animation-play-state: paused; }
+@keyframes wm-sheen { to { transform: translateX(250%); } }
+
+/* Chain connector; Flow: a dot travels along the active connector only. */
+.wm-conn { display: inline-block; position: relative; width: 14px; height: 2px; margin: 0 2px; vertical-align: middle; background: rgba(127, 127, 127, 0.35); overflow: hidden; }
+.wm-conn.flow > i { position: absolute; left: 0; top: 0; width: 5px; height: 2px; border-radius: 1px; background: var(--accent); animation: wm-flow 1.1s linear infinite; }
+.wm-conn.paused > i { animation-play-state: paused; }
+@keyframes wm-flow { from { transform: translateX(-5px); } to { transform: translateX(14px); } }
+.wm-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; }
+.wm-chain > li { display: inline-flex; align-items: center; }
+
+/* Terminal caret: blinks only while output streams. */
+.term-cursor.idle { animation: none; opacity: 0; }
+.term-cursor.paused { animation-play-state: paused; }
+
+/* Settle: gate results. The mark pops in (scale + opacity); a failure shakes 2px once. */
+.wm-gate { list-style: none; margin: 0 0 var(--s3, 12px); padding: 0; display: grid; gap: 4px; font: 12.5px var(--mono); }
+.wm-gate li { display: flex; align-items: center; gap: 8px; }
+.wm-gate .mark { width: 14px; height: 14px; flex: none; }
+.wm-gate .ok .mark { color: var(--ok); }
+.wm-gate .bad .mark { color: var(--bad); }
+.wm-gate .settle { animation: wm-fade var(--dur-3) var(--ease-out) both; }
+.wm-gate .settle .mark { animation: wm-pop var(--dur-3) var(--ease-out) both; animation-delay: inherit; transform-origin: center; }
+.wm-gate .settle.bad { animation: wm-fade var(--dur-3) var(--ease-out) both, wm-shake var(--dur-3) var(--ease-in-out) 1 both; }
+@keyframes wm-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wm-pop { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@keyframes wm-shake { 20% { transform: translateX(-2px); } 40% { transform: translateX(2px); } 60% { transform: translateX(-2px); } 80% { transform: translateX(2px); } }
+
+/* Findings arrive in severity order (stagger via inline animation-delay). */
+.wm-findings > li { list-style: none; }
+.wm-findings > li.arrive { animation-fill-mode: both; }
+
+/* Focus morph from the Work row title. */
+::view-transition-group(work-title) { animation-duration: 240ms; animation-timing-function: var(--ease-out); }
+
+@media (prefers-reduced-motion: reduce) {
+  .wm-sheen > b, .wm-conn.flow > i { animation: none; }
+  .wm-gate .settle, .wm-gate .settle .mark { animation-duration: 80ms !important; }
+  .wm-gate .settle.bad { animation: wm-fade 80ms linear both; }
+  ::view-transition-group(work-title) { animation-duration: 0.01ms; }
+}

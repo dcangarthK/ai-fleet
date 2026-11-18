@@ -210,7 +210,7 @@ export function RulesEditor() {
             </Card>
           </fieldset>
           {editable && (
-            <div className="row" style={{ flexWrap: "wrap" }}>
+            <div className="row save-bar" style={{ flexWrap: "wrap" }}>
               <Button variant="primary" type="submit" disabled={busy || pending.length === 0}>Review changes and save</Button>
               <Button disabled={busy || pending.length === 0} onClick={() => current.data && setForm(rulesToForm(current.data.body))}>Discard changes</Button>
               <span className="quiet small" role="status">{pending.length ? `${pending.length} change${pending.length > 1 ? "s" : ""} not saved` : "No unsaved changes"}</span>

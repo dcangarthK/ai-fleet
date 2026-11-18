@@ -1,3 +1,4 @@
+import { IconButton } from "../components/ui";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -188,9 +189,9 @@ function NewPipeline({ open, onClose, onCreated }: { open: boolean; onClose: () 
   return (
     <dialog ref={ref} className="modal" onClose={onClose} aria-labelledby="np-title">
       <form onSubmit={submit}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
           <h2 id="np-title">New pipeline</h2>
-          <button type="button" className="ghost" onClick={onClose}>Close</button>
+          <IconButton label="Close" className="dlg-close" onClick={onClose}><span aria-hidden="true">×</span></IconButton>
         </div>
         <ErrorBanner error={error} onDismiss={clearError} />
         <label className="field">Title<input value={title} onChange={(e) => setTitle(e.target.value)} required maxLength={80} /></label>

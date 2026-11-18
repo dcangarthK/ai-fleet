@@ -4,6 +4,7 @@ import { get, post, put, type Effective, type InstructionSet, type Mode, type Po
 import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import { SettleCheck } from "../components/motion/MiniGraph";
 
 const AGENTS = ["claude", "codex", "ollama"];
 const ROLES = ["coder", "reviewer", "fast"];
@@ -144,7 +145,7 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
         </span>
       </div>
       <ErrorBanner error={error} onDismiss={clearError} />
-      {saved && <div className="banner note" role="status">{saved}</div>}
+      {saved && <div className="banner note settle-pop" role="status"><SettleCheck />{saved}</div>}
 
       <label className="field">Instructions
         <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={16384}
@@ -272,7 +273,7 @@ function History({ data, current, onRestore }: {
       {rows.map((r) => (
         <details key={r.kind + r.v} style={{ margin: "6px 0 0 12px" }}>
           <summary className="small">{r.kind} v{r.v} · {ago(r.at)} by {r.by}{r.same ? " · same as the editor" : ""}</summary>
-          <pre className="out">{r.content || "(empty)"}</pre>
+          <pre className="out arrive">{r.content || "(empty)"}</pre>
           {!r.same && <button type="button" className="ghost small" onClick={r.restore}>Restore into editor</button>}
         </details>
       ))}

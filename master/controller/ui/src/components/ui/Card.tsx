@@ -27,7 +27,7 @@ export function Card({ title, actions, footer, className, bodyClassName, childre
 
 /** Same surface without padding, for tables and lists. */
 export function Panel({ className, children }: { className?: string; children?: ReactNode }) {
-  return <div className={cx("card", className)} style={{ overflow: "hidden" }}>{children}</div>;
+  return <div className={cx("card panel-clip", className)}>{children}</div>;
 }
 
 /** Equal-height card grid that never overflows: auto-fill with a min(100%, 280px) track. */

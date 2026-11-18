@@ -1,0 +1,75 @@
+/* M2 motion for the Shell and Now page. Only transform and opacity are animated.
+   Durations come from the tokens in styles.css; reduced motion zeroes them and loops are also gated in JS. */
+
+/* ---- Shell: live dot pulses once per controller event (class set by useLiveSignal on data refresh) ---- */
+.live-dot .light.sse { position: relative; }
+.live-dot .light.sse.pulse::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--ok);
+  animation: live-ring 1.6s var(--ease-out) 1 both; pointer-events: none;
+}
+@keyframes live-ring { from { transform: scale(1); opacity: 0.6; } to { transform: scale(3.2); opacity: 0; } }
+
+/* "N need you" chip settles when the count changes */
+.needs-you { display: inline-block; font-variant-numeric: tabular-nums; }
+.needs-you.settle { animation: chip-settle var(--dur-3) var(--ease-out) 1 both; }
+@keyframes chip-settle { from { transform: scale(1.12); } to { transform: scale(1); } }
+
+/* Palette opens with a 120ms scale from .98 */
+.dlg.palette { animation: pal-in var(--dur-1) var(--ease-out) 1 both; }
+@keyframes pal-in { from { transform: scale(0.98); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* Route cross-fade (NavLink viewTransition) */
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 200ms; }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+}
+
+/* ---- Now: constellation strip ---- */
+.constellation { display: block; width: 100%; height: 180px; margin: 0 0 var(--s4); overflow: visible; }
+@media (max-width: 640px) { .constellation { height: 120px; } }
+.constellation text { font-size: 10px; fill: var(--ink-3); pointer-events: none; }
+.c-orbit { stroke: var(--line-strong); stroke-width: 1; opacity: 0.55; }
+.c-node { cursor: pointer; outline: none; }
+.c-node .c-dot { fill: var(--ok); }
+.c-node.degraded .c-dot { fill: var(--warn); }
+.c-node.down .c-dot { fill: var(--bad); }
+.c-node.pending .c-dot { fill: none; stroke: var(--warn); stroke-width: 2; }
+.c-node.drained .c-dot { fill: var(--ink-3); opacity: 0.5; }
+.c-node:focus-visible .c-dot, .c-link:focus-visible .c-link-line { stroke: var(--focus); stroke-width: 2.5; }
+.c-agent rect { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.5; }
+.c-agent.live rect { stroke: var(--accent); fill: var(--accent-soft); }
+.c-link { cursor: pointer; outline: none; }
+.c-link-hit { fill: none; stroke: transparent; stroke-width: 12; }
+.c-link-line { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0.55; }
+.c-particle { fill: var(--accent); offset-rotate: 0deg; opacity: 0; }
+.constellation.flowing .c-particle { animation: c-flow 2.4s linear infinite; }
+@keyframes c-flow {
+  0% { offset-distance: 0%; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* ---- Now: briefing reveal, sentence by sentence, first load only ---- */
+.now .brief p .reveal { opacity: 0; animation: brief-in var(--dur-3) var(--ease-out) both; animation-delay: calc(var(--i, 0) * 380ms); }
+@keyframes brief-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ---- Now: approve/reject settle ---- */
+.settle-wrap { position: relative; min-width: 0; }
+.settle-wrap.bad { animation: settle-shake var(--dur-3) var(--ease-out) 1 both; }
+@keyframes settle-shake { 0%, 100% { transform: translateX(0); } 30% { transform: translateX(-2px); } 65% { transform: translateX(2px); } }
+.settle-wrap.ok > .insight { border-left-color: var(--ok); }
+.settle-wrap.bad > .insight { border-left-color: var(--bad); }
+.settle-mark { position: absolute; top: var(--s3); right: var(--s3); width: 20px; height: 20px; pointer-events: none; }
+.settle-mark path { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 24; stroke-dashoffset: 24; animation: settle-draw var(--dur-3) var(--ease-out) 1 forwards; }
+.settle-wrap.ok .settle-mark path { stroke: var(--ok); }
+.settle-wrap.bad .settle-mark path { stroke: var(--bad); }
+@keyframes settle-draw { to { stroke-dashoffset: 0; } }
+.count-num { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .now .brief p .reveal { animation: none; opacity: 1; }
+  .live-dot .light.sse.pulse::after, .constellation .c-particle { animation: none; }
+  .settle-wrap.bad { animation: none; }
+  .settle-mark path { animation: none; stroke-dashoffset: 0; }
+}

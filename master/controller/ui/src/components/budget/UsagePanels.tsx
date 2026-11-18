@@ -20,7 +20,7 @@ function StackChart({ stack }: { stack: ReturnType<typeof stackDays> }) {
       <ul className="legend" aria-label="Legend">
         {stack.series.map((m) => <li key={m}><span className={`swatch ${colour(m)}`} />{m}</li>)}
       </ul>
-      <div className="stack-bars" role="img" aria-label="Stacked bars of tokens per day by model; the table above has the numbers">
+      <div className="stack-bars" role="region" tabIndex={0} aria-label="Tokens per day by model, as stacked bars; the table above has the numbers">
         {stack.days.map((d) => (
           <div key={d.day} className="stack-col" title={`${d.day}: ${formatTokens(d.total)} tokens`}>
             <span className="stack-total small">{formatTokens(d.total)}</span>

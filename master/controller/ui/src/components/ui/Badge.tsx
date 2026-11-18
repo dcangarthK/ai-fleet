@@ -7,7 +7,7 @@ const PILL: Record<Tone, string> = { ok: "p-ok", warn: "p-warn", bad: "p-bad", i
 const BADGE_BG: Record<Tone, string> = { ok: "var(--ok)", warn: "var(--warn)", bad: "var(--bad)", info: "var(--info)", accent: "var(--accent)", quiet: "var(--ink-3)" };
 
 export function Badge({ tone = "bad", children, label }: { tone?: Tone; children: ReactNode; label?: string }) {
-  return <span className="badge" aria-label={label} style={{ background: BADGE_BG[tone] }}>{children}</span>;
+  return <span className="badge" role={label ? "img" : undefined} aria-label={label} style={{ background: BADGE_BG[tone] }}>{children}</span>;
 }
 
 /** Status with a dot; colour is never the only signal because the text always says what it is. */

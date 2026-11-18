@@ -337,7 +337,8 @@ class Launch(Base):
         allow = self.m._command(self.job(agent="claude", mode="auto-edit", policy={"tools": {"claude_allow": ["Bash"]}}),
                                 "p", [], False)  # no kind: the old launch, policy list only
         self.assertEqual(flag(allow, "--allowedTools"), NEW_HEAD +
-                         "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)")
+                         "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*),Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build),"
+                         "Bash(cd:*),Bash(npx tsc:*),Bash(npm run typecheck),Bash(npm run lint)")
 
     def test_mode_filter_applies_to_explicit_tool_lists(self):
         self.assertEqual(self.settings_allow(kind="re_review", mode="read-only", tools=["Read", "Bash", "Edit"]),
@@ -407,7 +408,8 @@ class Launch(Base):
 
 NEW_HEAD = "Bash(python3:*),Bash(uv run:*),Bash(scripts/gate.sh:*),Bash(./scripts/gate.sh:*),Bash(npx vitest:*),Bash(python3 -m unittest:*),Bash(npm test),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git add:*),Bash(git commit:*),"
 SCOPED_BASH = NEW_HEAD + "Bash(ls:*),Bash(cat:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(grep:*)," \
-              "Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)"
+              "Bash(diff:*),Bash(pwd),Bash(npm ci --ignore-scripts),Bash(npm run build)," \
+              "Bash(cd:*),Bash(npx tsc:*),Bash(npm run typecheck),Bash(npm run lint)"
 SCOPED_BUILD = "Read,Edit,Write," + SCOPED_BASH + ",Grep,Glob"
 
 
@@ -529,13 +531,19 @@ class QuietBashRepeat(unittest.TestCase):
             cmd = "python3 -m unittest tests/a.py"
             self.run_hook(cmd, d)
             self.run_hook(cmd, d)
-            wrapped = "python3 %s --wrap /tmp/x.log -- %s" % (self.HOOK, cmd)
+            wrapped = "python3 %s --wrap %s -- %s" % (self.HOOK, os.path.join(d, "x.log"), cmd)
             out = self.run_hook(wrapped, d)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_first_direct_wrapper_call_is_left_alone(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d))
+            wrapped = "python3 %s --wrap %s -- python3 -m unittest tests/a.py" % (self.HOOK, os.path.join(d, "x.log"))
+            self.assertIsNone(self.run_hook(wrapped, d))
+
+    def test_a_wrapper_call_with_a_logfile_outside_the_job_dir_is_not_exempt(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = self.run_hook("python3 %s --wrap /tmp/x.log -- python3 -m unittest tests/a.py" % self.HOOK, d)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_non_test_commands_are_never_counted(self):
         with tempfile.TemporaryDirectory() as d:

@@ -32,6 +32,8 @@ BASH_RULES = [
     # Read-only inspection and the two fixed npm commands (not sed, rg, npm run:*, echo, test or find).
     "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)",
     "Bash(diff:*)", "Bash(pwd)", "Bash(npm ci --ignore-scripts)", "Bash(npm run build)",
+    # G2: `cd` (quiet_bash strips a leading in-worktree cd and leaves out-of-tree ones alone) and typecheck/lint.
+    "Bash(cd:*)", "Bash(npx tsc:*)", "Bash(npm run typecheck)", "Bash(npm run lint)",
 ]
 
 # Placeholder in settings-*.json hook commands; the runner substitutes the absolute path of quiet_bash.py.

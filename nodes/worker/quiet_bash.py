@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import string
 import subprocess
 import sys
 import tempfile
@@ -25,12 +26,12 @@ MAX_LINE_CHARS = 500
 HEAD_LINES = 300
 MAX_TEST_RUNS = 2  # the third run of the same test command is refused
 # A test runner at the start of a segment (optionally after VAR=x assignments).
-TEST_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*(python3?\s+-m\s+unittest\b|(?:\./)?scripts/gate\.sh\b|(?:npx\s+)?vitest\b)")
+TEST_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*(python3?\s+-m\s+unittest|(?:\./)?scripts/gate\.sh|(?:npx\s+)?vitest)(?=\s|$)")
 _private_dir = None
 
 
 def split_segments(cmd):
-    """Split on && || ; | outside quotes."""
+    """Split on && || ; | and a lone & (background) outside quotes; `2>&1`, `>&2` and `&>f` stay whole."""
     segs, cur, quote, i = [], [], None, 0
     while i < len(cmd):
         c = cmd[i]
@@ -49,7 +50,9 @@ def split_segments(cmd):
             i += 1
             cur.append(cmd[i])
         elif c in ";|&":
-            if c != "&" or (i + 1 < len(cmd) and cmd[i + 1] == "&"):
+            nxt = cmd[i + 1] if i + 1 < len(cmd) else ""
+            redirect = c == "&" and (nxt == ">" or (i > 0 and cmd[i - 1] in "<>"))  # 2>&1, >&2, &>f
+            if not redirect:
                 segs.append("".join(cur))
                 cur = []
                 if i + 1 < len(cmd) and cmd[i + 1] == c:
@@ -61,6 +64,39 @@ def split_segments(cmd):
         i += 1
     segs.append("".join(cur))
     return segs
+
+
+_WORD_CHARS = frozenset(string.ascii_letters + string.digits + "_./=:,@%+-")
+
+
+def strict_ok(cmd):
+    """Allowlist (G2 round 5). True only when the WHOLE command is: words of [A-Za-z0-9_./=:,@%+-], blanks, the
+    separators `&&` `;` `|`, the token `2>&1`, and plain single/double quoted strings with no `$`, backslash,
+    backtick or newline inside. Everything else (`$ \\ ` < > ( ) { } * ? ~ ! #`, a lone `&`, `||`, newline,
+    non-ASCII) fails, so no parser has to guess what the shell would do with it."""
+    if not cmd or not cmd.strip():
+        return False
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if cmd.startswith("2>&1", i) and (i == 0 or cmd[i - 1] in " \t") and (i + 4 == n or cmd[i + 4] in " \t;|&"):
+            i += 4
+        elif c in _WORD_CHARS or c in " \t":
+            i += 1
+        elif c in "'\"":
+            j = cmd.find(c, i + 1)
+            if j < 0 or any(x in cmd[i + 1:j] for x in "$\\`\n\r"):
+                return False
+            i = j + 1
+        elif cmd.startswith("&&", i):
+            i += 2
+        elif cmd.startswith("||", i):
+            return False
+        elif c in ";|":
+            i += 1
+        else:
+            return False
+    return True
 
 
 def is_test_command(cmd):
@@ -79,6 +115,73 @@ def git_kind(cmd):
             and not any(c in (cmd or "") for c in ";|&<>$`("):
         return "diff"
     return None
+
+
+_SEG = r"(?:^|[;&|(\n`]|\$\()\s*"
+# what may stand before a command word: VAR=x, builtin/command, ! { and shell keywords
+_PRE = (r"(?:(?:\w+=\S*|builtin|command|time|exec|nohup|env(?:\s+-\S+)*"
+        r"|timeout(?:\s+-\S+(?:\s+[A-Za-z0-9]+)?)*\s+\d[\w.]*"
+        r"|then|do|else|elif|if|while|until|!|\{)\s+)*")
+_FILE = r"(?:'[^']*'|\"[^\"]*\"|[^\s<>]+)"
+_DELIM = _FILE
+HEREDOC_RES = (
+    re.compile(_SEG + _PRE + r"cat[ \t]*>>?\|?[ \t]*" + _FILE + r"[ \t]*<<"),                  # cat > f <<EOF, cat >| f <<EOF
+    re.compile(_SEG + _PRE + r"cat[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]*>>?\|?[ \t]*[^\s<]"),   # cat <<EOF > f, cat<<EOF>f
+    re.compile(_SEG + _PRE + r"tee[ \t]+(?:-\w+[ \t]+)*" + _FILE + r"[ \t]*<<"),                # tee f <<EOF
+    re.compile(_SEG + _PRE + r"tee[ \t]*<<-?[ \t]*" + _DELIM + r"[ \t]+(?:-\w+[ \t]+)*[^\s<>]"),  # tee <<EOF f
+)
+# cd/pushd at the start of a command, also behind the prefixes above
+CD_WORD_RE = re.compile(_SEG + _PRE + r"(?:cd|pushd)(?=\s|$)")
+# unquoted dir stops at whitespace and shell separators; a quoted dir is taken whole
+CD_RE = re.compile(r"^\s*cd\s+('[^']*'|\"[^\"]*\"|[^\s;&|'\"]+)[ \t]*(&&|;)[ \t]*(.+)$", re.S)
+CD_UNSAFE = set("~$`*?[\\\n\r{}!<>()")
+CD_ASK = {"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+    "permissionDecisionReason": "cd to a directory outside the task worktree (or one that can't be resolved safely)"}}
+CD_REST_ASK = {"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+    "permissionDecisionReason": "command after cd uses shell syntax the quiet_bash hook cannot check safely"}}
+WRAPPER_ASK = {"hookSpecificOutput": {
+    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+    "permissionDecisionReason": "quiet_bash.py wrapper call that is not exactly a wrapped test command"}}
+
+
+def is_heredoc_write(cmd):
+    return any(r.search(cmd or "") for r in HEREDOC_RES)
+
+
+def worktree_root(payload):
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or os.getcwd())
+
+
+def cd_decision(cmd, payload):
+    """G2: how to treat `cd`. Returns (action, target, sep, rest). (None,)*4 when the command has no cd;
+    ("rewrite", abs_dir, sep, rest) for a single leading `cd <dir> &&|;` whose dir is an existing directory that
+    resolves (symlinks included) inside the worktree; ("ask", ...) for any other cd (outside the tree, unresolvable,
+    not a directory, several cds, not leading, keyword/env-prefixed), because Bash(cd:*) would otherwise auto-run it.
+    The cd is always kept, as an absolute path: the shell's own cwd may differ from the payload's."""
+    n = len(CD_WORD_RE.findall(cmd or ""))
+    if n == 0:
+        return None, None, None, None
+    ask = ("ask", None, None, None)
+    if n != 1:
+        return ask
+    m = CD_RE.match(cmd)
+    if not m:
+        return ask
+    raw = m.group(1)
+    if raw[0] in "'\"":
+        raw = raw[1:-1]
+    if not raw or raw.startswith("-") or any(c in CD_UNSAFE for c in raw):
+        return ask
+    cwd = os.path.realpath(payload.get("cwd") or os.getcwd())
+    root = worktree_root(payload)
+    target = os.path.realpath(os.path.join(cwd, raw))
+    if target != root and not target.startswith(root + os.sep):
+        return ask
+    if not os.path.isdir(target):
+        return ask
+    return "rewrite", target, m.group(2), m.group(3).strip()
 
 
 def job_dir():
@@ -233,33 +336,94 @@ def deny_repeat():
                                     "the runner runs the gate once after you finish)" % MAX_TEST_RUNS}}
 
 
+def log_in_job_dir(log):
+    """The wrapper writes LOGFILE, so it must be an absolute path that resolves under the job dir."""
+    if not os.path.isabs(log):
+        return False
+    root = os.path.realpath(job_dir())
+    return os.path.realpath(log).startswith(root + os.sep)
+
+
+def wrapper_state(cmd):
+    """None when cmd is not a call of a quiet_bash.py wrapper; ("ok", inner) when it is exactly what rewrite_command()
+    produces (this script, one simple command, tokens quoted as shlex.quote would) AND the inner command is a pure
+    test command (--wrap) or a flags-only `git diff` (--head); ("bad", None) for any other wrapper-shaped call, which
+    must not be exempt from the checks (it would run anything under Bash(python3:*))."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return None
+    if len(toks) < 3 or toks[0] != "python3" or os.path.basename(toks[1]) != "quiet_bash.py" \
+            or toks[2] not in ("--wrap", "--head"):
+        return None
+    bad = ("bad", None)
+    if len(toks) < 6 or toks[1] != os.path.abspath(__file__) or toks[4] != "--":
+        return bad
+    if not log_in_job_dir(toks[3]):
+        return bad
+    if " ".join(shlex.quote(t) for t in toks) != cmd.strip():
+        return bad
+    inner = " ".join(toks[5:])
+    if toks[2] == "--wrap":
+        good = is_test_command(inner) and can_wrap(inner)
+    else:
+        good = git_kind(inner) == "diff"
+    return ("ok", inner) if good else bad
+
+
+def can_wrap(cmd):
+    """True when every segment of cmd is a test runner (and nothing can hide a command from the permission check),
+    so running the whole thing under the wrapper cannot smuggle another command in under the python3 rule."""
+    if not strict_ok(cmd):
+        return False
+    return all(TEST_RE.match(seg) for seg in split_segments(cmd))
+
+
 def hook_output(payload):
     """The hook's JSON reply, or None to leave the command unchanged."""
     if payload.get("tool_name") != "Bash":
         return None
     ti = payload.get("tool_input") or {}
     cmd = ti.get("command") or ""
-    if "quiet_bash.py" in cmd and ("--wrap" in cmd or "--head" in cmd):
+    wstate = wrapper_state(cmd)
+    if wstate and wstate[0] == "ok":
         # The model called the wrapper itself. The hook doesn't rewrite it, but the test command inside still counts.
-        try:
-            toks = shlex.split(cmd)
-            inner = " ".join(toks[toks.index("--") + 1:]) if "--" in toks else ""
-        except ValueError:
-            inner = ""
-        if is_test_command(inner) and repeat_count(inner) > MAX_TEST_RUNS:
+        if is_test_command(wstate[1]) and repeat_count(wstate[1]) > MAX_TEST_RUNS:
             return deny_repeat()
         return None
+    if is_heredoc_write(cmd):
+        # A denial message, not a stop: the model gets the reason and retries with Write in the same run.
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny",
+            "permissionDecisionReason": "use the Write/Edit tool, not a heredoc"}}
+    action, target, sep, rest = cd_decision(cmd, payload)
+    if action == "ask":
+        return CD_ASK
+    prefix, body = "", cmd
+    if action == "rewrite":
+        if not strict_ok(rest):
+            return CD_REST_ASK
+        prefix, body = "cd %s %s " % (shlex.quote(target), sep), rest
+        wstate = wrapper_state(body)
+    if wstate and wstate[0] == "bad":
+        return WRAPPER_ASK
     new = dict(ti)
-    gk = git_kind(cmd)
+    gk = git_kind(body)
     if gk == "log":
-        new["command"] = "git log -n 30"
+        new["command"] = prefix + "git log -n 30"
     elif gk == "diff":
-        new["command"] = rewrite_command(cmd, new_log_path(), "--head")
-    elif is_test_command(cmd):
-        if repeat_count(cmd) > MAX_TEST_RUNS:
+        new["command"] = prefix + rewrite_command(body, new_log_path(), "--head")
+    elif wstate:  # a valid wrapper call behind an in-tree cd
+        if is_test_command(wstate[1]) and repeat_count(wstate[1]) > MAX_TEST_RUNS:
             return deny_repeat()
-        new["command"] = rewrite_command(cmd, new_log_path())
+        new["command"] = prefix + body
+    elif is_test_command(body):
+        if repeat_count(body) > MAX_TEST_RUNS:
+            return deny_repeat()
+        new["command"] = prefix + (rewrite_command(body, new_log_path()) if can_wrap(body) else body)
     else:
+        new["command"] = prefix + body
+    if new["command"] == cmd and action != "rewrite":
         return None
     # updatedInput only: no permissionDecision, so normal permission rules still apply
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": new}}

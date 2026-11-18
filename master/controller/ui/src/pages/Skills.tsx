@@ -84,7 +84,7 @@ function SkillEditor({ skill, onClose }: { skill: Skill | typeof BLANK; onClose:
     <Section title={isNew ? "New skill" : `Skill: ${skill.id}`} aside={!isNew && "version" in skill ? `version ${skill.version}` : undefined}>
       <form className="panel" style={{ padding: 16 }} onSubmit={save}>
         <ErrorBanner error={error} onDismiss={clearError} />
-        {saved && <div className="banner note arrive" role="status"><SettleCheck />{saved}</div>}
+        {saved && <div className="banner note settle-pop" role="status"><SettleCheck />{saved}</div>}
         <div className="grid-form">
           <label className="field">Id
             <input className="mono" value={id} onChange={(e) => setId(e.target.value)} disabled={!isNew} required pattern="[a-z][a-z0-9-]{1,40}" title="Lowercase letters, digits and dashes" />

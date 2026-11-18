@@ -6,6 +6,7 @@ import { ago } from "../lib/format";
 import { PageHead, StatusPill } from "../components/bits";
 import { Card, Empty, ErrorState, Input, Loading, Select, Table, Truncate, type Column } from "../components/ui";
 import type { WorkItem } from "../lib/lineage";
+import { announce } from "../components/motion/announce";
 import { Arrive, useArrivals } from "../components/motion/Arrive";
 import { Sparkline } from "../components/motion/Sparkline";
 import { useVisible } from "../components/motion/useVisible";
@@ -54,7 +55,7 @@ function useTokenSeries(items: WorkRow[]): (id: string) => number[] {
       if (!i.tokens || !isRunning(i)) continue;
       const prev = store.current.get(i.root_id) ?? [];
       const next = pushSample(prev, { t, total: tokenTotal(i.tokens) });
-      if (next.length !== prev.length) { store.current.set(i.root_id, next); changed = true; }
+      if (next[next.length - 1] !== prev[prev.length - 1]) { store.current.set(i.root_id, next); changed = true; }
     }
     if (changed) bump((n) => n + 1);
   }, [items]);
@@ -79,6 +80,8 @@ function WorkTable({ rows, all }: { rows: WorkRow[]; all: WorkRow[] }) {
   const reduced = useReducedMotion();
   const live = visible && !reduced;
   const isNew = useArrivals(all.map((i) => `${i.root_id}@${i.updated_at}`));
+  const arrived = all.filter((i) => isNew(`${i.root_id}@${i.updated_at}`)).length;
+  useEffect(() => { if (arrived > 0) announce(`${arrived} new work item${arrived === 1 ? "" : "s"}`); }, [arrived]);
   const now = useNow(live && all.some(isRunning), 5000);
   const series = useTokenSeries(all);
   const expected = useMemo(() => {

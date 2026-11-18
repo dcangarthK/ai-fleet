@@ -13,12 +13,12 @@ import { Terminal } from "../components/Terminal";
 
 /** NodeLight with a heartbeat ring on each `last_seen` update (the signal), and a 600ms desaturate when the node is
  *  offline, which also stops the ring. `children` (the node name) fades with it. Loops never run: one ring per heartbeat. */
-function NodeBeat({ node, children }: { node: FleetNode; children?: ReactNode }) {
+function NodeBeat({ node, pulse = true, children }: { node: FleetNode; pulse?: boolean; children?: ReactNode }) {
   const signal = nodeSignal(node);
   const offline = signal === "down";
   const visible = useVisible();
   const beat = useLiveSignal(node.last_seen, 1700);
-  const ping = beat && visible && !offline && (signal === "up" || signal === "degraded");
+  const ping = beat && pulse && visible && !offline && (signal === "up" || signal === "degraded");
   return (
     <span className={`row node-fade${offline ? " node-offline" : ""}`} style={{ gap: "var(--s2)" }}>
       <span className={`beat${ping ? " ping" : ""}`}><NodeLight node={node} /></span>
@@ -81,10 +81,12 @@ export function NodesPage() {
   const nav = useNavigate();
   const a = useNodeActions();
   const nodes = fleet.data?.nodes ?? [];
+  // One pulse per viewport: only the most recently seen node rings.
+  const newest = nodes.reduce<FleetNode | null>((m, n) => (n.last_seen ?? -1) > (m?.last_seen ?? -1) ? n : m, null)?.id;
   const cols: Column<FleetNode>[] = [
     { key: "node", header: "Node", cell: (n) => (
       <>
-        <Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: "var(--s2)" }}><NodeBeat node={n}><b>{n.name}</b></NodeBeat></Link>
+        <Link to={`/nodes/${encodeURIComponent(n.id)}`} className="row" style={{ gap: "var(--s2)" }}><NodeBeat node={n} pulse={n.id === newest}><b>{n.name}</b></NodeBeat></Link>
         <div className="sub">{n.os} · <span className="mono">{n.ip}</span> · seen {ago(n.last_seen)}</div>
       </>
     ) },

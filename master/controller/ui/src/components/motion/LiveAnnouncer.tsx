@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { createThrottle } from "../../lib/motion";
+import type { CSSProperties } from "react";
+import { useAnnouncement } from "./announce";
 
 const HIDDEN: CSSProperties = {
   position: "absolute",
@@ -10,14 +10,9 @@ const HIDDEN: CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-/** Polite live region. `message` is the data source; at most one announcement per 5s
- *  (messages inside the window are dropped). */
-export function LiveAnnouncer({ message }: { message: string }) {
-  const [text, setText] = useState("");
-  const allow = useRef(createThrottle());
-  useEffect(() => {
-    if (message && allow.current()) setText(message);
-  }, [message]);
+/** Polite live region, mount once (Shell). Text comes from announce(); throttled to 1 per 5s, latest kept. */
+export function LiveAnnouncer() {
+  const text = useAnnouncement();
   return (
     <div aria-live="polite" role="status" style={HIDDEN}>
       {text}

@@ -39,3 +39,22 @@ export function createThrottle(gapMs = ANNOUNCE_GAP_MS, now: () => number = Date
 
 /** True for ids that were not in the set seen on first render. */
 export const isArrival = (initial: ReadonlySet<string>, id: string): boolean => !initial.has(id);
+
+/** Announcement throttle that keeps the latest message: one emit per `gapMs`; messages inside the window
+ *  replace the pending one, which flushes when the window ends. Clock is injectable for tests. */
+export function createAnnouncer(emit: (msg: string) => void, gapMs = ANNOUNCE_GAP_MS, now: () => number = Date.now) {
+  let last = -Infinity;
+  let pending: string | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = (msg: string) => { last = now(); emit(msg); };
+  return {
+    announce(msg: string) {
+      if (!msg) return;
+      const wait = gapMs - (now() - last);
+      if (wait <= 0 && timer === null) { fire(msg); return; }
+      pending = msg;
+      if (timer === null) timer = setTimeout(() => { timer = null; const m = pending; pending = null; if (m !== null) fire(m); }, Math.max(0, wait));
+    },
+    dispose() { if (timer !== null) clearTimeout(timer); timer = null; pending = null; },
+  };
+}

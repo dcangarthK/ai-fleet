@@ -147,7 +147,7 @@ function Notifications({ admin }: { admin: boolean }) {
   return (
     <Section title="Notifications" aside="Which events reach your notification plugins">
       <ErrorBanner error={error} onDismiss={clearError} />
-      {sent && <div className="banner note arrive" role="status"><SettleCheck label="Sent" />{sent}</div>}
+      {sent && <div className="banner note settle-pop" role="status"><SettleCheck label="Sent" />{sent}</div>}
       <Panel>
         <Table
           caption="Notification rules" rows={rules.data ?? []} rowKey={(r) => r.id}
@@ -206,7 +206,7 @@ function Backup() {
   return (
     <Section title="Backup and restore" aside="Catalog, roles, policies, skills and rules; never tokens">
       <ErrorBanner error={error} onDismiss={clearError} />
-      {done && <div className="banner note arrive" role="status"><SettleCheck label="Restored" />{done}</div>}
+      {done && <div className="banner note settle-pop" role="status"><SettleCheck label="Restored" />{done}</div>}
       <div className="row">
         <Button disabled={busy} onClick={download}>Download configuration</Button>
         <label className="row" style={{ gap: 8 }}><span className="small">Restore from a file:</span><input type="file" accept="application/json,.json" onChange={choose} /></label>

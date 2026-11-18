@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, post } from "../lib/api";
 import { useEvents } from "../lib/data";
+import { announce } from "../components/motion/announce";
 import { useArrivals } from "../components/motion/Arrive";
 import { useCountUp } from "../components/motion/useCountUp";
 import { MiniGraph } from "../components/motion/MiniGraph";
@@ -284,6 +285,8 @@ function ChainsSection({ data }: { data: Live }) {
 function QueueSection({ data, phone }: { data: Live; phone: boolean }) {
   // Arrive: ids not present on first render. Leave: rows that started slide out right (ease-in).
   const isNew = useArrivals(data.queue.map((q) => q.task_id));
+  const arrived = data.queue.filter((q) => isNew(q.task_id)).length;
+  useEffect(() => { if (arrived > 0) announce(`${arrived} new queued task${arrived === 1 ? "" : "s"}`); }, [arrived]);
   const rows = useLeaving(data.queue, (q) => q.task_id);
   return (
     <Section title="Queue" aside={`${data.queue.length} waiting`}>

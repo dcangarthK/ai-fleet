@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { countDuration, createThrottle, easeOut, interpolateCount, isArrival, planCount } from "./motion";
+import { describe, expect, it, vi } from "vitest";
+import { countDuration, createAnnouncer, createThrottle, easeOut, interpolateCount, isArrival, planCount } from "./motion";
 
 describe("interpolation", () => {
   it("starts at from, ends at to, eases out", () => {
@@ -49,5 +49,22 @@ describe("arrivals", () => {
     const initial = new Set(["a", "b"]);
     expect(isArrival(initial, "a")).toBe(false);
     expect(isArrival(initial, "c")).toBe(true);
+  });
+});
+
+describe("createAnnouncer", () => {
+  it("emits first at once, keeps only the latest inside the window, flushes after it", () => {
+    vi.useFakeTimers();
+    let t = 0;
+    const out: string[] = [];
+    const a = createAnnouncer((m) => out.push(m), 5000, () => t);
+    a.announce("one");
+    t = 1000; vi.setSystemTime(1000); a.announce("two");
+    t = 2000; a.announce("three");
+    expect(out).toEqual(["one"]);
+    t = 5000; vi.advanceTimersByTime(4000);
+    expect(out).toEqual(["one", "three"]);
+    a.dispose();
+    vi.useRealTimers();
   });
 });

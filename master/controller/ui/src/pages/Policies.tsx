@@ -145,7 +145,7 @@ function LayerEditor({ layer, current, policy }: { layer: Layer; current?: Instr
         </span>
       </div>
       <ErrorBanner error={error} onDismiss={clearError} />
-      {saved && <div className="banner note arrive" role="status"><SettleCheck />{saved}</div>}
+      {saved && <div className="banner note settle-pop" role="status"><SettleCheck />{saved}</div>}
 
       <label className="field">Instructions
         <textarea value={text} onChange={(e) => setText(e.target.value)} maxLength={16384}

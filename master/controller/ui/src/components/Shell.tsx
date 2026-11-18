@@ -9,6 +9,7 @@ import { Icon } from "./icons";
 import { Button, IconButton, ProgressBar } from "./ui";
 import { useCountUp } from "./motion/useCountUp";
 import { useLiveSignal } from "./motion/useLiveSignal";
+import { LiveAnnouncer } from "./motion/LiveAnnouncer";
 import "./motion/now-motion.css";
 
 export function Shell() {
@@ -59,6 +60,7 @@ export function Shell() {
   return (
     <div className="shell">
       <a className="skip-link" href="#main">Skip to content</a>
+      <LiveAnnouncer />
 
       <aside className={`side${drawer ? " open" : ""}`} id="rail" ref={railRef} aria-label="Primary">
         <div className="brand"><i /><span className="brand-text">Fleet console</span></div>

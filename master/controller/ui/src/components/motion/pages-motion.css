@@ -61,3 +61,6 @@
   .node-fade { transition: none; }
   .bar-fill { transition: none; }
 }
+
+/* Save banners settle in place: scale/opacity only, no translate or wash. */
+.banner.settle-pop { display: block; }

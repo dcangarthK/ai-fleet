@@ -75,3 +75,15 @@ describe("severityOrder", () => {
     expect(staggerDelay(100)).toBe(720);
   });
 });
+
+describe("pushSample at cap", () => {
+  it("keeps changing the last sample once 40 are stored", () => {
+    let s: { t: number; total: number }[] = [];
+    for (let i = 1; i <= 45; i++) s = pushSample(s, { t: i, total: i * 10 });
+    expect(s).toHaveLength(40);
+    expect(s[s.length - 1]).toEqual({ t: 45, total: 450 });
+    const next = pushSample(s, { t: 46, total: 460 });
+    expect(next).toHaveLength(40);
+    expect(next[next.length - 1]).not.toBe(s[s.length - 1]);
+  });
+});

@@ -39,6 +39,9 @@ export function Constellation({ fleet, live }: { fleet: Fleet | undefined; live:
   const visible = useVisible();
   const lay = useMemo(() => layout(constellationInput(fleet, live)), [fleet, live]);
   const flowing = lay.anyLive && !reduced && visible;
+  // Cap animated particles at 150: past that, only the most recent task's link flows (last live worker).
+  const overCap = lay.links.length * 3 > 150;
+  const focusId = overCap ? lay.links[lay.links.length - 1]?.task_id : null;
   if (!lay.nodes.length) return null;
   const key = (go: () => void) => (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
   return (
@@ -53,7 +56,7 @@ export function Constellation({ fleet, live }: { fleet: Fleet | undefined; live:
           <g key={l.id} className="c-link" role="link" tabIndex={0} aria-label={"Live task " + l.title} onClick={go} onKeyDown={key(go)}>
             <path className="c-link-hit" d={l.path} />
             <path className="c-link-line" d={l.path} id={"cl-" + l.task_id} />
-            {flowing && [0, 1, 2].map((i) => (
+            {flowing && (!overCap || l.task_id === focusId) && [0, 1, 2].map((i) => (
               <circle key={i} className="c-particle" r="2.2" style={{ offsetPath: 'path("' + l.path + '")', animationDelay: -i * 0.8 + "s" } as CSSProperties} />
             ))}
             <title>{l.title}</title>

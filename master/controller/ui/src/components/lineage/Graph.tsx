@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent, type WheelEven
 import { focusSet, fmtDur, fmtTokens, layoutGraph, spanOf, tokenTotal, type LEdge, type LNode } from "../../lib/lineageGraph";
 
 import { useArrivals } from "../motion/Arrive";
+import { useVisible } from "../motion/useVisible";
 import "../motion/pages-motion.css";
 
 /** Ids whose state changed since the last snapshot, for ~1s (Settle). Source: the nodes' own state/ended_at.
@@ -9,6 +10,7 @@ import "../motion/pages-motion.css";
 function useSettled(nodes: LNode[]): ReadonlySet<string> {
   const prev = useRef<Map<string, string> | null>(null);
   const [hot, setHot] = useState<ReadonlySet<string>>(new Set());
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const next = new Map<string, string>();
     const changed: string[] = [];
@@ -21,8 +23,10 @@ function useSettled(nodes: LNode[]): ReadonlySet<string> {
     prev.current = next;
     if (!changed.length) return;
     setHot(new Set(changed));
-    setTimeout(() => setHot(new Set()), 1000);
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => { timer.current = null; setHot(new Set()); }, 1000);
   }, [nodes]);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   return hot;
 }
 
@@ -56,13 +60,14 @@ export function Graph({ nodes, edges, now, selected, onSelect }: { nodes: LNode[
   const hoverNode = hovered ? byId.get(hovered) ?? null : null;
   const isNew = useArrivals(nodes.map((n) => n.id));
   const settled = useSettled(nodes);
+  const visible = useVisible();
   return <div className="graph-wrap">
     <div className="graph-actions"><button onClick={fit}>Fit</button><span className="quiet">Scroll to zoom · drag to pan · select a card to focus</span></div>
     <svg ref={svgRef} className={dragging ? "graph-svg dragging" : "graph-svg"} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} onWheel={onWheel} onPointerDown={(e) => down(e)} onPointerMove={move} onPointerUp={() => { drag.current = null; setDragging(false); }} onPointerCancel={() => { drag.current = null; setDragging(false); }}>
       <defs><pattern id="graph-dots" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" /></pattern>{["quiet", "bad", "accent"].map((t) => <marker id={`graph-arrow-${t}`} key={t} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" className={`graph-arrow ${t}`} /></marker>)}</defs>
       <rect width="100%" height="100%" className="graph-bg" /><g transform={`translate(${view.x} ${view.y}) scale(${view.z})`}>
         {layout.groups.map((g) => <g key={g.root}><rect x={g.x} y={g.y} width={g.w} height={g.h} rx="10" className="graph-band"/><text x={g.x + 16} y={g.y + 20} className="graph-band-label">{g.root}</text></g>)}
-        {edges.map((e) => { const a = byId.get(e.from), b = byId.get(e.to); if (!a || !b || !layout.place[a.id] || !layout.place[b.id]) return null; const p = at(a.id), q = at(b.id), x1 = p.x + CARD_W, y1 = p.y + CARD_H / 2, x2 = q.x, y2 = q.y + CARD_H / 2, d = `M${x1} ${y1} C${x1 + 48} ${y1} ${x2 - 48} ${y2} ${x2} ${y2}`, failed = a.state === "failed" || b.state === "failed", running = a.ended_at === null || b.ended_at === null, hot = !!selected && focused.has(a.id) && focused.has(b.id); return <g key={`${e.from}-${e.to}`} className={`graph-edge ${failed ? "bad" : running ? "running" : "quiet"}${hot ? " hot" : ""}`}><path d={d} markerEnd={`url(#graph-arrow-${failed ? "bad" : running ? "accent" : "quiet"})`}/>{running && <><circle r="3"><animateMotion dur="1.4s" repeatCount="indefinite" path={d}/></circle><circle r="3"><animateMotion dur="1.4s" begin=".7s" repeatCount="indefinite" path={d}/></circle></>}{(e.link === "retry" || e.link === "fix") && <g transform={`translate(${(x1 + x2) / 2} ${(y1 + y2) / 2 - 12})`} className="graph-link"><rect x="-20" y="-10" width="40" height="18" rx="9"/><text textAnchor="middle" y="3">{e.link}</text></g>}</g>; })}
+        {edges.map((e) => { const a = byId.get(e.from), b = byId.get(e.to); if (!a || !b || !layout.place[a.id] || !layout.place[b.id]) return null; const p = at(a.id), q = at(b.id), x1 = p.x + CARD_W, y1 = p.y + CARD_H / 2, x2 = q.x, y2 = q.y + CARD_H / 2, d = `M${x1} ${y1} C${x1 + 48} ${y1} ${x2 - 48} ${y2} ${x2} ${y2}`, failed = a.state === "failed" || b.state === "failed", running = a.ended_at === null || b.ended_at === null, hot = !!selected && focused.has(a.id) && focused.has(b.id); return <g key={`${e.from}-${e.to}`} className={`graph-edge ${failed ? "bad" : running ? "running" : "quiet"}${hot ? " hot" : ""}`}><path d={d} markerEnd={`url(#graph-arrow-${failed ? "bad" : running ? "accent" : "quiet"})`}/>{running && visible && <><circle r="3"><animateMotion dur="1.4s" repeatCount="indefinite" path={d}/></circle><circle r="3"><animateMotion dur="1.4s" begin=".7s" repeatCount="indefinite" path={d}/></circle></>}{(e.link === "retry" || e.link === "fix") && <g transform={`translate(${(x1 + x2) / 2} ${(y1 + y2) / 2 - 12})`} className="graph-link"><rect x="-20" y="-10" width="40" height="18" rx="9"/><text textAnchor="middle" y="3">{e.link}</text></g>}</g>; })}
         {nodes.map((n) => { const p = at(n.id), s = spanOf(n, now), dim = !!selected && !focused.has(n.id), state = n.state === "failed" ? "failed" : n.state === "cancelled" ? "cancelled" : n.ended_at === null ? "running" : "done"; return <g key={n.id} transform={`translate(${p.x} ${p.y})`} style={{ animationDelay: `${layout.place[n.id].col * 70}ms` }} className={`graph-node ${state} ${hue(n.agent)}${dim ? " dim" : ""}${isNew(n.id) ? " is-new" : ""}${settled.has(n.id) ? " settled" : ""}`} tabIndex={0} role="button" onPointerEnter={() => setHovered(n.id)} onPointerLeave={() => setHovered((id) => id === n.id ? null : id)} onPointerDown={(e) => { e.stopPropagation(); down(e, n); }} onClick={(e) => { e.stopPropagation(); onSelect(n); }} onKeyDown={(e) => { if (e.key === "Enter") onSelect(n); }}><rect width={CARD_W} height={CARD_H} rx="10"/><circle cx="20" cy="22" r="11"/><text x="20" y="26" textAnchor="middle" className="graph-initial">{(n.agent ?? "?").slice(0, 1).toUpperCase()}</text><text x="38" y="22" className="graph-title">{trim(n.stage && n.stage !== n.kind ? `${n.kind ?? "task"} · ${n.stage}` : (n.kind ?? n.stage ?? "task"), 21)}</text><text x="38" y="44" className="graph-sub">{trim(`${n.model ?? n.agent ?? "agent"} · ${fmtDur(s.start ? s.end - s.start : s.wait)} · ${fmtTokens(tokenTotal(n.tokens))}`, 31)}</text>{state === "done" && <text x="198" y="25" className="graph-tick">✓</text>}{state === "failed" && <text x="198" y="25" className="graph-fail">×</text>}</g>; })}
         {hoverNode && (() => { const p = at(hoverNode.id), s = spanOf(hoverNode, now); return <g className="graph-hover" transform={`translate(${p.x} ${p.y + CARD_H + 8})`}><rect width="238" height="88" rx="8"/><text x="12" y="20" className="graph-hover-title">{trim(hoverNode.title ?? hoverNode.kind ?? "Task attempt", 31)}</text><text x="12" y="39">{hoverNode.state}</text><text x="12" y="57">{trim(hoverNode.model ?? hoverNode.agent ?? "agent", 31)}</text><text x="12" y="75">{fmtDur(s.start ? s.end - s.start : s.wait)} · {fmtTokens(tokenTotal(hoverNode.tokens))} tokens</text></g>; })()}
       </g>

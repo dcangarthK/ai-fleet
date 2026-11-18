@@ -58,7 +58,7 @@ The durations follow common design-system conventions: 150–400ms for transitio
    - Arrive becomes an opacity change of 80ms or less.
    - View transitions are skipped.
 3. **Performance.**
-   - Only `transform` and `opacity` are animated.
+   - Only `transform` and `opacity` are animated. Allowed non-transform exceptions are the Arrive background wash, the Settle stroke draw, the offline desaturate filter, and SVG offset/animateMotion particles.
    - All loops pause when `document.visibilityState` is hidden.
    - Above 150 animated elements, only the focused path animates (the same rule as the Lineage graph).
    - No new dependencies: CSS, Web Animations API and SVG `animateMotion` only.

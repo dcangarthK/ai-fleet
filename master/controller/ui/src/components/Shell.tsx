@@ -7,6 +7,9 @@ import { HelpDialog, Palette, useShortcuts } from "./Palette";
 import { NewTask } from "./NewTask";
 import { Icon } from "./icons";
 import { Button, IconButton, ProgressBar } from "./ui";
+import { useCountUp } from "./motion/useCountUp";
+import { useLiveSignal } from "./motion/useLiveSignal";
+import "./motion/now-motion.css";
 
 export function Shell() {
   const live = useLiveUpdates();
@@ -24,6 +27,11 @@ export function Shell() {
 
   const waiting = (tasks.data ?? []).filter(needsYou).length;
   const crumbs = breadcrumbs(loc.pathname);
+  // Motion sources: tasks.dataUpdatedAt moves on every controller-driven refetch (SSE event or the 30s poll);
+  // `waiting` is the real count. Both are baselined on first render, so nothing animates on load.
+  const pulse = useLiveSignal(tasks.dataUpdatedAt, 1700);
+  const waitingShown = Math.round(useCountUp(waiting));
+  const chipSettle = useLiveSignal(waiting, 400);
 
   const openPalette = useCallback(() => setPalette(true), []);
   const openHelp = useCallback(() => setHelp(true), []);
@@ -62,7 +70,7 @@ export function Shell() {
                 {g.pages.map((p) => {
                   const count = p.id === "now" ? waiting : 0;
                   return (
-                    <NavLink key={p.id} to={p.to} end={p.end} title={p.label} aria-label={count ? `${p.label}, ${count} need you` : p.label}
+                    <NavLink key={p.id} to={p.to} end={p.end} viewTransition title={p.label} aria-label={count ? `${p.label}, ${count} need you` : p.label}
                              className={({ isActive }) => (isActive ? "active" : undefined)}>
                       <Icon name={p.icon} />
                       <span className="label">{p.label}</span>
@@ -101,10 +109,10 @@ export function Shell() {
           </nav>
           <div className="top-actions">
             <span className="live-dot" title={live ? "Live updates connected" : "Live updates disconnected; refreshing every 30s"}>
-              <span className={`light sse ${live ? "on" : ""}`} />
+              <span className={`light sse ${live ? "on" : ""}${live && pulse ? " pulse" : ""}`} />
               <span className="live-text">{live ? "live" : "offline"}</span>
             </span>
-            {waiting > 0 && <Link className="needs-you" to="/">{waiting} need you</Link>}
+            {waiting > 0 && <Link className={`needs-you${chipSettle ? " settle" : ""}`} to="/" aria-label={`${waiting} need you`}>{waitingShown} need you</Link>}
             <button type="button" className="cmdk" aria-label="Search pages, tasks, actions" aria-keyshortcuts="Meta+K Control+K" onClick={openPalette}>
               <Icon name="search" className="ico cmdk-icon" />
               <span className="cmdk-text">Search pages, tasks, actions</span>

@@ -52,7 +52,7 @@ export const reactMock = {
   },
 };
 
-export function renderHook<P, R>(hook: (p: P) => R, initial: P) {
+export function renderHook<P, R>(hook: (p: P) => R, initial: NoInfer<P>) {
   slots = [];
   effects = [];
   pending = [];

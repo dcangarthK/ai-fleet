@@ -102,6 +102,14 @@ class LimitRerouteTests(HandoffBase):
         self.assertEqual(self.get(source["id"])["profile"], "fleet")
         self.assertEqual(self.children(source["id"]), [])
 
+    def test_explicit_profile_pin_waits_even_when_another_account_is_free(self):
+        source = self.build(profile="fleet")  # the spare account is free and eligible
+        self.limit(source["id"], text=CLAUDE_LIMIT)
+
+        self.assertGreater(self.parked_until(source["id"]), time.time())
+        self.assertEqual(self.get(source["id"])["profile"], "fleet")
+        self.assertEqual(self.children(source["id"]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

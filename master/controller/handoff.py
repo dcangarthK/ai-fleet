@@ -820,6 +820,8 @@ async def handle_limit(task_id: str, *, now: float | None = None, slot: dict | N
                     "reason": existing.get("reason"), "existing": True}
         if budget.on_task_limit(rules, task.get("kind")) != "handoff":
             return schedule_wait(task, f"{task.get('kind') or 'this kind'} waits for the reset", now)
+        if tasks._profile_is_pinned(task):
+            return schedule_wait(task, "profile is pinned: waits for its own account's reset", now)
         if handoffs_in_chain(task_id) >= int((rules.get("limits") or {}).get("max_handoffs", 2)):
             return schedule_wait(task, "no handoffs left for this work item", now)
         node = tasks.node_of(task)

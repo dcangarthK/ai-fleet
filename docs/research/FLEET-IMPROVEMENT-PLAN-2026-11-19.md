@@ -49,7 +49,9 @@ branches, an event log, a budget-rules table (version 3) enforced server-side pe
 
 Priced spend is **$387.75 over 8.7 days**, every cent of it Claude; Codex and Ollama rows carry no price
 (AUDIT-B §1). Of that, **$250.94 is `build` and $46.45 is `fix`** — 77% of all spend on two kinds. 69 Haiku runs cost
-$1.18 in total, so cheap models are not the problem; the problem is that the work never reaches them.
+$1.18 in total, so cheap models are not the problem; the problem is that the work never reaches them. Note that
+Codex and Ollama are *unpriced*, not free: a local run still costs electricity, wall-clock and a machine that has to
+be awake, and that cost is simply not recorded anywhere.
 
 With the role tier down, there is no "cheapest capable model" step at all. The budget rules enforce a floor (no Codex
 for merges, no paid `check`), but nothing routes *down* into local models, because the local models are unreachable.
@@ -60,8 +62,10 @@ Tasks reaching run 2: **163**. Run 3: **74**. Run 4: **33**. Spend on run 2 and 
 spend** (AUDIT-B §2). Separately, 246 Claude runs ended with outcome `error` for **$171.75**, the single largest
 category, and 50 runs across 19 tasks ended on a usage limit for **$103.10**.
 
-A run that ends in `error` or `limit` and then restarts pays the full context again. The fleet's dominant cost is not
-thinking — it is re-reading.
+The likely mechanism is that a run which ends in `error` or `limit` and then restarts pays for its context again, so
+the dominant cost is re-reading rather than thinking. Treat that as a **hypothesis**, not as something the data
+establishes: `cost_source` is NULL on 611 of 633 usage rows and `run_prompt_bytes` is mostly a constant placeholder,
+so per-run context size is never actually measured. Item 0.7 below exists to settle it.
 
 ### F3. The control plane has five writers for one decision
 
@@ -109,8 +113,10 @@ wrong-model run that costs money (drafts on Sonnet, twice, $4.53).
 
 Zero tasks were running for **129.1 of 209.8 hours** (AUDIT-B §5). Peak concurrency was 8, on 11-13. The paid
 accounts were *not* all limited during that idle time — the logged limit windows total 29.4 + 6.1 + 1.9 hours. The
-fleet is idle because nobody is driving it, not because it ran out of quota. Capacity and quota are not the
-constraint; the orchestrator's attention is.
+fleet is therefore **not** idle for want of quota. The most likely explanation is that nothing drives it when the
+owner is not in a session, which would make attention rather than capacity the binding constraint — but that too is a
+hypothesis: busy time is derived from `started_at`/`ended_at` and includes queued and review spans, so 61.5% is a
+floor on idleness rather than a precise figure.
 
 ## 3. The shape to aim for
 
@@ -138,8 +144,10 @@ day of fleet time, M = a few tasks, L = a batch of its own.
 | # | Change | Why | Size |
 |---|---|---|---|
 | 0.1 | Free disk on `master` and alert under 5 GB | 0.6 GB free on the only node that can build; a full disk fails every task and every gate | S |
-| 0.2 | Call `check_independence` inside `_claim_to_insert` (handoff.py:875-898) | A handed-off review can run on its builder's model (F3) | S |
-| 0.3 | Rename the event `requeue_limit_wait` emits (tasks.py:1040) from `task.rerouted` to `task.limit_wait` | The event log cannot distinguish a park from a handoff (F3) | S |
+| 0.2 | A handoff-specific independence check on the chosen `(agent, resolved model)` before `_claim_to_insert` inserts (handoff.py:875-898), **preserving the original review lineage**, with a regression test for "same model, different account" | A handed-off review can run on its builder's model (F3). The existing `check_independence` cannot simply be called: it takes a `TaskIn` and uses its `parent_id`, while a handoff inserts a child of the failed task and clears `review_of` unless it is a stall reroute (handoff.py:934). `candidate_slots` (handoff.py:269) has no builder exclusion either | S/M |
+| 0.3 | Rename the event `requeue_limit_wait` emits (tasks.py:1040) from `task.rerouted` to `task.limit_wait`, keeping compatibility for existing consumers or versioning the event schema | The event log cannot distinguish a park from a handoff (F3) | S |
+| 0.6 | Rewrite `CLAUDE.md` step 7 and the reviewer table, delete the six stale rules AUDIT-C §4 lists, and date every remaining rule with its reason (**moved up from P2.5**) | The instructions are part of the live control plane. Changing scheduling while contradictory routing guidance is still in force produces ambiguous behaviour (F5) | S |
+| 0.7 | Repair measurement: write `cost_source` on every usage row, record a real `run_prompt_bytes`, and store a gate result for every task that ran one | 611 of 633 rows have no cost provenance and 268 of 426 tasks have no gate result, so neither the rework hypothesis (F2) nor pass-rate routing (3.2) can be trusted yet | S/M |
 | 0.4 | Retire dead nodes: mark a node `stale` after N consecutive runner failures, and de-duplicate two registrations of the same host | 41,113 failures still listed as an approved node (§1) | S |
 | 0.5 | Fix the local-role transport (`sync failed: All connection attempts failed`) or mark the roles `unrouted` loudly in `fleet_status` | The whole cheap tier is dead and nothing says so (F1) | S/M |
 
@@ -147,8 +155,9 @@ day of fleet time, M = a few tasks, L = a batch of its own.
 
 | # | Change | Why | Size |
 |---|---|---|---|
+| 1.0 | **Write the behavioural spec and its regression tests first, then run the new policy in shadow mode** before it takes over | P1 changes scheduler behaviour. Shadow mode already exists on the limit path (capacity.py:300-304); use it rather than cutting over blind | M |
 | 1.1 | **One limit policy function.** A single `plan_limit(task) -> Park(until) \| Handoff(slot) \| Fail(reason)`; the three parkers plus the auto-approve hold and the capacity move all call it. One wait computation, one eligibility list, one set of fields | Five writers, three wait times (F3) | M |
-| 1.2 | **One slot ranker.** Fold `candidate_slots` and `rank_slots` into the placement path, with the differences (fallbacks, cross-vendor, tier floors, builder exclusion) as explicit flags rather than separate code | Three rankers, outcome depends on entry point (F3) | M |
+| 1.2 | **One slot ranker.** Fold `candidate_slots` and `rank_slots` into the placement path, with the differences (fallbacks, cross-vendor, tier floors, builder exclusion) as explicit flags rather than separate code. **`same_node` has to become an explicit, tested flag first:** handoff candidates are deliberately same-node while normal placement is not, and `_insert` (handoff.py:959) writes the source task's `node_id` rather than the selected slot's, so a cross-node result from a unified ranker would write mismatched placement metadata | Three rankers, outcome depends on entry point (F3) | M |
 | 1.3 | **Decision records.** Every placement, park and handoff writes one row: inputs, candidates considered, rule applied, chosen slot. Live shows it | Today the only way to know why a task went somewhere is to re-read the code (F3, F4) | M |
 | 1.4 | Make the three "already server-side" duties invisible to the orchestrator: delete rules 7, 8 and the stall-reroute line from the instructions | They cost tokens every batch and change nothing (F4, AUDIT-A §2 items 7–10) | S |
 
@@ -160,14 +169,13 @@ day of fleet time, M = a few tasks, L = a batch of its own.
 | 2.2 | **`propose_reviewer(task)`.** The controller names the reviewer from `kind`, `build_attempts` and live headroom; the orchestrator passes no model for reviews | Reviewer choice is a rule lookup the controller already has the data for (AUDIT-A §2 item 1) | S/M |
 | 2.3 | **`batch_report(ids)`.** One call returns per-task models, commit, gate, verdict, spend and limit hits — the "record per task" and rule-10 spend report, composed by SQL | Both are plain queries the session is told to write by hand (AUDIT-C §3) | S |
 | 2.4 | **Merge closes itself.** A merge task ends with `complete_task` + `cleanup_task` and, where `_branch_merged` says so, the branch delete and the service restart | Seven tasks were left waiting on these calls; restarts sat pending for hours (AUDIT-C §2) | M |
-| 2.5 | Rewrite `CLAUDE.md` step 7 and the reviewer table; delete the six stale rules AUDIT-C §4 lists; date every remaining rule with its reason | Seven contradictions, each one an improvised decision (F5) | S |
 
 ### P3 — get the best out of each model
 
 | # | Change | Why | Size |
 |---|---|---|---|
-| 3.1 | **Revive the local tier and give it real work:** `qwen2.5-coder:14b` for boilerplate and test drafts, `glm-4.7-flash` for triage and summaries, `qwen3-coder:30b-a3b` on the Windows laptop for first-pass review. Gate output exactly as for paid models | 69 Haiku runs cost $1.18; the local tier costs nothing and has never been tried under load (F1) | M |
-| 3.2 | **Tiered routing with recorded pass rates.** Record pass/fail per (kind, model) from the gate; route a kind to the cheapest model whose recorded pass rate clears a floor, and escalate on failure instead of starting at the top | 58.3% of spend is rework; escalation after a cheap attempt is cheaper than a premium first attempt (F2) | L |
+| 3.1 | **Revive the local tier and give it real work** (no recorded marginal API cost, though local compute is real and unmeasured)**:** `qwen2.5-coder:14b` for boilerplate and test drafts, `glm-4.7-flash` for triage and summaries, `qwen3-coder:30b-a3b` on the Windows laptop for first-pass review. Gate output exactly as for paid models | 69 Haiku runs cost $1.18; the local tier costs nothing and has never been tried under load (F1) | M |
+| 3.2 | **Tiered routing with recorded pass rates.** *Blocked on 0.7:* without cost provenance and a gate result per task, a pass-rate floor is not a defensible economic policy. Record pass/fail per (kind, model) from the gate; route a kind to the cheapest model whose recorded pass rate clears a floor, and escalate on failure instead of starting at the top | 58.3% of spend is rework; escalation after a cheap attempt is cheaper than a premium first attempt (F2) | L |
 | 3.3 | **Cap and checkpoint long runs.** Per-kind context caps exist for `final_review`; extend to all kinds, and have a worker checkpoint its partial result so a cap or a limit does not discard the work | `capped` tasks cost $32.36 and produced nothing; two of this audit's own three fleet tasks failed to deliver a committed document for exactly this reason | M |
 | 3.4 | **Batch the fleet's idle hours.** A queue the owner can fill ahead of time, drained by the controller whenever headroom exists, so the 61.5% idle time does paid-for work | Idle time is attention-bound, not quota-bound (F6) | M |
 | 3.5 | **Keep sessions warm where it pays.** Prefer `message_task` over a new spawn for a follow-up, and group a kind's tasks on one account so the prompt cache is hit, not refilled | Cached input is 95.5% of Claude input tokens; a cache miss is the expensive event (AUDIT-B §1) | S |
@@ -236,3 +244,35 @@ Three web research passes were run alongside the audits. The patterns that map o
   cannot pass the gate on real tasks, the tier is worth only drafts and triage.
 - **Consolidating five writers into one is a behaviour change.** It needs its own spec, its own tests written first,
   and a shadow-mode run before it takes over.
+
+## 9. Codex design review of this plan (task `t-a3b812f5`, `gpt-5.6-terra`, high effort)
+
+Verdict: CHANGES. Every point below is already folded into the sections above; it is recorded here so the reasoning
+survives.
+
+Code claims checked independently:
+
+- **Independence on handoff — confirmed, and broader than stated.** `_claim_to_insert` never calls
+  `check_independence` (handoff.py:875) and `candidate_slots` has no builder exclusion (handoff.py:269), so a limit
+  handoff can land on the same model under another account. The fix cannot simply call the existing checker, which
+  takes a `TaskIn` and uses its `parent_id`, while a handoff inserts a child of the failed task and clears
+  `review_of` unless it is a stall reroute (handoff.py:934). Review lineage has to be preserved first.
+- **Three wait times — confirmed.** `handle_limit` schedules `resets_at + 120s` (handoff.py:505),
+  `requeue_on_limit` queues at `resets_at` (capacity.py:285), and `requeue_limit_wait` takes the earliest usable
+  account reset, falling back to `resets_at` (tasks.py:996).
+- **`task.rerouted` emitted for a plain wait — confirmed** (tasks.py:1037). The rename is right, but existing event
+  consumers need either compatibility or a versioned schema.
+
+Changes to the plan itself:
+
+- The instruction cleanup belongs **before** the scheduler change, not after it, because the instructions are part of
+  the operating control plane. Moved from P2.5 to 0.6.
+- A unified ranker breaks handoffs unless `same_node` becomes an explicit, tested flag first. Folded into 1.2.
+- "The local tier costs nothing" overstates the evidence: Ollama and Codex are unpriced, not free. Corrected in F1
+  and 3.1.
+- The rework-is-re-reading and idle-is-attention statements are inferences from data that does not measure either.
+  Both are now labelled as hypotheses in F2 and F6.
+- Three omissions each worth more than the plan's smallest item: a scheduled spec, regression-test and shadow-cutover
+  step for P1 (added as 1.0); review-lineage preservation with handoff independence tests (0.2); and measurement
+  repair before any pass-rate routing, since cost provenance is mostly null and 268 of 426 tasks carry no gate result
+  (added as 0.7, with 3.2 now blocked on it).

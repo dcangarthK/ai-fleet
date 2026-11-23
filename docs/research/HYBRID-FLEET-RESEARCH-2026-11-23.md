@@ -34,7 +34,7 @@ Codex-reviewed). Fleet facts come from a live `fleet_status()` on 2026-11-23, `e
 | **Context passing** | Fresh context; only the prompt goes in, only the final message comes out; project CLAUDE.md still loaded unless `omitClaudeMd` [primary] | Same, plus structured outputs feed the next step | Repo preloaded in sandbox; `AGENTS.md` hierarchy guides behaviour [primary] | Workers return condensed findings to the lead | Brief + worktree; result text parsed for findings (the `**H1.**` parser miss in `docs/HANDOVER.md`) |
 | **Isolation** | Optional `isolation: worktree`; worktrees are not a security boundary (shared `.git`) [blog] | Same | Cloud: OpenAI-managed container, network off in agent phase; local CLI: OS sandbox [primary] | n/a | Worktree per task, no-push git config, mode ceiling per node, runner commits with `core.hooksPath=/dev/null` |
 | **Parallelism** | Background by default, 20 concurrent, nesting depth 3 [primary] | `parallel()`/`pipeline()` primitives | Many cloud tasks at once [primary] | Lead fans out 3–10+ workers by task size | Bounded by account: 1 Codex, 2 Claude per account; deliberate (quota) |
-| **Cost control** | `maxBudgetUsd` per query, ends with `error_max_budget_usd` [primary] | Size guideline per run | Plan quota; model and effort per task | Multi-agent ≈15× chat tokens; only for high-value tasks; token usage explains 80% of performance variance [primary] | Budget rules per kind/model (`budget.py`), per-kind token caps (`run_capped`), `model="auto"`; caps **discard** work (`capped` = $32.36 of nothing) |
+| **Cost control** | `maxBudgetUsd` per query, ends with `error_max_budget_usd` [primary] | Size guideline per run | Plan quota; model and effort per task | Multi-agent ≈15× chat tokens; only for high-value tasks; token usage explains 80% of performance variance [primary] | Budget rules per kind/model (`budget.py`), per-kind token caps (`token_caps`; `run_capped` at `nodes/runner.py:641` is only a subprocess timeout/kill helper), `model="auto"`; caps **discard** work (`capped` = $32.36 of nothing) |
 | **Verification** | Up to the caller | Schema-validated outputs, adversarial verify steps | Tests in sandbox, human PR review | Separate citation/verification pass | Gate (`fleet-gate`) + independent reviewer; independence not checked on handoff (plan 0.2) |
 
 What this says about us:
@@ -88,7 +88,7 @@ What this says about us:
   Weak editors do better with whole-file or simple search/replace formats than unified diffs
   [primary] ([Aider architect mode][aider]).
 - Our 16 GB laptops fit at most a 14B dense model (or `qwen3-coder:30b-a3b`, a mixture-of-experts with ~3B active,
-  on Laptop 3). None of our local models should run an open-ended agent loop. They can carry **bounded, verifiable**
+  on Laptop 3; not on the leaderboard yet, so its fit is UNVERIFIED). None of our local models should run an open-ended agent loop. They can carry **bounded, verifiable**
   work.
 
 ### 3.4 Keeping models resident and batched
@@ -117,7 +117,7 @@ Each line names a verifier, because the research says the verifier, not the mode
 | Commit messages, task summaries, batch reports | `qwen2.5-coder:14b` (fast 100) | Format check; owner reads | Malformed |
 | Gate-failure triage: shrink a failing gate log to the failing tests + first error lines for the fix brief | `qwen2.5-coder:14b` / `qwen3:8b` | Each quoted line must exist in the log (grounding quote check, `grounding.py`) | Quote check fails |
 | Context gathering for briefs: "which files/lines implement X" over provided excerpts | `qwen2.5-coder:14b` (grounded 97, 0% halluc.) | Quotes verified against files | Abstains or quotes fail |
-| Pre-review lint pass on a diff before the paid review | `glm-4.7-flash` (precision 1.00) on master; `qwen3:14b` on laptops | A finding sends the diff back to the builder before the paid review; silence proves nothing | Never replaces the paid review |
+| ~~Pre-review lint pass on a diff before the paid review~~ (cut after debate: no safe negative signal, measured local precision too low) | `glm-4.7-flash` (precision 1.00) on master; `qwen3:14b` on laptops | A finding sends the diff back to the builder before the paid review; silence proves nothing | Never replaces the paid review |
 | Mechanical edits from an exact spec (rename, boilerplate, test scaffolds) via an edit harness | `qwen2.5-coder:14b`; `qwen3-coder:30b-a3b` on Laptop 3 | Runner applies search/replace blocks, then the gate | Edit fails to apply or gate fails twice → Sonnet |
 | Test drafts from acceptance criteria | `qwen2.5-coder:14b` | Tests must run and fail before the build (tests-first) | Tests don't run → Sonnet |
 | Real code review verdicts, design, security, multi-file builds | none | — | Paid tier only |
@@ -131,7 +131,7 @@ Each line names a verifier, because the research says the verifier, not the mode
 | G3 | **No cascade.** Nothing tries cheap and escalates on the gate | Budget rules only set a floor; plan 3.2 | Verify-then-escalate cascades; 26–70% cost cut on code [primary] | For kinds `draft`, `test` and mechanical `build`: local attempt → gate → on fail, one local retry with the gate output → Sonnet, carrying the failed diff. Record per (kind, model) pass rate | M |
 | G4 | **Weak verifier for non-code local output** | Logprob/confidence signals dropped; LLM judges unreliable [review] | Executed tests; multi-sample agreement | Use the gate for code; quote-checking (`grounding.py`) for text; agreement (3 samples) only where calibrated (`qwen3:8b`). Never let a local review verdict gate a merge | S |
 | G5 | **Untyped briefs and results** | Findings parser miss (`docs/HANDOVER.md`); orchestrator re-derives briefs | Typed objective/format/boundaries in, schema out [primary] | Plan P2.1 typed briefs + a JSON result schema for `review` kinds, validated by the controller | M |
-| G6 | **No residency or per-role batching across nodes** | `warm_models` preference only; per-request `keep_alive` | Pin models, size `NUM_PARALLEL` to memory, queue per model [blog] | Node config pins one model per laptop (`keep_alive: -1`); controller queues local work per (node, model) and drains it in batches; no model swaps mid-batch | S/M |
+| G6 | **No residency or per-role batching across nodes** | Placement prefers warm models (`warm_models_by_engine`, incl. DMR, `tasks.py:389`, `:530`); the runner validates `keep_alive` (`runner.py:3622`) but the production `ollama_worker` sends none and does no pinning or batching, so residency is observed, not enforced | Pin models, size `NUM_PARALLEL` to memory, queue per model [blog] | Node config pins one model per laptop (`keep_alive: -1`); controller queues local work per (node, model) and drains it in batches; no model swaps mid-batch | S/M |
 | G7 | **Capped or limited runs discard work** | `capped` $32.36; limit runs $103.10 (AUDIT-B) | Progress file + resumable plan; durable execution [primary] | Plan 3.3: the runner commits WIP on cap/limit and writes `PROGRESS.md`; the resume brief points at it | M |
 | G8 | **Measurement too thin to route on** | `cost_source` NULL 611/633; prompt bytes constant | OTel GenAI attributes per run [primary] | Plan 0.7, unchanged; also record local runs (wall-clock, node, model) so the local tier has a cost too | S/M |
 | G9 | **Idle paid windows** | 61.5% idle; windows expire unused | Queues filled ahead of time [blog] | Plan 3.4 backlog queue; local tier drains `draft`/`fast` work 24/7 with no window to lose | M |
@@ -139,6 +139,8 @@ Each line names a verifier, because the research says the verifier, not the mode
 | G11 | **Integration testing after several merges** | Merges land one by one in `main`; post-merge gate run by hand | Merge queue in an integration tree [blog] | Low priority at our volume (≤3 concurrent builders); revisit if concurrency grows | — |
 
 ## 6. Proposed improvements (input to the Codex debate)
+
+> Superseded by the debated plan, `docs/research/HYBRID-FLEET-PLAN-2026-11-23.md`. Kept as the pre-debate proposal.
 
 Ordered by value per effort. Items 1–3 are the existing P0; this research does not change them.
 

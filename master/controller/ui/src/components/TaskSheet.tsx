@@ -4,7 +4,10 @@ import { get, post, type Task } from "../lib/api";
 import { taskAction, useCan, useFleet, useRun, useTask, useTaskLog } from "../lib/data";
 import { ago, denialTools, duration, nodeName, taskActions } from "../lib/format";
 import { Diff, ErrorBanner, StateLabel, StatusPill } from "./bits";
+import { useQuery } from "@tanstack/react-query";
 import { Terminal } from "./Terminal";
+import { TaskDecisions } from "./ControllerDecisions";
+import type { ReviewerProposal } from "../lib/decisions";
 import { Button, Dialog, Field, IconButton, Input, useConfirm } from "./ui";
 import { isCommitHash } from "../lib/work";
 import { displayOf } from "../lib/lineage";
@@ -154,9 +157,22 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
           {task.gate ? <span className="mono">{task.gate}</span> : "none"}
           {gate && <> · <span className={`tone-${gate.state === "passed" ? "ok" : gate.state === "failed" ? "bad" : "quiet"}`}>{gate.state}</span></>}
         </dd>
+        <dt>Gate provenance</dt>
+        <dd>{gate ? <>{gate.state}{gate.reason && <span className="quiet"> · {gate.reason}</span>}{gate.profile && <span className="mono quiet"> · profile {gate.profile}</span>}{gate.exit_code != null && <span className="quiet"> · exit {gate.exit_code}</span>}</> : <span className="quiet">no gate result recorded</span>}</dd>
+        <dt>Cost source</dt><dd className="mono">{task.cost_source ?? task.usage?.cost_source ?? "—"}</dd>
         <dt>Runs</dt><dd>{task.runs}{task.exit_code != null && ` · last exit ${task.exit_code}`} · agent time {duration(task.agent_seconds)}</dd>
         <dt>Session</dt><dd className="mono">{task.session_id ?? "—"}</dd>
       </dl>
+
+      {(task.kind === "build" || task.kind === "fix") && task.state === "review" && <SuggestedReviewer id={task.id} />}
+      {task.brief && (task.brief.files_allowed?.length || task.brief.acceptance?.length) ? (
+        <>
+          <h3>Brief</h3>
+          {task.brief.files_allowed?.length ? <><p className="small"><b>Files allowed</b></p><ul className="small">{task.brief.files_allowed.map((f) => <li key={f} className="mono">{f}</li>)}</ul></> : null}
+          {task.brief.acceptance?.length ? <><p className="small"><b>Acceptance</b></p><ul className="small">{task.brief.acceptance.map((a) => <li key={a}>{a}</li>)}</ul></> : null}
+        </>
+      ) : null}
+      <TaskDecisions id={task.id} />
 
       <h3>Prompt</h3>
       <pre className="out">{task.prompt}</pre>
@@ -170,6 +186,20 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
       {task.result && (<><h3>Result</h3><pre className="out">{task.result}</pre></>)}
       {gate?.output_tail && (<><h3>Gate output</h3><Terminal title={`gate: ${task.gate ?? "gate"}`} text={gate.output_tail} height={240} idPrefix="gate-" label="Gate output" /></>)}
       {diff && (<><h3>Changes</h3><pre className="out">{diff.stat}</pre><Diff text={diff.diff} /></>)}
+    </>
+  );
+}
+
+/** Read-only reviewer suggestion (GET /api/tasks/{id}/propose-reviewer). */
+function SuggestedReviewer({ id }: { id: string }) {
+  const q = useQuery({ queryKey: ["propose-reviewer", id], queryFn: () => get<ReviewerProposal>(`/api/tasks/${id}/propose-reviewer`), retry: false });
+  return (
+    <>
+      <h3>Suggested reviewer</h3>
+      {q.error ? <p className="small quiet">No suggestion available{q.error instanceof Error ? `: ${q.error.message}` : ""}.</p> :
+        !q.data ? <p className="small quiet">Loading…</p> : (
+          <p className="small"><b>{q.data.agent}</b>{q.data.model && <span className="mono"> ({q.data.model})</span>} <span className="quiet">· {q.data.reason}</span></p>
+        )}
     </>
   );
 }

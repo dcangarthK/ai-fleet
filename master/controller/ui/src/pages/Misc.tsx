@@ -11,6 +11,7 @@ import { SettleCheck } from "../components/motion/MiniGraph";
 import { useArrivals } from "../components/motion/Arrive";
 import { timeGroup } from "../lib/pageMotion";
 import type { FleetEvent } from "../lib/api";
+import { extraEventText } from "../lib/decisions";
 
 function when(ts: number) {
   return new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -40,7 +41,7 @@ function describe(type: string, data: Record<string, unknown> | null): string {
     "model.install": `Install of ${String(d.model ?? "a model")} on ${String(d.node ?? "a node")} requested`,
     "model.remove": `Removal of ${String(d.model ?? "a model")} from ${String(d.node ?? "a node")} requested`,
   };
-  return map[type] ?? type;
+  return map[type] ?? extraEventText(type, data) ?? type;
 }
 
 /** Feed rows. Mounted only once events are loaded, so "arrived later" means a real new event (source: the events feed).

@@ -266,6 +266,19 @@ def resources(nodes: list[dict] | None = None, now: float | None = None) -> list
     return rows
 
 
+def _slot_model(agent: str, model: str | None, node_id: str) -> str | None:
+    """The model a slot would really run: its named model, else the node's default for the agent."""
+    return model or (budget.node_default_model(agent, node_id) if agent in budget.PAID_AGENTS else None)
+
+
+def _builders_of(task: dict) -> list[tuple[str, str | None]]:
+    """Resolved (agent, model) of the builders of the work a review/test handoff checks; [] for any other kind."""
+    if task.get("kind") not in tasks.INDEPENDENT_KINDS:
+        return []
+    source = task.get("review_of") or task.get("parent_id")
+    return build_attempts(source) if source else []
+
+
 def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[dict]:
     """Eligible slots for a handoff of `task`, in preference order: the same model on another free account, then
     the rules' fallbacks for it. Same node only (cross-node handoff is out of scope), same vendor unless
@@ -289,12 +302,15 @@ def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[d
     flags = tasks.signed_out()
     snaps: dict = {}
     out, seen = [], set()
+    builders = _builders_of(task)  # a review or test never moves onto its builder's model (any account)
     for agent, model in dict.fromkeys(targets):
         if agent != task["agent"] and not limits.get("allow_cross_vendor"):
             continue
         if not ((node["runner"].get("agents") or {}).get(agent)):
             continue
         resolved = model or budget.node_default_model(agent, node["id"])
+        if builders and (agent, resolved) in builders:
+            continue
         key = budget.match_key(rules, agent, resolved) or (budget.fallback_key(agent) if resolved is None else None)
         entry = budget.entry_for(rules, key, agent)
         if key and not budget.kind_allowed(entry, task.get("kind") or "draft"):
@@ -876,6 +892,8 @@ async def _claim_to_insert(task: dict, slot: dict, rules: dict, now: float, stal
     """The claimed part of a handoff, under the task lock: {"action": "none", "reason"} or {"task_id", "checkpoint"}."""
     if {budget.task_account(task), slot["account"]} & budget.held_accounts():  # held after the slot was chosen
         return {"action": "none", "reason": "an account involved is on hold"}
+    if (slot["agent"], _slot_model(slot["agent"], slot.get("model"), task["node_id"])) in _builders_of(task):
+        return {"action": "none", "reason": "independence: the slot's model built the work under review"}
     blob = claim(task["id"])
     if blob is None:
         return {"action": "none", "reason": "already claimed"}
@@ -949,6 +967,8 @@ def _insert(task: dict, slot: dict, decision: dict, prompt: str, brief_id: str, 
             if name in source_extra:
                 extra[name] = source_extra[name]
         worktree, review_of = int(bool(task.get("worktree"))), task.get("review_of")
+    elif task.get("kind") in tasks.INDEPENDENT_KINDS and task.get("review_of"):
+        worktree, review_of = int(bool(task.get("worktree"))), task["review_of"]  # keep the review lineage
     policy = task.get("policy") or {}
     auto = policy.get("auto_approve") or {}
     pre_approved = slot["agent"] in (auto.get("agents") or []) and bool(auto.get("full_mode"))

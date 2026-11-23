@@ -853,15 +853,18 @@ async def handle_limit(task_id: str, *, now: float | None = None, slot: dict | N
         before = shadow = None
     result = await _handle_limit(task_id, now=now, slot=slot, manual=False)
     if shadow is not None and not result.get("existing"):
-        actual = None
-        if result.get("action") == "wait":
-            actual = {"action": "park", "until": result.get("at"), "reason": result.get("reason")}
-        elif result.get("action") == "handoff" and result.get("task_id"):
-            new = tasks.get_task(result["task_id"])
-            actual = {"action": "handoff", "slot": {"node": new.get("node_id"), "agent": new.get("agent"),
-                                                    "profile": new.get("profile"), "model": new.get("model")}}
-        if actual:
-            limit_policy.shadow_compare(before, actual, "handle_limit", shadow)
+        try:  # observation only: never raise into the caller
+            actual = None
+            if result.get("action") == "wait":
+                actual = {"action": "park", "until": result.get("at"), "reason": result.get("reason")}
+            elif result.get("action") == "handoff" and result.get("task_id"):
+                new = tasks.get_task(result["task_id"])
+                actual = {"action": "handoff", "slot": {"node": new.get("node_id"), "agent": new.get("agent"),
+                                                        "profile": new.get("profile"), "model": new.get("model")}}
+            if actual:
+                limit_policy.shadow_compare(before, actual, "handle_limit", shadow)
+        except Exception as exc:
+            print(f"limit shadow failed: {exc!r}")
     return result
 
 

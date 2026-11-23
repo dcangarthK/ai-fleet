@@ -138,6 +138,12 @@ class ShadowTests(HandoffBase):
         self.assertEqual(len(self.children(src["id"])), 1)
         self.assertEqual(rows(src["id"]), [])
 
+    def test_a_raising_shadow_comparison_never_reaches_handle_limits_caller(self):
+        src = self.build()
+        with unittest.mock.patch.object(limit_policy, "shadow_compare", side_effect=RuntimeError("boom")):
+            self.limit(src["id"])  # would raise out of after_settled if the block were unguarded
+        self.assertEqual(len(self.children(src["id"])), 1)
+
     def test_mismatch_rules(self):
         park = {"action": "park", "until": 100.0}
         self.assertFalse(limit_policy.mismatch(park, {"action": "park", "until": 100.5}))
@@ -179,7 +185,45 @@ class SameNodeTests(HandoffBase):
 
 
 class DecisionTests(HandoffBase):
+    def test_same_placement_choice_is_recorded_once_and_a_change_again(self):
+        decisions._LAST.clear()
+        before = len(rows(kind="placement"))
+        self.build()
+        self.build()  # same inputs, same node: no second row
+        self.assertEqual(len(rows(kind="placement")), before + 1)
+        decisions._LAST[next(iter(decisions._LAST))] = "other-node"  # the choice differs from the last one recorded
+        self.build()
+        self.assertEqual(len(rows(kind="placement")), before + 2)
+
+    def test_the_sweep_path_records_no_placement_row(self):
+        decisions._LAST.clear()
+        before = len(rows(kind="placement"))
+        tasks.pick_node("claude", None, "auto-edit", None, record=False, task_id="t-sweep")
+        self.assertEqual(len(rows(kind="placement")), before)
+        tasks.pick_node("claude", None, "auto-edit", None, task_id="t-known")
+        self.assertEqual(rows("t-known", "placement")[0]["task_id"], "t-known")
+
+    def test_prune_deletes_old_rows_and_keeps_only_the_newest_n(self):
+        now = time.time()
+        old = decisions.record("t-old", "placement", {}, [], "r", "n")
+        with db() as c:
+            c.execute("UPDATE decisions SET ts=? WHERE id=?", (now - 15 * 86400, old))
+        for i in range(5):
+            decisions.record("t-new", "placement", {"i": i}, [], "r", "n")
+        self.assertGreaterEqual(decisions.prune(now), 1)
+        self.assertEqual(rows("t-old"), [])
+        self.assertEqual(len(rows("t-new")), 5)
+        decisions.prune(now, keep=2)
+        self.assertEqual([r["inputs"]["i"] for r in rows("t-new")], [4, 3])
+
+    def test_prune_runs_by_itself_every_n_inserts(self):
+        with unittest.mock.patch.object(decisions, "PRUNE_EVERY", 1), \
+                unittest.mock.patch.object(decisions, "prune") as prune:
+            decisions.record("t-x", "placement", {}, [], "r", "n")
+        prune.assert_called_once()
+
     def test_placement_is_recorded_and_readable_over_the_api(self):
+        decisions._LAST.clear()
         before = len(rows(kind="placement"))
         self.build()
         placed = rows(kind="placement")

@@ -60,6 +60,20 @@ Table `decisions(id, task_id, kind, inputs, candidates, rule, chosen, shadow_cho
 | `limit.park` / `limit.handoff` | `handle_limit` | `handle_limit` | `chosen` the action taken, `shadow_choice` the shadow's; `inputs.mismatch` |
 | `limit.park` | `requeue_on_limit` (shadow mode) | `requeue_on_limit` | as above |
 
+Growth control: `placement` rows are written only when the chosen node differs from the last one recorded for the
+same (task_id, inputs) (`decisions.changed`); `live.py`'s offline-node sweep calls `pick_node(..., record=False)` and
+writes none. `pick_node` takes `task_id=`, but the spawn path has none (the row doesn't exist yet), so spawn rows keep
+`task_id` NULL. Retention: `decisions.prune` deletes rows older than 14 days and keeps the newest 50,000; it runs every
+200 inserts.
+
+Known limits of the shadow data (read these before trusting a mismatch count):
+- **Snapshot race.** The shadow plan is computed from the task as read *before* `_handle_limit` runs; the actual
+  action is taken under the work-item and task locks a moment later. If the task changes in between (a resume, a
+  second limit, new usage records), a mismatch can be a timing artefact, not a policy difference.
+- **Two park rows per limit.** One failed task can legitimately produce two `limit.park` rows: `requeue_on_limit`
+  (rule `requeue_on_limit`, shadow mode) and then `handle_limit` (rule `handle_limit`). Filter by `rule` when counting;
+  they compare different writers against the same shadow.
+
 `GET /api/decisions?task_id=&limit=` (view scope, newest first, limit max 1000). Mounted through `handoff.router`.
 Not recorded yet: `requeue_limit_wait`, the auto-approve hold, capacity moves, the manual handoff, the stall reroute.
 `candidates` is empty for limit rows; the shadow's choice is the only candidate evidence so far.

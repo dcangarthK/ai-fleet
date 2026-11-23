@@ -2452,7 +2452,9 @@ async def cleanup(task_id: str, force: bool = False) -> dict:
             branch = task.get("branch") or "fleet/" + task_id
             merged, reason = await asyncio.to_thread(_branch_merged, task.get("repo"), branch)
             out = dict(out)
-            if merged:
+            if branch in ("main", "master"):  # never delete the trunk, whatever the task row says
+                out.update({"branch_kept": True, "reason": "protected branch"})
+            elif merged:
                 done = await asyncio.to_thread(
                     subprocess.run, ["git", "-C", task["repo"], "branch", "-d", branch],
                     capture_output=True, text=True, timeout=30)

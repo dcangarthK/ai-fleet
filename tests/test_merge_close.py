@@ -55,8 +55,14 @@ class MergeClose(unittest.TestCase):
     def exists(self):
         return git(self.repo, "rev-parse", "--verify", "-q", "fleet/t-3").returncode == 0
 
+    def merged_with_work(self):
+        git(self.repo, "checkout", "-q", "-b", "fleet/t-3")
+        git(self.repo, "commit", "--allow-empty", "-q", "-m", "work")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--ff-only", "fleet/t-3")
+
     def test_merged_closed_and_cleaned(self):
-        git(self.repo, "branch", "fleet/t-3")
+        self.merged_with_work()
         self.assertTrue(asyncio.run(merge_close.close_if_merged("t-3")))
         self.assertEqual(self.task["state"], "done")
         self.assertIn("/jobs/t-3/cleanup", self.calls)
@@ -79,8 +85,64 @@ class MergeClose(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.events, [])
 
+    def test_branch_without_own_commits_not_closed(self):
+        git(self.repo, "branch", "fleet/t-3")  # tip == fork point: trivially an ancestor of main
+        self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
+        self.assertEqual(self.task["state"], "review")
+        self.assertEqual(self.calls, [])
+        self.assertTrue(self.exists())
+
+    def test_read_only_kinds_not_closed(self):
+        self.merged_with_work()
+        for kind in ("review", "re_review", "final_review", "security_review", "check"):
+            self.task["kind"] = kind
+            self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")), kind)
+        self.task.update(kind="build", review_of="t-1")
+        self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
+        self.assertEqual(self.task["state"], "review")
+        self.assertEqual(self.calls, [])
+
+    def test_state_rechecked_under_lock(self):
+        self.merged_with_work()
+        real = tasks._branch_merged
+
+        def moved(repo, branch):  # the task leaves review while git is running
+            self.task["state"] = "working"
+            return real(repo, branch)
+        tasks._branch_merged = moved
+        try:
+            self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
+        finally:
+            tasks._branch_merged = real
+        self.assertEqual(self.task["state"], "working")
+        self.assertEqual(self.calls, [])
+
+    def test_pipeline_owner_rechecked_under_lock(self):
+        self.merged_with_work()
+        answers = iter([False, True])
+        handoff.pipeline_owned = lambda _id: next(answers)
+        self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
+        self.assertEqual(self.task["state"], "review")
+
+    def test_cleanup_failure_emits_event(self):
+        self.merged_with_work()
+
+        async def boom(*a, **k):
+            raise RuntimeError("runner down")
+        tasks.runner_call = boom
+        self.assertTrue(asyncio.run(merge_close.close_if_merged("t-3")))
+        self.assertEqual(self.task["state"], "done")
+        self.assertEqual([e[1] for e in self.events], ["task.auto_close_failed"])
+        self.assertEqual(self.events[0][2]["stage"], "cleanup")
+
+    def test_cleanup_never_deletes_main(self):
+        self.task.update(state="done", branch="main")
+        out = asyncio.run(tasks.cleanup("t-3"))
+        self.assertTrue(out["branch_kept"])
+        self.assertEqual(git(self.repo, "rev-parse", "--verify", "-q", "main").returncode, 0)
+
     def test_non_review_and_protected_skipped(self):
-        git(self.repo, "branch", "fleet/t-3")
+        self.merged_with_work()
         self.task["state"] = "failed"
         self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
         self.task.update(state="review", branch="main")

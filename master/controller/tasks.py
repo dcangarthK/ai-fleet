@@ -1037,7 +1037,7 @@ async def requeue_limit_wait(task_id: str, reason: str, now: float | None = None
         if not transition(task, {"failed"}, "queued", not_before=reset, ended_at=None, budget_wait="limit",
                           error=reason, resolution=None):
             return False
-    emit(task_id, "task.rerouted", {"title": task["title"], "reason": reason, "not_before": reset})
+    emit(task_id, "task.limit_wait", {"title": task["title"], "reason": reason, "not_before": reset})
     return True
 
 

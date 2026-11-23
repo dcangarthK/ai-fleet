@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
+import decisions
 import loopheal
 import policy as fleet_policy
 import presence
@@ -534,6 +535,8 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
         temporary_reason(item[0], item[1]["policy"]) is not None,
         agent == "ollama" and (engine, model) not in warm_models_by_engine(item[0], now),
         item[0]["running_tasks"], -ram(item[0])))[0]
+    decisions.record(None, "placement", {"agent": agent, "model": model, "mode": mode, "role": role},
+                     [n["id"] for n, _ in ok], "least_busy", node["id"])  # observation only
     return node, snapshot, temporary_reason(node, snapshot["policy"])
 
 

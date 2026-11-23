@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS plan_items (
     updated_at REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS plan_state (
     id INTEGER PRIMARY KEY CHECK (id=1), revision INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, kind TEXT, inputs TEXT, candidates TEXT, rule TEXT,
+    chosen TEXT, shadow_choice TEXT, ts REAL);
+CREATE INDEX IF NOT EXISTS decisions_task ON decisions (task_id);
 CREATE TABLE IF NOT EXISTS leader (
     id INTEGER PRIMARY KEY CHECK (id=1), account TEXT, model TEXT, since REAL, session_task_id TEXT,
     not_before REAL, plan_revision INTEGER DEFAULT 0, halted INTEGER NOT NULL DEFAULT 0);

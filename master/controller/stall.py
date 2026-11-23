@@ -152,7 +152,7 @@ async def stop(task_id: str, verdict: dict, *, nudge: bool, now: float) -> str:
             new = tasks.outcome(task, job)
             if new == "working":
                 return "working"  # the agent exited and its gate still runs: cancel killed nothing; leave it
-            fields = tasks.job_fields(job)
+            fields = tasks.job_fields(job, task)
             if tasks.transition(task, {"working"}, new, **fields):
                 tasks.record_usage(task_id)
                 return "settled_failed" if new in ("failed", "interrupted") else "settled"

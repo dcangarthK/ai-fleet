@@ -4,6 +4,7 @@ import { get, post, put, type Effective, type InstructionSet, type Mode, type Po
 import { useCan, useFleet, useRun } from "../lib/data";
 import { ago } from "../lib/format";
 import { ErrorBanner, LoadError, PageHead, Section } from "../components/bits";
+import { ControllerDecisions } from "../components/ControllerDecisions";
 import { SettleCheck } from "../components/motion/MiniGraph";
 
 const AGENTS = ["claude", "codex", "ollama"];
@@ -89,6 +90,7 @@ export function PoliciesPage() {
           <Simulator roles={roles} />
         </div>
       </div>
+      <ControllerDecisions />
     </>
   );
 }

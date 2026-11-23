@@ -124,9 +124,11 @@ export interface Fleet {
 export interface GateResult {
   cmd?: string;
   profile?: string;
-  state: "pending" | "running" | "passed" | "failed" | "skipped";
+  // "no_gate" / "not_run" are the controller's explicit provenance when no gate result exists (tasks.gate_field).
+  state: "pending" | "running" | "passed" | "failed" | "skipped" | "no_gate" | "not_run";
   exit_code: number | null;
   output_tail: string;
+  reason?: string;
 }
 
 export interface Task {
@@ -174,6 +176,10 @@ export interface Task {
   account_label?: string | null;
   account?: string | null;
   planned?: { action: "handoff" | "wait" | "left"; label: string; at?: number } | null;
+  // Cost provenance and typed brief, when the controller returns them (the task row has `usage`; `brief` may be absent).
+  usage?: { cost_source?: string | null; cost_usd?: number | null; model?: string | null } | null;
+  cost_source?: string | null;
+  brief?: { goal?: string; files_allowed?: string[]; acceptance?: string[]; context_refs?: string[]; done_when?: string[]; gate?: string } | null;
 }
 
 export interface UsageRow {

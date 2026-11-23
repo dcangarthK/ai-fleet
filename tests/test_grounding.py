@@ -17,6 +17,23 @@ class GroundingCalibrationHelpers(unittest.TestCase):
         quotes = ["temperature: 0", "status: ready", "status: missing", "   "]
         self.assertEqual(grounding.check_quotes(quotes, context), (2, 2))
 
+    def test_check_log_quotes_verified(self):
+        log = "12:00 start\nERROR  disk   full on /dev/sda1\n12:01 done"
+        r = grounding.check_log_quotes('Failed with `ERROR disk full on /dev/sda1` then "12:01 done".', log)
+        self.assertEqual((r["ok"], r["checked"], r["unverified"]), (True, 2, []))
+
+    def test_check_log_quotes_unverified(self):
+        log = "12:00 start\nERROR disk full"
+        r = grounding.check_log_quotes('Saw `ERROR disk full` and "kernel panic at 12:05"\n> OOM killed', log)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["unverified"], ["kernel panic at 12:05", "OOM killed"])
+
+    def test_check_log_quotes_empty(self):
+        self.assertEqual(grounding.check_log_quotes("No quotes here.", "log"),
+                         {"ok": True, "checked": 0, "unverified": []})
+        r = grounding.check_log_quotes('`boom`', "")
+        self.assertEqual((r["ok"], r["unverified"]), (False, ["boom"]))
+
     def test_content_logprobs_cover_only_split_answer_tokens(self):
         tokens = [
             {"token": '<think>guess {"answer":"London"}</think>', "logprob": math.log(0.01)},

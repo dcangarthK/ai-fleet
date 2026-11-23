@@ -3322,9 +3322,12 @@ class JobManager:
 
     def _settle_group(self, job):
         """Wait for a stopped job's group to exit. Call without self.lock: it sleeps up to 1.5 s."""
-        if job.get("state") != "running" and job.get("group_gone") is not True and self._group_ok(job):
+        # A capping job is still `running` until its checkpoint lands, but its process is over: wait for the
+        # group too, or _checkpoint_guard sees it alive and the WIP commit is silently skipped.
+        settling = job.get("state") != "running" or bool(job.get("capping"))
+        if settling and job.get("group_gone") is not True and self._group_ok(job):
             job["group_gone"] = self._wait_group_gone(job.get("pid"), 1.5)
-        elif (job.get("state") != "running" and job.get("group_gone") is None
+        elif (settling and job.get("group_gone") is None
               and job.get("pgid") == job.get("pid") and not group_alive(job.get("pid"))):
             # The recorded leader has gone and its process group is absent, so a later
             # resume need not fail closed merely because proc_start can no longer inspect it.

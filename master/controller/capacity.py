@@ -299,6 +299,12 @@ async def requeue_on_limit(task_id: str, now: float | None = None) -> bool:
         return False  # a free slot elsewhere is sooner: the handoff moves it
     if not usage.is_live():
         if _once(("requeue", task_id, task.get("runs"))):
+            try:  # shadow policy: logs where it would differ from this path (plan 1.1); never raises
+                import limit_policy
+                limit_policy.shadow_compare(task, {"action": "park", "until": resets}, "requeue_on_limit",
+                                            limit_policy.shadow_plan(task, rules, now))
+            except Exception as exc:
+                print(f"limit shadow failed: {exc!r}")
             emit(task_id, "task.requeue_shadow", {"title": task.get("title"), "not_before": resets, "mode": "shadow",
                                                   "reason": "usage limit; would wait for its reset"})
         return False

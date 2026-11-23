@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 import budget
+import decisions
 import redaction
 import tasks
 from events import emit
@@ -25,6 +26,7 @@ from lineage import clock, provider_limit
 from store import db, task_root
 
 router = APIRouter()
+router.include_router(decisions.router)  # GET /api/decisions rides this router: controller.py already mounts it
 _item_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 CLAIM_STALE_SECONDS = 600   # a claim older than this with no handoff task is a crash left-over
@@ -301,15 +303,25 @@ def _builders_of(task: dict) -> list[tuple[str, str | None]]:
     return build_attempts(source) if source else []
 
 
-def candidate_slots(task: dict, rules: dict, now: float | None = None) -> list[dict]:
+def candidate_slots(task: dict, rules: dict, now: float | None = None, *, same_node: bool = True) -> list[dict]:
     """Eligible slots for a handoff of `task`, in preference order: the same model on another free account, then
-    the rules' fallbacks for it. Same node only (cross-node handoff is out of scope), same vendor unless
-    limits.allow_cross_vendor. Not limited, under concurrency, under the hard budget, allowed for the kind."""
+    the rules' fallbacks for it. `same_node=True` (the default, today's behaviour): the task's own node only.
+    `same_node=False`: every node, the task's own first; no caller passes it yet, and `_insert` still writes the
+    source task's node_id, so a cross-node result must not be handed off until that is fixed (plan 1.2). Same
+    vendor unless limits.allow_cross_vendor. Not limited, under concurrency, under the hard budget, allowed for
+    the kind."""
     now = time.time() if now is None else now
     try:
-        node = tasks.node_of(task)
+        own = tasks.node_of(task)
     except HTTPException:
         return []
+    if same_node:
+        return _candidates_on(task, rules, now, own)
+    nodes = [own] + [n for n in tasks.node_rows() if n["id"] != own["id"]]
+    return [slot for node in nodes for slot in _candidates_on(task, rules, now, node)]
+
+
+def _candidates_on(task: dict, rules: dict, now: float, node: dict) -> list[dict]:
     if not tasks.profile_support(node) or _offline(node):
         return []
     limits = rules.get("limits") or {}
@@ -828,6 +840,36 @@ def flag_signed_out(task: dict) -> None:
 
 async def handle_limit(task_id: str, *, now: float | None = None, slot: dict | None = None,
                        manual: bool = False) -> dict:
+    """The limit entry point. Shadow only (plan 1.0/1.1): the shadow policy decides beside `_handle_limit` and one
+    decision row records both; the result is exactly `_handle_limit`'s."""
+    if manual:
+        return await _handle_limit(task_id, now=now, slot=slot, manual=True)
+    import limit_policy  # here, not at the top: limit_policy imports this module
+    try:
+        before = tasks.get_task(task_id)
+        shadow = (limit_policy.shadow_plan(before, None, now)
+                  if limit_failure(before) and not before.get("resolution") else None)
+    except HTTPException:
+        before = shadow = None
+    result = await _handle_limit(task_id, now=now, slot=slot, manual=False)
+    if shadow is not None and not result.get("existing"):
+        try:  # observation only: never raise into the caller
+            actual = None
+            if result.get("action") == "wait":
+                actual = {"action": "park", "until": result.get("at"), "reason": result.get("reason")}
+            elif result.get("action") == "handoff" and result.get("task_id"):
+                new = tasks.get_task(result["task_id"])
+                actual = {"action": "handoff", "slot": {"node": new.get("node_id"), "agent": new.get("agent"),
+                                                        "profile": new.get("profile"), "model": new.get("model")}}
+            if actual:
+                limit_policy.shadow_compare(before, actual, "handle_limit", shadow)
+        except Exception as exc:
+            print(f"limit shadow failed: {exc!r}")
+    return result
+
+
+async def _handle_limit(task_id: str, *, now: float | None = None, slot: dict | None = None,
+                        manual: bool = False) -> dict:
     """Hand off or wait. Returns {"action": "handoff", "task_id"} | {"action": "wait"|"left", ...} |
     {"action": "none"}. `slot` with `manual` is the owner's "Hand off now" choice (admin only)."""
     now = time.time() if now is None else now

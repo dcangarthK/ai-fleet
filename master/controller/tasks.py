@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
+import decisions
 import loopheal
 import policy as fleet_policy
 import presence
@@ -502,7 +503,8 @@ def accounts_of(slots: list[dict], agent: str) -> list[str]:
 def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate: str | None = None,
               role: str | None = None, task_policy: dict | None = None,
               skill_ids: list[str] | None = None, escalation: bool = False,
-              allowed: set[str] | None = None, engine: str = "ollama") -> tuple[dict, dict, str | None]:
+              allowed: set[str] | None = None, engine: str = "ollama", task_id: str | None = None,
+              record: bool = True) -> tuple[dict, dict, str | None]:
     nodes = node_rows()
     if allowed is not None and not wanted:
         nodes = [n for n in nodes if n["id"] in allowed] or nodes
@@ -534,6 +536,9 @@ def pick_node(agent: str, model: str | None, mode: str, wanted: str | None, gate
         temporary_reason(item[0], item[1]["policy"]) is not None,
         agent == "ollama" and (engine, model) not in warm_models_by_engine(item[0], now),
         item[0]["running_tasks"], -ram(item[0])))[0]
+    inputs = {"agent": agent, "model": model, "mode": mode, "role": role}
+    if record and decisions.changed((task_id, json.dumps(inputs, sort_keys=True)), node["id"]):  # only on a change
+        decisions.record(task_id, "placement", inputs, [n["id"] for n, _ in ok], "least_busy", node["id"])
     return node, snapshot, temporary_reason(node, snapshot["policy"])
 
 

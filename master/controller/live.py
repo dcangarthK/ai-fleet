@@ -877,7 +877,7 @@ def replace(task: dict, now: float) -> bool:
         node, effective, _ = tasks.pick_node(task["agent"], task.get("model"), task["mode"], None, task.get("gate"),
                                              placement.get("role"), placement.get("policy"),
                                              placement.get("skills") or [], bool(placement.get("escalation")),
-                                             allowed=allowed)
+                                             allowed=allowed, task_id=task["id"], record=False)  # sweep: no decision row
     except HTTPException:
         return False
     if node["id"] == task["node_id"] or tasks.runner_offline(node, now, False):

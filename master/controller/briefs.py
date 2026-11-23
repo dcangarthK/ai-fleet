@@ -1,5 +1,6 @@
 """Typed task briefs and their deterministic prompt rendering."""
 import re
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -8,12 +9,25 @@ BUILD_KINDS = {"build", "fix", "test"}
 REVIEW_KINDS = {"review", "re_review", "final_review", "security_review"}
 
 
+def _single_line(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"brief.{name} must be a non-empty string")
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"brief.{name} must be a single line")
+    return value.strip()
+
+
 def _strings(value: Any, name: str, *, required: bool = False) -> list[str]:
     if not isinstance(value, list) or (required and not value):
         raise ValueError(f"brief.{name} must be a non-empty list")
-    if any(not isinstance(item, str) or not item.strip() for item in value):
-        raise ValueError(f"brief.{name} must contain non-empty strings")
-    return [item.strip() for item in value]
+    return [_single_line(item, f"{name} item") for item in value]
+
+
+def _safe_path(path: str) -> str:
+    segments = path.replace("\\", "/").split("/")
+    if PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute() or ".." in segments or ".git" in segments:
+        raise ValueError("brief.files_allowed must not contain absolute paths, .. segments, or .git paths")
+    return path
 
 
 def validate(value: Any, kind: str) -> dict:
@@ -24,22 +38,18 @@ def validate(value: Any, kind: str) -> dict:
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(f"brief has unknown field(s): {', '.join(sorted(unknown))}")
-    goal = value.get("goal")
-    if not isinstance(goal, str) or not goal.strip():
+    if "goal" not in value:
         raise ValueError("brief.goal is required")
-    files = _strings(value.get("files_allowed", []), "files_allowed", required=kind in BUILD_KINDS)
+    goal = _single_line(value["goal"], "goal")
+    files = [_safe_path(path) for path in _strings(value.get("files_allowed", []), "files_allowed", required=kind in BUILD_KINDS)]
     acceptance = _strings(value.get("acceptance"), "acceptance", required=True)
     refs = _strings(value.get("context_refs", []), "context_refs")
     if any(not CONTEXT_REF_RE.fullmatch(ref) for ref in refs):
         raise ValueError("brief.context_refs must use file:line references")
-    done_when = value.get("done_when", "")
-    gate = value.get("gate", "")
-    if done_when is not None and (not isinstance(done_when, str) or not done_when.strip()):
-        raise ValueError("brief.done_when must be a non-empty string when provided")
-    if gate is not None and not isinstance(gate, str):
-        raise ValueError("brief.gate must be a string")
-    return {"goal": goal.strip(), "files_allowed": files, "acceptance": acceptance,
-            "context_refs": refs, "done_when": (done_when or "").strip(), "gate": (gate or "").strip()}
+    done_when = _single_line(value["done_when"], "done_when") if value.get("done_when") is not None else None
+    gate = _single_line(value["gate"], "gate") if "gate" in value else None
+    return {"goal": goal, "files_allowed": files, "acceptance": acceptance,
+            "context_refs": refs, "done_when": done_when, "gate": gate}
 
 
 def render(value: dict, kind: str) -> str:

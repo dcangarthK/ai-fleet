@@ -173,6 +173,63 @@ class RunnerConfig(unittest.TestCase):
         finally:
             shutil.rmtree(fleet, ignore_errors=True)
 
+    def test_keep_alive_accepts_bounded_ints_and_compound_durations(self):
+        for value in (-1, 0, 30, "1h30m", "250ms1s"):
+            self.assertTrue(runner.valid_keep_alive(value), value)
+        for value in (True, -2, "1234567890s", "1minute", "-2"):
+            self.assertFalse(runner.valid_keep_alive(value), value)
+
+    def test_usage_limit_ignores_result_text_and_uses_error_or_event(self):
+        self.assertFalse(runner.JobManager._usage_limit_hit({"exit_code": 1, "result": "usage limit reached"}))
+        self.assertTrue(runner.JobManager._usage_limit_hit({"exit_code": 1, "error": "usage limit reached"}))
+        self.assertTrue(runner.JobManager._usage_limit_hit({"exit_code": 1,
+                                                            "rate_limit": {"rejected_until": 1}}))
+
+    def test_checkpoint_secret_globs_are_case_insensitive_and_extended(self):
+        for path in ("CERT.P12", "keys/CLIENT.PFX", "app.KEYSTORE", ".NPMRC", ".NETRC", "mySecret.txt"):
+            self.assertTrue(runner.JobManager._secret_path(path, []), path)
+
+    def test_wip_checkpoint_is_guarded_redacted_and_skips_secret_only_work(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            (fleet / "runner.json").write_text("{}")
+            saved = runner.find_agents
+            runner.find_agents = lambda _url: {"claude": None, "codex": None, "ollama": "ollama"}
+            try:
+                manager = runner.JobManager(fleet, "http://127.0.0.1:1")
+            finally:
+                runner.find_agents = saved
+            repo = fleet / "repo"
+            repo.mkdir()
+            for args in (("init", "-q", "-b", "main"), ("config", "user.email", "test@example.test"),
+                         ("config", "user.name", "Test")):
+                subprocess.run(["git", *args], cwd=repo, check=True)
+            (repo / "base.txt").write_text("base\n")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+            subprocess.run(["git", "checkout", "-qb", "fleet/wip1"], cwd=repo, check=True)
+            job = {"id": "wip1", "cwd": str(repo), "worktree": True, "branch": "fleet/wip1",
+                   "state": "exited", "pid": None, "group_gone": True, "policy": {}}
+            (repo / "work.txt").write_text("partial\n")
+            (repo / "CLIENT.P12").write_text("secret\n")
+            out = manager._checkpoint_worktree(job, "WIP checkpoint: capped", "bearer abc123")
+            self.assertTrue(out["committed"])
+            self.assertEqual(["CLIENT.P12"], out["excluded"])
+            progress = (repo / "FLEET-PROGRESS.md").read_text()
+            self.assertIn("work.txt", progress)
+            self.assertNotIn("CLIENT.P12", progress)
+            self.assertIn("[redacted]", progress)
+            wrong = job | {"branch": "fleet/other"}
+            with self.assertRaises(runner.HttpError):
+                manager._checkpoint_worktree(wrong, "WIP checkpoint: capped", "tail")
+            tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            self.assertFalse(manager._checkpoint_worktree(job, "WIP checkpoint: capped", "tail")["committed"])
+            self.assertEqual(tip, subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                                  capture_output=True, text=True).stdout.strip())
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
+
 
 @unittest.skipUnless(base.loopback_bind_available(), "needs loopback sockets")
 class RunnerModels(unittest.TestCase):

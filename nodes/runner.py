@@ -43,7 +43,8 @@ GATE_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 GATE_ARG = re.compile(r"^[A-Za-z0-9_./:=@+,-]{1,200}$")
 MODEL_REF = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
 DERIVED_MODEL = re.compile(r"^fleet-[a-z0-9][a-z0-9.-]{0,60}$")
-KEEP_ALIVE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
+KEEP_ALIVE = re.compile(r"^(?:[0-9]+(?:ms|s|m|h))+$")
+KEEP_ALIVE_DIGITS = 9
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
@@ -61,7 +62,8 @@ PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PROFILE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HANDOFF_BRANCH = re.compile(r"^fleet/t-[0-9a-f]{8}$")
 # Never committed by a checkpoint (matched against each path's file name).
-CHECKPOINT_SECRET_GLOBS = (".env*", "*.pem", "*.key", "id_*", "*credentials*")
+CHECKPOINT_SECRET_GLOBS = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", ".npmrc", ".netrc",
+                           "id_*", "*credentials*", "*secret*")
 EFFORTS = ("low", "medium", "high")
 BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
@@ -397,8 +399,12 @@ def read_json(path, default=None):
 
 
 def valid_keep_alive(value):
-    """Ollama duration syntax plus -1, which keeps a model resident indefinitely."""
-    return isinstance(value, str) and (value == "-1" or bool(KEEP_ALIVE.fullmatch(value)))
+    """Ollama duration syntax, or a bounded JSON integer number of seconds."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value >= -1 and len(str(abs(value))) <= KEEP_ALIVE_DIGITS
+    if not isinstance(value, str) or value == "-1" or not KEEP_ALIVE.fullmatch(value):
+        return value == "-1"
+    return all(len(digits) <= KEEP_ALIVE_DIGITS for digits in re.findall(r"[0-9]+", value))
 
 
 ERROR_LINE = re.compile(r"^\s*error\b\s*[:\-]", re.IGNORECASE)
@@ -1277,9 +1283,25 @@ class JobManager:
         if not isinstance(residency, dict):
             residency = {}
 
-        def keep_alive_map(value):
-            return {name: duration for name, duration in value.items()
-                    if isinstance(name, str) and valid_keep_alive(duration)} if isinstance(value, dict) else {}
+        def keep_alive_map(name, value):
+            if not isinstance(value, dict):
+                if value is not None:
+                    print("runner.json models.keep_alive.%s ignored: expected an object" % name, file=sys.stderr)
+                return {}
+            out = {}
+            for key, duration in value.items():
+                if isinstance(key, str) and valid_keep_alive(duration):
+                    out[key] = duration
+                else:
+                    print("runner.json models.keep_alive.%s[%r] ignored: invalid keep_alive %r" %
+                          (name, key, duration), file=sys.stderr)
+            return out
+
+        default_keep_alive = residency.get("default", "30m")
+        if not valid_keep_alive(default_keep_alive):
+            print("runner.json models.keep_alive.default ignored: invalid keep_alive %r" % default_keep_alive,
+                  file=sys.stderr)
+            default_keep_alive = "30m"
 
         self.models_config = {
             "remote_management": remote if isinstance(remote, bool) else False,
@@ -1292,9 +1314,9 @@ class JobManager:
             # informational only; it documents the intended node capacity.
             "max_loaded_models": models.get("max_loaded_models"),
             "keep_alive": {
-                "default": residency.get("default") if valid_keep_alive(residency.get("default")) else "30m",
-                "roles": keep_alive_map(residency.get("roles")),
-                "models": keep_alive_map(residency.get("models")),
+                "default": default_keep_alive,
+                "roles": keep_alive_map("roles", residency.get("roles")),
+                "models": keep_alive_map("models", residency.get("models")),
             },
         }
         engines = config.get("engines") if isinstance(config.get("engines"), dict) else {}
@@ -2286,8 +2308,9 @@ class JobManager:
         """Whether this failed run ended because its provider quota was exhausted."""
         if job.get("exit_code") == 0:
             return False
-        text = " ".join(str(job.get(key) or "") for key in ("error", "result"))
-        return bool(re.search(r"\b(?:usage|rate)[ _-]*limit\b", text, re.IGNORECASE))
+        if re.search(r"\b(?:usage|rate)[ _-]*limit\b", str(job.get("error") or ""), re.IGNORECASE):
+            return True
+        return bool((job.get("rate_limit") or {}).get("rejected_until"))
 
     def _wip_checkpoint(self, job, reason, summary=""):
         """Commit a capped/limited worktree and durable handoff note before it settles.
@@ -2295,47 +2318,15 @@ class JobManager:
         This is intentionally local-only: it uses the same disabled hooks and signing
         behaviour as the explicit checkpoint endpoint, and never pushes.
         """
-        cwd = job.get("cwd")
-        if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
-            return
-
-        def git(*args):
-            return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
-                                  errors="replace", timeout=120)
-
         try:
-            status = git("status", "--porcelain=v1", "--untracked-files=all")
-            if status.returncode:
-                raise RuntimeError(status.stderr or "git status failed")
-            changed = [line[3:] for line in status.stdout.splitlines() if len(line) >= 4]
             message_tail = (summary or self._last_assistant_text(job) or job.get("result") or "").strip()[-2000:]
-            progress = ["# Progress", "", "Reason: " + str(reason), "", "## Changed files", ""]
-            progress.extend(["- " + path for path in changed] or ["- None detected before this checkpoint."])
-            progress.extend(["", "## Agent message tail", "", message_tail or "No assistant message was recorded.", ""])
-            (Path(cwd) / "PROGRESS.md").write_text("\n".join(progress), encoding="utf-8")
-            added = git("add", "-A")
-            if added.returncode:
-                raise RuntimeError(added.stderr or "git add failed")
-            denied = []
-            for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
-                full = os.path.realpath(os.path.expanduser(path))
-                if self._within(full, cwd):
-                    denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
-            staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
-            excluded = [path for path in staged if self._secret_path(path, denied)]
-            if excluded:
-                reset = git("reset", "-q", "--", *excluded)
-                if reset.returncode:
-                    raise RuntimeError(reset.stderr or "git reset failed")
-            committed = subprocess.run(
-                ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
-                 "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
-                 "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", "WIP checkpoint: " + str(reason)],
-                capture_output=True, text=True, errors="replace", timeout=120)
-            if committed.returncode:
-                raise RuntimeError(committed.stderr or "checkpoint commit failed")
-            self.audit("wip_checkpoint", "job %s checkpointed: %s (%d paths left out)" %
-                       (job["id"], reason, len(excluded)))
+            result = self._checkpoint_worktree(job, "WIP checkpoint: " + str(reason), message_tail,
+                                                allow_running=True)
+            if result["committed"]:
+                self.audit("wip_checkpoint", "job %s checkpointed: %s (%d paths left out)" %
+                           (job["id"], reason, len(result["excluded"])))
+        except HttpError as exc:
+            self.audit("wip_checkpoint_failed", "%s: %s" % (job.get("id"), error_line(exc.detail)))
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             self.audit("wip_checkpoint_failed", "%s: %s" % (job.get("id"), error_line(exc)))
 
@@ -3410,9 +3401,78 @@ class JobManager:
 
     @staticmethod
     def _secret_path(relative, denied):
-        name = relative.rsplit("/", 1)[-1]
-        return (any(fnmatch.fnmatch(name, pattern) for pattern in CHECKPOINT_SECRET_GLOBS)
-                or any(fnmatch.fnmatch(relative, pattern) for pattern in denied))
+        name, folded = relative.rsplit("/", 1)[-1].casefold(), relative.casefold()
+        return (any(fnmatch.fnmatch(name, pattern.casefold()) for pattern in CHECKPOINT_SECRET_GLOBS)
+                or any(fnmatch.fnmatch(folded, pattern.casefold()) for pattern in denied))
+
+    def _checkpoint_guard(self, job, allow_running=False):
+        """Return a verified worktree/branch, refusing unsafe checkpoint targets."""
+        if not allow_running and job.get("state") == "running":
+            raise HttpError(409, "job is running")
+        cwd = job.get("cwd")
+        if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
+            raise HttpError(409, "job has no worktree")
+        self._settle_group(job)
+        if self._group_ok(job) and group_alive(job.get("pid")):
+            raise HttpError(409, "the job's process group is still alive")
+        branch = "fleet/" + job["id"]
+
+        def git(*args, check=True):
+            out = subprocess.run(["git", "-C", cwd, "-c", "core.hooksPath=/dev/null",
+                                  "-c", "core.fsmonitor=false", *args], capture_output=True, text=True,
+                                 errors="replace", timeout=120)
+            if check and out.returncode:
+                raise HttpError(500, trim(out.stderr or "git %s failed" % args[0], 500))
+            return out
+
+        head = git("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+        if head != "refs/heads/" + branch or job.get("branch") != branch:
+            raise HttpError(409, "worktree is not on its own branch %s" % branch)
+        git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
+        for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
+            if (git_dir / name).exists():
+                raise HttpError(409, "worktree is mid-merge, mid-rebase or locked")
+        return cwd, branch, git
+
+    def _checkpoint_worktree(self, job, message, tail=None, allow_running=False):
+        """Stage safe WIP, optionally add an untracked progress note, and commit it."""
+        cwd, branch, git = self._checkpoint_guard(job, allow_running)
+        git("add", "-A")
+        # Keep porcelain machine-readable: paths can contain whitespace and newlines.
+        status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        status_paths = [entry[3:] for entry in status.stdout.split("\0") if len(entry) >= 4]
+        staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+        denied = []
+        for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
+            full = os.path.realpath(os.path.expanduser(path))
+            if self._within(full, cwd):
+                denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
+        excluded = sorted(path for path in staged if self._secret_path(path, denied))
+        if excluded:
+            git("--literal-pathspecs", "reset", "-q", "--", *excluded)
+        staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+        if not staged or not status_paths:
+            return {"sha": git("rev-parse", "HEAD").stdout.strip(), "committed": False,
+                    "excluded": excluded, "branch": branch, "stat": ""}
+        progress = Path(cwd) / "FLEET-PROGRESS.md"
+        tracked = git("ls-files", "--error-unmatch", "--", "FLEET-PROGRESS.md", check=False).returncode == 0
+        if tail is not None and not tracked and not progress.exists():
+            lines = ["# Fleet progress", "", "## Changed files", ""]
+            lines.extend("- " + path for path in staged)
+            lines.extend(["", "## Agent message tail", "", error_line(tail, 2000) if tail else "No assistant message was recorded.", ""])
+            progress.write_text("\n".join(lines), encoding="utf-8")
+            git("add", "--", "FLEET-PROGRESS.md")
+        committed = subprocess.run(
+            ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+             "-c", "commit.gpgsign=false", "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
+             "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", message],
+            capture_output=True, text=True, errors="replace", timeout=120)
+        if committed.returncode:
+            git("reset", "-q", check=False)
+            raise HttpError(500, trim(committed.stderr or "checkpoint commit failed", 500))
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        stat = git("show", "--stat", "--format=", sha).stdout
+        return {"sha": sha, "committed": True, "excluded": excluded, "branch": branch, "stat": trim(stat, 4000)}
 
     def checkpoint(self, job, body=None):
         """Commit a stopped job's uncommitted work on its own branch, for a handoff (docs/SPEC-limit-handoff.md
@@ -3423,54 +3483,11 @@ class JobManager:
         self._settle_group(job)
         with self.lock:
             self.refresh(job)
-            if job["state"] == "running":
-                raise HttpError(409, "job is running")
-            self._refuse_if_group_alive(job)
-            cwd = job.get("cwd")
-            if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
-                raise HttpError(409, "job has no worktree")
-            branch = "fleet/" + job["id"]
-
-            def git(*args, check=True):
-                out = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, errors="replace",
-                                     timeout=120)
-                if check and out.returncode:
-                    raise HttpError(500, trim(out.stderr or "git %s failed" % args[0], 500))
-                return out
-
-            head = git("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
-            if head != "refs/heads/" + branch or job.get("branch") != branch:
-                raise HttpError(409, "worktree is not on its own branch %s" % branch)
-            git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
-            for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
-                if (git_dir / name).exists():
-                    raise HttpError(409, "worktree is mid-merge, mid-rebase or locked")
-            denied = []
-            for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
-                full = os.path.realpath(os.path.expanduser(path))
-                if self._within(full, cwd):
-                    denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
-            git("add", "-A")
-            staged = [p for p in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if p]
-            excluded = sorted(p for p in staged if self._secret_path(p, denied))
-            if excluded:
-                git("reset", "-q", "--", *excluded)
-            if not git("diff", "--cached", "--name-only").stdout.strip():
-                tip = git("rev-parse", "HEAD").stdout.strip()
-                return {"sha": tip, "committed": False, "excluded": excluded, "branch": branch, "stat": ""}
-            committed = subprocess.run(
-                ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
-                 "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
-                 "commit", "-q", "--no-verify", "--no-gpg-sign", "-m",
-                 "checkpoint: stopped at usage limit (%s)" % label],
-                capture_output=True, text=True, errors="replace", timeout=120)
-            if committed.returncode:
-                git("reset", "-q", check=False)
-                raise HttpError(500, trim(committed.stderr or "checkpoint commit failed", 500))
-            sha = git("rev-parse", "HEAD").stdout.strip()
-            stat = git("show", "--stat", "--format=", sha).stdout
-            self.audit("checkpoint", "job %s checkpointed (%d paths left out)" % (job["id"], len(excluded)))
-            return {"sha": sha, "committed": True, "excluded": excluded, "branch": branch, "stat": trim(stat, 4000)}
+            out = self._checkpoint_worktree(job, "checkpoint: stopped at usage limit (%s)" % label)
+            if out["committed"]:
+                self.audit("checkpoint", "job %s checkpointed (%d paths left out)" %
+                           (job["id"], len(out["excluded"])))
+            return out
 
     def log(self, job, offset):
         self.refresh(job)

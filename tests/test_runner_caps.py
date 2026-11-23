@@ -166,7 +166,7 @@ class WipCheckpoint(CapsHelpers, Base):
         self.assertEqual("WIP checkpoint: capped (max_turns)", subprocess.run(
             ["git", "log", "-1", "--format=%s"], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip())
         self.assertEqual("partial work\n", (cwd / "agent-change.txt").read_text())
-        progress = (cwd / "PROGRESS.md").read_text()
+        progress = (cwd / "FLEET-PROGRESS.md").read_text()
         self.assertIn("agent-change.txt", progress)
         self.assertIn("partly done; next run should continue", progress)
 

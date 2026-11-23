@@ -136,7 +136,7 @@ class ShadowTests(HandoffBase):
         with unittest.mock.patch.object(limit_policy, "plan_limit", side_effect=RuntimeError("boom")):
             self.limit(src["id"])
         self.assertEqual(len(self.children(src["id"])), 1)
-        self.assertEqual(rows(src["id"]), [])
+        self.assertEqual([d for d in rows(src["id"]) if d["kind"] != "placement"], [])
 
     def test_a_raising_shadow_comparison_never_reaches_handle_limits_caller(self):
         src = self.build()
@@ -185,15 +185,12 @@ class SameNodeTests(HandoffBase):
 
 
 class DecisionTests(HandoffBase):
-    def test_same_placement_choice_is_recorded_once_and_a_change_again(self):
+    def test_two_creates_with_same_inputs_write_two_rows_with_own_task_ids(self):
         decisions._LAST.clear()
-        before = len(rows(kind="placement"))
-        self.build()
-        self.build()  # same inputs, same node: no second row
-        self.assertEqual(len(rows(kind="placement")), before + 1)
-        decisions._LAST[next(iter(decisions._LAST))] = "other-node"  # the choice differs from the last one recorded
-        self.build()
-        self.assertEqual(len(rows(kind="placement")), before + 2)
+        before = {d["id"] for d in rows(kind="placement")}
+        a, b = self.build(), self.build()
+        new = [d for d in rows(kind="placement") if d["id"] not in before]
+        self.assertEqual(sorted(d["task_id"] for d in new), sorted([a["id"], b["id"]]))
 
     def test_the_sweep_path_records_no_placement_row(self):
         decisions._LAST.clear()

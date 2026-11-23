@@ -270,7 +270,7 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"by_kind": by_kind, "by_model": by_model}
 
 
-DECISION_EVENTS = ("task.allocated", "placement.moved", "task.requeued", "task.loop_cut", "gate.bounced",
+DECISION_EVENTS = ("task.allocated", "placement.moved", "task.requeued", "task.limit_wait", "task.loop_cut", "gate.bounced",
                    "service.restarted", "service.restart_failed", "service.alert", "service.recovered")
 
 

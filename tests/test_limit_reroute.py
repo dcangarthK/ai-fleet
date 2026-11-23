@@ -13,6 +13,7 @@ import unittest
 from tests.test_controller import FakeRunner, W
 from tests.test_limit_handoff import CLAUDE_LIMIT, HandoffBase, OPUS
 
+import tasks
 from store import db
 
 
@@ -101,6 +102,18 @@ class LimitRerouteTests(HandoffBase):
         self.assertGreater(self.parked_until(source["id"]), time.time())
         self.assertEqual(self.get(source["id"])["profile"], "fleet")
         self.assertEqual(self.children(source["id"]), [])
+
+    def test_the_requeue_backstop_emits_task_limit_wait_not_task_rerouted(self):
+        source = self.build(profile="fleet")
+        self.limit(source["id"], text=CLAUDE_LIMIT)
+        with db() as c:  # Part C parked it already: leave only the backstop to do it
+            c.execute("DELETE FROM resume_schedule WHERE task_id=?", (source["id"],))
+            c.execute("UPDATE tasks SET resolution=NULL, resets_at=? WHERE id=?", (time.time() + 600, source["id"]))
+        self.assertTrue(self.c.portal.call(tasks.requeue_limit_wait, source["id"], "usage limit"))
+        events = self.c.get("/api/events/list?limit=1000", headers=W).json()
+        mine = [e["type"] for e in events if e["task_id"] == source["id"]]
+        self.assertIn("task.limit_wait", mine)
+        self.assertNotIn("task.rerouted", mine)
 
     def test_explicit_profile_pin_waits_even_when_another_account_is_free(self):
         source = self.build(profile="fleet")  # the spare account is free and eligible

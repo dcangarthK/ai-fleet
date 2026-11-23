@@ -409,6 +409,63 @@ class HandoffTests(HandoffBase):
         self.assertEqual(self.get(new)["state"], "awaiting_approval")  # nothing approves on the owner's behalf
 
 
+class IndependenceHandoffTests(HandoffBase):
+    def waived_review(self, build):
+        return self.ok(agent="claude", model=BUILD_M, kind="review", mode="read-only", worktree=False,
+                       parent_id=build["id"], independence="waived", independence_reason="regression test")
+
+    def test_review_handed_off_to_same_model_on_different_account_is_refused(self):
+        """Handoff independence (plan 0.2): a review never lands on its builder's model, whatever the account."""
+        build = self.build()
+        rules_now = budget.current_rules()
+        control = handoff.candidate_slots(tasks.get_task(build["id"]), rules_now)  # a build may use the spare
+        self.assertEqual([s["account"] for s in control], ["claude/spare"])
+        task = tasks.get_task(self.waived_review(build)["id"])
+        self.assertEqual(handoff._builders_of(task), [("claude", BUILD_M)])
+        self.assertEqual([s for s in handoff.candidate_slots(task, rules_now) if s["model"] == BUILD_M], [])
+        result = self.c.portal.call(handoff._claim_to_insert, task, control[0], rules_now, time.time())
+        self.assertEqual(result["action"], "none")
+        self.assertIn("independence", result["reason"])
+        self.assertEqual(self.children(task["id"]), [])
+
+    def test_builders_of_is_empty_for_a_build_and_lists_the_builder_for_a_review(self):
+        build = self.build()
+        review = tasks.get_task(self.waived_review(build)["id"])
+        self.assertEqual(handoff._builders_of(tasks.get_task(build["id"])), [])
+        self.assertEqual(handoff._builders_of(review), [("claude", BUILD_M)])
+
+    def test_an_alias_of_the_builders_model_is_excluded_by_budget_key(self):
+        rules_now = budget.current_rules()
+        alias = BUILD_M + "-20260101"
+        if budget.match_key(rules_now, "claude", alias) != budget.match_key(rules_now, "claude", BUILD_M):
+            self.skipTest("rules give the dated alias another budget key")
+        self.assertTrue(handoff._is_builder_slot(rules_now, [("claude", BUILD_M)], "claude", alias, "n"))
+        self.assertFalse(handoff._is_builder_slot(rules_now, [("claude", BUILD_M)], "claude", THIRD_M, "n"))
+
+    def test_an_unknown_builder_model_bars_the_whole_agent(self):
+        rules_now = budget.current_rules()
+        self.assertTrue(handoff._is_builder_slot(rules_now, [("claude", None)], "claude", THIRD_M, "n"))
+        self.assertFalse(handoff._is_builder_slot(rules_now, [("claude", None)], "codex", "gpt-5.6-terra", "n"))
+
+    def test_an_unresolved_slot_model_on_another_profile_bars_that_agent(self):
+        rules_now = budget.current_rules()
+        node = tasks.get_task(self.build()["id"])["node_id"]
+        self.assertTrue(handoff._is_builder_slot(rules_now, [("claude", BUILD_M)], "claude", None, node, "spare"))
+        self.assertFalse(handoff._is_builder_slot(rules_now, [("claude", BUILD_M)], "codex", None, node, "spare"))
+
+    def test_a_review_handoff_keeps_review_of(self):
+        build = self.build()
+        review = tasks.get_task(self.waived_review(build)["id"])
+        with db() as c:
+            c.execute("UPDATE tasks SET review_of=? WHERE id=?", (build["id"], review["id"]))
+        review = tasks.get_task(review["id"])
+        blob = handoff.claim(review["id"])
+        slot = {"agent": "claude", "model": THIRD_M, "profile": "spare", "label": "spare", "account": "claude/spare"}
+        decision = {"key": None, "identity": "claude:" + THIRD_M, "effort": None}
+        new_id = handoff._insert(review, slot, decision, "p", "b", {}, blob, time.time())
+        self.assertEqual(tasks.get_task(new_id)["review_of"], build["id"])
+
+
 class WaitTests(HandoffBase):
     def review(self, **kw):
         return self.ok(**({"agent": "claude", "model": REVIEW_M, "kind": "review", "mode": "read-only",

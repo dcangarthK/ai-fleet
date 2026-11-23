@@ -251,6 +251,7 @@ class VisibleDecisionTests(Base):
         start = time.time() - 1
         emit("t-y", "placement.moved", {"reason": "spare is free"})
         emit("t-y", "task.requeued", {})
+        emit("t-y", "task.limit_wait", {"reason": "parked"})
         emit(None, "service.restarted", {"node": "n", "service": "s", "reason": "r"})
         counts = tokens.decision_counts(start)
         self.assertEqual(counts["placement.moved"], {"count": 1, "with_reason": 1})

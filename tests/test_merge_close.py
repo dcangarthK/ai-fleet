@@ -61,6 +61,19 @@ class MergeClose(unittest.TestCase):
         git(self.repo, "checkout", "-q", "main")
         git(self.repo, "merge", "-q", "--ff-only", "fleet/t-3")
 
+    def test_no_repo_review_task_is_skipped_without_event(self):
+        for repo in (None, "/nonexistent/dir"):
+            self.task["repo"] = repo
+            self.assertFalse(asyncio.run(merge_close.close_if_merged("t-3")))
+            self.assertEqual(self.task["state"], "review")
+        self.assertEqual(self.events, [])
+
+    def test_repeated_failure_emits_one_event(self):
+        merge_close._failed_seen.discard("t-3")
+        for _ in range(3):
+            merge_close._failed("t-3", self.task, "check", RuntimeError("x"))
+        self.assertEqual([e[1] for e in self.events], ["task.auto_close_failed"])
+
     def test_merged_closed_and_cleaned(self):
         self.merged_with_work()
         self.assertTrue(asyncio.run(merge_close.close_if_merged("t-3")))

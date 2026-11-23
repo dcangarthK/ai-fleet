@@ -12,6 +12,7 @@ refuses main/master, and `git branch -d` refuses a checked-out branch). Pipeline
 pipeline. State and ownership are re-checked under the task lock before the task is completed.
 """
 import asyncio
+import os
 import subprocess
 
 import handoff
@@ -19,6 +20,7 @@ import tasks
 from events import emit
 from store import db
 
+_failed_seen: set[str] = set()  # tasks whose auto_close_failed was already emitted (once per task, per process)
 PROTECTED = {"main", "master"}
 READ_ONLY_KINDS = {"review", "re_review", "final_review", "security_review", "check"}
 
@@ -40,6 +42,9 @@ def has_own_commits(repo: str | None, branch: str) -> bool:
 
 
 def _failed(task_id: str, task: dict | None, stage: str, exc) -> None:
+    if task_id in _failed_seen:
+        return
+    _failed_seen.add(task_id)
     print(f"auto close of {task_id} failed at {stage}: {exc!r}")
     emit(task_id, "task.auto_close_failed", {"title": (task or {}).get("title"), "stage": stage,
                                              "error": str(exc)[:300]})
@@ -55,6 +60,9 @@ async def close_if_merged(task_id: str) -> bool:
     task = tasks.get_task(task_id)
     if not _eligible(task, task_id):
         return False
+    repo = task.get("repo")
+    if not repo or not os.path.isdir(repo):
+        return False  # nothing to check: no repo, no close, no event
     branch = task.get("branch") or "fleet/" + task_id
     if branch in PROTECTED:
         return False

@@ -1888,13 +1888,14 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         limits["task_minutes"] = min(limits.get("task_minutes", 30), 30)
         task_policy["limits"] = limits
     on_account = [s for s in slots_for(agent) if s["account"] == decision.get("account")]
+    first_id = "t-" + secrets.token_hex(4)  # known before placement so the decision row carries a task_id
     try:
         if task_policy is not None:
             fleet_policy.validate(task_policy)
         node, effective, queued_reason = pick_node(agent, model, t.mode, t.node, t.gate, t.role, task_policy,
                                                    t.skills, t.escalation,
                                                    allowed={s["node"] for s in on_account} if on_account else None,
-                                                   engine=engine or "ollama")
+                                                   engine=engine or "ollama", task_id=first_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if kind == "lead" and not budget_support(node):
@@ -1935,7 +1936,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
         extra["continue_job"] = t.continue_job
     ids: list[str] = []
     for index, part in enumerate(parts):
-        task_id = "t-" + secrets.token_hex(4)
+        task_id = first_id if index == 0 else "t-" + secrets.token_hex(4)
         # Chunks of one split prompt share the given parent (a pipeline's build task); without one, the first
         # chunk is the parent of the rest.
         if index == 0:

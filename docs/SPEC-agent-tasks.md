@@ -41,7 +41,7 @@ Local config `FLEET_DIR/runner.json`: `{"max_mode": "auto-edit"}` (created with 
 
 All responses JSON. Errors: `{"detail": "..."}` with 4xx/5xx.
 - `GET /health` → `{"ok": true, "version": "1", "max_mode": "...", "agents": {"claude": "/path", "codex": "/path", "ollama": "http://..."}, "running": <int>}`
-  Agents found via PATH plus per-user dirs (`~/.local/bin`, `~/.claude/local`, npm/bun/cargo/volta/nvm, `/opt/homebrew/bin`, `/usr/local/bin`) and `/Applications/Codex.app/Contents/Resources/codex`; ollama via `OLLAMA_URL` (default `http://127.0.0.1:11434`) answering `/api/tags`.
+  Agents found via PATH plus per-user dirs (`~/.local/bin`, `~/.claude/local`, npm/bun/cargo/volta/nvm, `/opt/homebrew/bin`, `/usr/local/bin`) and the bundled Codex CLI `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` (legacy fallback `/Applications/Codex.app/Contents/Resources/codex`); ollama via `OLLAMA_URL` (default `http://127.0.0.1:11434`) answering `/api/tags`.
 - `POST /jobs` body:
   `{"id": "t-abc", "agent": "claude|codex|ollama", "prompt": "...", "mode": "read-only|supervised|auto-edit|full",
     "repo": "/abs/path or null", "worktree": true, "cwd": null, "model": null, "gate": "pytest -q" | null,

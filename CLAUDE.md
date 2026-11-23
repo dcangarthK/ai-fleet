@@ -6,7 +6,7 @@ Copy into a project's CLAUDE.md (or ~/.claude/CLAUDE.md for all projects).
 | Member | How to reach | Use for |
 |---|---|---|
 | Claude (you) | — | Orchestrator: specs, task split, final review, merge |
-| Codex | `codex` MCP server | Final and security-sensitive reviews; hard builds only (see Paid-model budget) |
+| Codex | fleet tasks: `spawn_task(agent="codex")` (no `codex` MCP server) | Final and security-sensitive reviews; hard builds only (see Paid-model budget) |
 | Fleet `coder` | `local-llm.ask_model(role="coder")` | Small, well-scoped functions, boilerplate, test drafts |
 | Fleet `reviewer` | `local-llm.review_diff` | Independent diff review |
 | Fleet `fast` | `local-llm.ask_model(role="fast")` | Summaries, triage, commit messages |

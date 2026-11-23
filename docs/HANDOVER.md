@@ -208,7 +208,7 @@ Repo: `~/ai-fleet`, branch **`feat/agent-tasks`** (≈75 commits ahead of `main`
 | Ollama | `brew services` | models: qwen2.5-coder:14b, phi4:14b, glm-4.7-flash, fleet-glm-4.7-flash-latest (derived: num_ctx 32768, temp 0.1), llama3.2, qwen2.5:3b, codellama |
 | LiteLLM | Docker compose in `master/litellm` | 127.0.0.1:4000; virtual key in Keychain service `litellm-laptop1` |
 | Fleet Claude | runner env `CLAUDE_CONFIG_DIR=~/.claude-fleet` (logged in by the owner) | uses the Desktop app's bundled `claude`; **same account limits as the owner's** |
-| Codex | `/Applications/Codex.app/Contents/Resources/codex` | sandbox: no network unless allowed; **`.git` is always read-only for Codex → Codex can't commit/merge; give merges to Claude** |
+| Codex | `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` (legacy fallback `/Applications/Codex.app/Contents/Resources/codex`) | sandbox: no network unless allowed; **`.git` is always read-only for Codex → Codex can't commit/merge; give merges to Claude** |
 
 Roles: `coder` and `fast` → qwen2.5-coder:14b; `reviewer` → glm-4.7-flash (derived, 32k ctx), fallback `coder`.
 Fleet policy (`fleet/*`): `auto_approve {agents: [claude, codex], denied_tools: true}` (denied tools auto-approved,

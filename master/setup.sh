@@ -16,7 +16,14 @@ for arg in "$@"; do
 done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$HERE/.." && pwd)"
-CODEX="$(command -v codex || echo /Applications/Codex.app/Contents/Resources/codex)"
+CODEX_CHATGPT=/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+CODEX_LEGACY=/Applications/Codex.app/Contents/Resources/codex
+CODEX="$(command -v codex || true)"
+if [ -z "$CODEX" ]; then
+  if [ -x "$CODEX_CHATGPT" ]; then CODEX="$CODEX_CHATGPT"
+  elif [ -x "$CODEX_LEGACY" ]; then CODEX="$CODEX_LEGACY"
+  else CODEX="$CODEX_CHATGPT"; fi
+fi
 TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 
 # BEGIN launchd plist helper

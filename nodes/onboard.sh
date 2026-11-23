@@ -484,14 +484,15 @@ USER_BIN_DIRS = [home / ".local/bin", home / ".claude/local", home / ".npm-globa
                  home / ".cargo/bin", home / ".volta/bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
 SEARCH_PATH = os.pathsep.join([os.environ.get("PATH", "")] + [str(d) for d in USER_BIN_DIRS]
                               + glob.glob(str(home / ".nvm/versions/node/*/bin")))
-BUNDLED = {"codex": "/Applications/Codex.app/Contents/Resources/codex"}
+BUNDLED = {"codex": ["/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                     "/Applications/Codex.app/Contents/Resources/codex"]}
 
 def agents():
     found = []
     for cmd, label in AGENT_CLIS.items():
         path = shutil.which(cmd, path=SEARCH_PATH)
-        if not path and Path(BUNDLED.get(cmd, "/nonexistent")).exists():
-            path = BUNDLED[cmd]
+        if not path:
+            path = next((c for c in BUNDLED.get(cmd, []) if Path(c).exists()), None)
         if path:
             version = run([path, "--version"]).splitlines()[:1]
             found.append({"cli": cmd, "name": label, "path": path, "version": version[0] if version else ""})
@@ -1236,13 +1237,19 @@ def agent_search_path():
     return os.pathsep.join([os.environ.get("PATH", "")] + [str(item) for item in dirs])
 
 
+# Bundled Codex CLI locations, tried in order (ChatGPT.app first, legacy Codex.app second).
+CODEX_BUNDLED = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+)
+
+
 def find_agents(ollama_url, ollama_up=None):
     """`ollama_up` from the metrics thread's cache skips the inline probe (docs/SPEC-live-monitor.md 4.1)."""
     search = agent_search_path()
-    codex_bundled = "/Applications/Codex.app/Contents/Resources/codex"
     codex = shutil.which("codex", path=search)
-    if not codex and os.path.isfile(codex_bundled) and os.access(codex_bundled, os.X_OK):
-        codex = codex_bundled
+    if not codex:
+        codex = next((c for c in CODEX_BUNDLED if os.path.isfile(c) and os.access(c, os.X_OK)), None)
     claude = shutil.which("claude", path=search)
     if not claude:
         # Claude Code bundled with the Claude desktop app (newest install first).
@@ -5568,7 +5575,7 @@ main() {
 
   say "Done"
   echo "This node will show as 'pending' on the console's Nodes page within ~30s. Approve it there, then assign roles."
-  if have claude || have codex || [ -d /Applications/Codex.app ] || [ -d "$HOME/Library/Application Support/Claude/claude-code" ]; then
+  if have claude || have codex || [ -d /Applications/Codex.app ] || [ -d /Applications/ChatGPT.app/Contents/Resources/codex-cli ] || [ -d "$HOME/Library/Application Support/Claude/claude-code" ]; then
     echo "Agent CLIs found. Fleet jobs use their own profiles; sign them in once, as this user:"
     echo "  CLAUDE_CONFIG_DIR=$HOME/.claude-fleet claude      (then /login)"
     echo "  CODEX_HOME=$HOME/.codex-fleet codex login"

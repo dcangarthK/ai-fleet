@@ -595,13 +595,19 @@ def agent_search_path():
     return os.pathsep.join([os.environ.get("PATH", "")] + [str(item) for item in dirs])
 
 
+# Bundled Codex CLI locations, tried in order (ChatGPT.app first, legacy Codex.app second).
+CODEX_BUNDLED = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
+)
+
+
 def find_agents(ollama_url, ollama_up=None):
     """`ollama_up` from the metrics thread's cache skips the inline probe (docs/SPEC-live-monitor.md 4.1)."""
     search = agent_search_path()
-    codex_bundled = "/Applications/Codex.app/Contents/Resources/codex"
     codex = shutil.which("codex", path=search)
-    if not codex and os.path.isfile(codex_bundled) and os.access(codex_bundled, os.X_OK):
-        codex = codex_bundled
+    if not codex:
+        codex = next((c for c in CODEX_BUNDLED if os.path.isfile(c) and os.access(c, os.X_OK)), None)
     claude = shutil.which("claude", path=search)
     if not claude:
         # Claude Code bundled with the Claude desktop app (newest install first).

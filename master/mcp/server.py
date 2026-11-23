@@ -565,6 +565,13 @@ def wait_tasks(ids: list[str], timeout_seconds: int = 600, any_of: bool = False,
 
 
 @mcp.tool()
+def batch_report(ids: list[str]) -> str:
+    """One call, one SQL query: per task the model, account, commit, gate state, verdict line, tokens, spend and
+    limit hits. Use it for the "record per task" summary and the spend report instead of reading each task."""
+    return _controller("GET", f"/api/batch_report?ids={','.join(_q(i) for i in ids)}")
+
+
+@mcp.tool()
 def list_tasks(state: str = "", parent_id: str = "") -> str:
     """List tasks, newest first. state: comma-separated filter, e.g. 'working,blocked'."""
     params = "&".join(f"{k}={_q(v)}" for k, v in {"state": state, "parent_id": parent_id}.items() if v)

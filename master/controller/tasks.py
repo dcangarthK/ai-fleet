@@ -784,13 +784,13 @@ def iso_epoch(value) -> float | None:
         return None
 
 
-def job_fields(job: dict) -> dict:
+def job_fields(job: dict, task: dict | None = None) -> dict:
     # The runner's own error line (a Codex usage-limit message, say) is kept for a run that has ended, so the
     # failure reason and reset time can be read from it; a run in progress has none.
     error = job.get("error") if isinstance(job.get("error"), str) and job.get("state") != "running" else None
     fields = {"session_id": job.get("session_id"), "result": job.get("result"),
             "denials": json.dumps(job.get("denials") or []), "exit_code": job.get("exit_code"),
-            "gate_result": json.dumps(job["gate"]) if job.get("gate") else None,
+            "gate_result": gate_field(job, task),
             "branch": job.get("branch"), "cwd": job.get("cwd"), "error": error or None,
             # what the agent CLI reported for this run (runner 2.1); null when it reported nothing
             "usage": json.dumps(job["usage"]) if isinstance(job.get("usage"), dict) else None,
@@ -874,7 +874,7 @@ async def start(task: dict) -> None:
     elif isinstance(job.get("limits_applied"), dict):
         applied["effort"] = job["limits_applied"].get("effort")
     transition(task, {"starting"}, "working", started_at=time.time(), runs=max(task["runs"] or 0, 1),
-               **job_fields(job), **applied)
+               **job_fields(job, task), **applied)
 
 
 async def try_start(task: dict) -> bool:
@@ -1076,7 +1076,7 @@ async def _poll_task(task_id: str) -> bool:
             return False
         clear_unreachable(task_id)
         new = outcome(task, job)
-        fields = job_fields(job)
+        fields = job_fields(job, task)
         if loopheal.is_loop_cut(job):
             fields.update(loopheal.loop_fields(new, job))
         agent_end = iso_epoch(job.get("ended_at"))
@@ -1189,6 +1189,35 @@ async def continuation_sweep(now: float | None = None) -> list[str]:
     return made
 
 
+def cost_source_of(task: dict, usage: dict) -> str:
+    """Provenance of a usage row's cost, never null. The runner's own words ("result", "transcript") stand; else
+    a local model is "local" (no spend), tokens without a cost are "estimated", and nothing reported is "none"."""
+    if usage.get("cost_source"):
+        return usage["cost_source"]
+    if task.get("agent") not in budget.PAID_AGENTS:
+        return "local"
+    if usage.get("cost_usd") is not None:
+        return "reported"
+    if any(usage.get(k) is not None for k in ("input", "output", "cached")):
+        return "estimated"
+    return "none"
+
+
+def gate_field(job: dict, task: dict | None) -> str | None:
+    """The gate_result to store: the runner's, or an explicit reason when no gate ran (never NULL for a task the
+    caller names). A real result already stored is not replaced by a reason."""
+    if job.get("gate"):
+        return json.dumps(job["gate"])
+    if task is None:
+        return None
+    current = task.get("gate_result")
+    if isinstance(current, dict) and current.get("state") in ("passed", "failed"):
+        return json.dumps(current)
+    if not task.get("gate"):
+        return json.dumps({"state": "no_gate", "reason": "the task named no gate command"})
+    return json.dumps({"state": "not_run", "reason": "the task named a gate but the runner reported no result"})
+
+
 def record_usage(task_id: str, outcome_name: str | None = None) -> None:
     """One agent_usage row per settled run: the tokens the CLI reported (null when it reported none). `outcome_name`
     overrides the derived outcome (a stall nudge's run is "nudged", not an error)."""
@@ -1207,11 +1236,11 @@ def record_usage(task_id: str, outcome_name: str | None = None) -> None:
         outcome_name = "error"
     outcome_name = forced or outcome_name
     run = t.get("runs") or 1
-    prompt_bytes = t.get("prompt_bytes") if run <= 1 else t.get("run_prompt_bytes")
+    prompt_bytes = t.get("run_prompt_bytes") or t.get("prompt_bytes")
     row = {"ts": time.time(), "task_id": task_id, "run": run, "agent": t["agent"],
            "model": usage.get("model") or t.get("model"), "kind": t.get("kind"), "input": usage.get("input"),
            "output": usage.get("output"), "cached": usage.get("cached"), "cost_usd": usage.get("cost_usd"),
-           "cost_source": usage.get("cost_source"),
+           "cost_source": cost_source_of(t, usage),
            "prompt_bytes": prompt_bytes, "effort": t.get("effort"), "outcome": outcome_name,
            "num_turns": t.get("num_turns"), "identity": t.get("budget_identity") or budget.identity(t["agent"], t.get("model")),
            "resets_at": t.get("resets_at") if outcome_name == "limit" else None,
@@ -1889,6 +1918,7 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
             "hidden": int(link == "check"), "kind": kind, "effort": decision["effort"], "budget_override": override,
             "routed_from": decision["routed_from"], "budget_key": decision["key"],
             "budget_identity": decision["identity"], "prompt_bytes": len(part.encode()),
+            "run_prompt_bytes": len(part.encode()),
             "prompt_stripped_bytes": clean["stripped_bytes"] if index == 0 else 0,
             "prompt_omitted": (json.dumps(clean["omitted"] + [f"long lines: {p}" for p in clean["long_lines"]])
                                if index == 0 else None),
@@ -1983,6 +2013,13 @@ async def _wait(wanted: list[str], timeout: float, mode: str) -> dict:
                     "tasks": [{k: t[k] for k in ("id", "title", "state", "agent", "node_id", "exit_code", "error")}
                               | {"result": (t["result"] or "")[:2000]} for t in tasks]}
         await changed(since, min(30, deadline - time.monotonic()))
+
+
+@router.get("/api/batch_report")
+def batch_report_route(ids: str) -> dict:
+    import batch_report
+    wanted = [i for i in ids.split(",") if i][:100]
+    return {"tasks": batch_report.report(wanted)}
 
 
 @router.get("/api/tasks/{task_id}")

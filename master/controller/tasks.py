@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
@@ -1365,7 +1365,8 @@ REPLACE_REASONS = ("retry", "handoff", "reroute", "requeue")
 
 class TaskIn(BaseModel):
     agent: str
-    prompt: str
+    prompt: str = ""
+    brief: dict | None = None
     title: str | None = None
     model: str | None = None
     engine: str | None = None
@@ -1402,9 +1403,14 @@ class TaskIn(BaseModel):
     @field_validator("prompt")
     @classmethod
     def prompt_not_blank(cls, v: str) -> str:
-        if not v.strip():
+        return v or ""
+
+    @model_validator(mode="after")
+    def legacy_prompt_not_blank(self):
+        """Keep pre-brief request validation (422) unchanged for legacy callers."""
+        if self.brief is None and not self.prompt.strip():
             raise ValueError("prompt is empty")
-        return v
+        return self
 
 
 class MessageIn(BaseModel):
@@ -1506,6 +1512,12 @@ def launch_tools(agent: str, policy: dict, mode: str | None = None) -> list[str]
 @router.post("/api/tasks")
 async def create_task_route(t: TaskIn, request: Request) -> dict:
     return await create_task(t, scope=getattr(request.state, "scope", "admin"))
+
+
+@router.get("/api/tasks/{task_id}/propose-reviewer")
+def propose_reviewer_route(task_id: str) -> dict:
+    import reviewer
+    return reviewer.propose(task_id)
 
 
 STAGE_RE = re.compile(r"^[a-z0-9-]{1,24}$")
@@ -1666,6 +1678,24 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
     """Create (and try to start) a task. `scope` is the caller's access; in-process callers are the controller.
     `forbidden` (in-process only): (agent, model) pairs a budget fallback may never reroute this task to.
     `pipeline` (in-process only): the pipeline engine, whose reviews keep their own independence check."""
+    # A typed brief owns the prompt text. Legacy free-form prompts stay untouched.
+    brief_gate = t.brief.get("gate") if isinstance(t.brief, dict) else None
+    requested_kind = t.kind or ("build" if t.gate or brief_gate else "draft")
+    if t.brief is not None:
+        if t.prompt.strip():
+            raise HTTPException(400, "provide either prompt or brief, not both")
+        import briefs
+        try:
+            t.brief = briefs.validate(t.brief, requested_kind)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        t.prompt = briefs.render(t.brief, requested_kind)
+        if t.brief.get("gate"):
+            if t.gate and t.gate != t.brief["gate"]:
+                raise HTTPException(400, "brief.gate conflicts with gate")
+            t.gate = t.brief["gate"]
+    elif not t.prompt.strip():
+        raise HTTPException(400, "prompt is empty")
     decision_id = None
     if t.model == "auto":
         decision_id = auto_pick(t)  # Part I R6: before admission, which still runs unchanged
@@ -1885,7 +1915,8 @@ async def create_task(t: TaskIn, scope: str = "admin", *, forbidden: set | None 
               "escalation": t.escalation, "policy": t.policy, "profile": t.profile,
               "accounts": [s["node"] for s in on_account] if on_account else None, "allocated": allocated,
               "pin": bool(t.pin), "model_pinned": bool(t.model),
-              "default_model": kind_default if kind_default and agent == t.agent and model == kind_default else None}
+              "default_model": kind_default if kind_default and agent == t.agent and model == kind_default else None,
+              "brief": t.brief}
     now = time.time()
     title = (t.title or t.prompt.strip().splitlines()[0])[:80]
     auto = (effective["policy"].get("auto_approve") or {})

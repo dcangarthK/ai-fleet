@@ -465,13 +465,15 @@ def _q(value: str) -> str:
 
 
 @mcp.tool()
-def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: str = "auto-edit",
+def spawn_task(agent: str, prompt: str = "", title: str = "", repo: str = "", mode: str = "auto-edit",
                gate: str = "", model: str = "", node: str = "", parent_id: str = "", worktree: bool = True,
                role: str = "", kind: str = "", effort: str = "", budget_override: str = "", link: str = "",
-               profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "") -> str:
+               profile: str = "", stage: str = "", independence: str = "", independence_reason: str = "",
+               brief: dict | None = None) -> str:
     """Start a task for an agent on the fleet; returns at once; wait_tasks blocks until it settles.
     agent: 'codex' or 'claude' (coding agents), or 'ollama' (one-shot answer; needs model).
-    prompt: the instructions. repo: absolute git repo path; the agent works in its own worktree/branch.
+    prompt: the instructions (legacy). Or pass brief={goal, files_allowed, acceptance, context_refs, done_when, gate}.
+    repo: absolute git repo path; the agent works in its own worktree/branch.
     kind: build, fix, review, re_review, final_review, security_review, merge, benchmark, check, draft, test, lead.
     The budget rules refuse a kind a model isn't for.
     model: 'auto' picks the best eligible model for kind.
@@ -480,14 +482,31 @@ def spawn_task(agent: str, prompt: str, title: str = "", repo: str = "", mode: s
     Optional: node, effort (low|medium|high), profile (e.g. 'spare'), parent_id with link, stage, independence='waived' with independence_reason.
     budget_override is refused."""
     body = {"agent": agent, "prompt": prompt, "mode": mode, "worktree": worktree}
+    if brief is not None:
+        body["brief"] = brief
     for k, v in {"title": title, "repo": repo, "gate": gate, "model": model, "node": node,
                  "parent_id": parent_id, "role": role, "kind": kind, "effort": effort,
                  "budget_override": budget_override, "link": link, "profile": profile, "stage": stage,
                  "independence": independence, "independence_reason": independence_reason}.items():
         if v:
             body[k] = v
+    # A model-less ordinary review delegates reviewer selection to the controller.  A parent is the builder task
+    # whose lineage supplies the independence constraint; without one, retain the legacy caller's request.
+    if kind == "review" and not model and parent_id:
+        try:
+            proposal = json.loads(_controller("GET", f"/api/tasks/{_q(parent_id)}/propose-reviewer", scope="operate"))
+            if isinstance(proposal, dict) and proposal.get("agent") and proposal.get("model"):
+                body.update({k: proposal[k] for k in ("agent", "model", "profile") if proposal.get(k)})
+        except (TypeError, ValueError):
+            pass  # controller admission still reports the authoritative error
     out = _controller("POST", "/api/tasks", body, scope="operate")
     return _trim_row(out, True)
+
+
+@mcp.tool()
+def propose_reviewer(task_id: str) -> str:
+    """Return the controller's independent reviewer proposal for a task, using live budget headroom."""
+    return _controller("GET", f"/api/tasks/{_q(task_id)}/propose-reviewer", scope="operate")
 
 
 @mcp.tool()

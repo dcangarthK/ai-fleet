@@ -2,7 +2,9 @@
 Run: python3 -m unittest -v tests/test_runner_models.py
 """
 import json
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,9 +15,11 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_runner as base  # noqa: E402
+from tests.test_runner_budget import runner  # noqa: E402
 
 GB = 1_000_000_000
 
@@ -124,6 +128,50 @@ def serve(handler):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+class RunnerConfig(unittest.TestCase):
+    def test_ollama_worker_request_uses_model_then_role_keep_alive(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            (fleet / "runner.json").write_text(json.dumps({
+                "models": {"keep_alive": {"default": "30m", "roles": {"review": "2h"},
+                                           "models": {"tiny:1b": "-1"}}}}))
+            saved = runner.find_agents
+            runner.find_agents = lambda _url: {"claude": None, "codex": None, "ollama": "ollama"}
+            try:
+                manager = runner.JobManager(fleet, "http://127.0.0.1:1")
+            finally:
+                runner.find_agents = saved
+            job = {"id": "local1", "agent": "ollama", "mode": "read-only", "runs": 1, "model": "tiny:1b",
+                   "kind": "review", "engine": "ollama", "instructions": ""}
+            (fleet / "jobs" / job["id"]).mkdir(parents=True)
+            manager._command(job, "hello", [], False)
+            path = fleet / "jobs" / job["id"] / "ollama-request.1.json"
+            request = json.loads(path.read_text())
+            self.assertEqual("-1", request["keep_alive"])
+            with mock.patch.object(runner.urllib.request, "urlopen") as open_url:
+                response = mock.MagicMock()
+                response.__enter__.return_value = io.BytesIO(b'{"message": {"content": "ok"}}')
+                open_url.return_value = response
+                self.assertEqual(0, runner.ollama_worker(path))
+            self.assertEqual("-1", json.loads(open_url.call_args.args[0].data)["keep_alive"])
+            job["model"] = "other:1b"
+            manager._command(job, "hello", [], False)
+            request = json.loads((fleet / "jobs" / job["id"] / "ollama-request.1.json").read_text())
+            self.assertEqual("2h", request["keep_alive"])
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
+
+    def test_runner_config_accepts_utf8_bom(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            path = fleet / "bom.json"
+            path.write_bytes(b"\xef\xbb\xbf{\"ok\": true}")
+            self.assertEqual({"ok": True}, runner.read_json(path))
+            self.assertEqual({"keep_alive": "-1"}, runner.ModelManager._params({"keep_alive": "-1"}))
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
 
 
 @unittest.skipUnless(base.loopback_bind_available(), "needs loopback sockets")

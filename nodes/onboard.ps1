@@ -612,10 +612,21 @@ def atomic_json(path, value, mode=None):
 
 def read_json(path, default=None):
     try:
-        with open(path, encoding="utf-8") as handle:
+        # Node owners commonly edit runner.json with Windows tools, which may add a BOM.
+        with open(path, encoding="utf-8-sig") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError:
         return default
+    except (ValueError, UnicodeError) as exc:
+        # A bad state/config file must be visible in the service log; silently choosing a
+        # default can otherwise widen a node's effective policy without an operator noticing.
+        print("could not parse JSON %s: %s" % (path, exc), file=sys.stderr)
+        return default
+
+
+def valid_keep_alive(value):
+    """Ollama duration syntax plus -1, which keeps a model resident indefinitely."""
+    return isinstance(value, str) and (value == "-1" or bool(KEEP_ALIVE.fullmatch(value)))
 
 
 ERROR_LINE = re.compile(r"^\s*error\b\s*[:\-]", re.IGNORECASE)
@@ -1490,6 +1501,14 @@ class JobManager:
         disk = models.get("disk_reserve_gb", 8)
         ram = models.get("ram_reserve_gb", 4)
         loaded = models.get("max_loaded", 1)
+        residency = models.get("keep_alive", {})
+        if not isinstance(residency, dict):
+            residency = {}
+
+        def keep_alive_map(value):
+            return {name: duration for name, duration in value.items()
+                    if isinstance(name, str) and valid_keep_alive(duration)} if isinstance(value, dict) else {}
+
         self.models_config = {
             "remote_management": remote if isinstance(remote, bool) else False,
             "disk_reserve_gb": (float(disk) if isinstance(disk, (int, float)) and not isinstance(disk, bool)
@@ -1497,6 +1516,14 @@ class JobManager:
             "ram_reserve_gb": (float(ram) if isinstance(ram, (int, float)) and not isinstance(ram, bool)
                                and math.isfinite(ram) and ram >= 0 else 4),
             "max_loaded": loaded if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0 else 1,
+            # Ollama controls actual concurrency. max_loaded_models is deliberately
+            # informational only; it documents the intended node capacity.
+            "max_loaded_models": models.get("max_loaded_models"),
+            "keep_alive": {
+                "default": residency.get("default") if valid_keep_alive(residency.get("default")) else "30m",
+                "roles": keep_alive_map(residency.get("roles")),
+                "models": keep_alive_map(residency.get("models")),
+            },
         }
         engines = config.get("engines") if isinstance(config.get("engines"), dict) else {}
         dmr = engines.get("dmr") if isinstance(engines.get("dmr"), dict) else {}
@@ -1557,6 +1584,15 @@ class JobManager:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
+
+    def keep_alive_for(self, job):
+        """The node-local residency value for an Ollama job; a model override wins."""
+        residency = self.models_config["keep_alive"]
+        model = job.get("model")
+        role = job.get("kind")
+        return (residency["models"].get(model)
+                or residency["roles"].get(role)
+                or residency["default"])
 
     def check_path(self, value, policy=None):
         expanded = os.path.expanduser(value) if isinstance(value, str) else ""
@@ -2427,6 +2463,8 @@ class JobManager:
                 self._mark_capped(job, {"reason": "max_turns", "limit": job.get("max_turns"),
                                         "turns": job.get("num_turns"), "stop": "cli"})
             else:
+                if self._usage_limit_hit(job):
+                    self._wip_checkpoint(job, "usage limit")
                 job["state"] = "exited"
             self._save(job)
             if job["state"] == "capped":
@@ -2457,6 +2495,7 @@ class JobManager:
         stays for the next session."""
         loop = cap.get("reason") == "loop"
         summary = self._last_assistant_text(job, prefer_verdict=loop)
+        self._wip_checkpoint(job, "capped (%s)" % cap.get("reason", "unknown"), summary)
         if summary:
             words = summary.split()
             if len(words) > 300 and not loop:  # a loop cut keeps the full text (it may hold a review verdict)
@@ -2469,6 +2508,64 @@ class JobManager:
                     "result": trim(summary or job.get("result") or "capped before any summary was written")})
         if job.get("gate"):
             job["gate"]["state"] = "skipped"
+
+    @staticmethod
+    def _usage_limit_hit(job):
+        """Whether this failed run ended because its provider quota was exhausted."""
+        if job.get("exit_code") == 0:
+            return False
+        text = " ".join(str(job.get(key) or "") for key in ("error", "result"))
+        return bool(re.search(r"\b(?:usage|rate)[ _-]*limit\b", text, re.IGNORECASE))
+
+    def _wip_checkpoint(self, job, reason, summary=""):
+        """Commit a capped/limited worktree and durable handoff note before it settles.
+
+        This is intentionally local-only: it uses the same disabled hooks and signing
+        behaviour as the explicit checkpoint endpoint, and never pushes.
+        """
+        cwd = job.get("cwd")
+        if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
+            return
+
+        def git(*args):
+            return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True,
+                                  errors="replace", timeout=120)
+
+        try:
+            status = git("status", "--porcelain=v1", "--untracked-files=all")
+            if status.returncode:
+                raise RuntimeError(status.stderr or "git status failed")
+            changed = [line[3:] for line in status.stdout.splitlines() if len(line) >= 4]
+            message_tail = (summary or self._last_assistant_text(job) or job.get("result") or "").strip()[-2000:]
+            progress = ["# Progress", "", "Reason: " + str(reason), "", "## Changed files", ""]
+            progress.extend(["- " + path for path in changed] or ["- None detected before this checkpoint."])
+            progress.extend(["", "## Agent message tail", "", message_tail or "No assistant message was recorded.", ""])
+            (Path(cwd) / "PROGRESS.md").write_text("\n".join(progress), encoding="utf-8")
+            added = git("add", "-A")
+            if added.returncode:
+                raise RuntimeError(added.stderr or "git add failed")
+            denied = []
+            for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
+                full = os.path.realpath(os.path.expanduser(path))
+                if self._within(full, cwd):
+                    denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
+            staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+            excluded = [path for path in staged if self._secret_path(path, denied)]
+            if excluded:
+                reset = git("reset", "-q", "--", *excluded)
+                if reset.returncode:
+                    raise RuntimeError(reset.stderr or "git reset failed")
+            committed = subprocess.run(
+                ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                 "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
+                 "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", "WIP checkpoint: " + str(reason)],
+                capture_output=True, text=True, errors="replace", timeout=120)
+            if committed.returncode:
+                raise RuntimeError(committed.stderr or "checkpoint commit failed")
+            self.audit("wip_checkpoint", "job %s checkpointed: %s (%d paths left out)" %
+                       (job["id"], reason, len(excluded)))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            self.audit("wip_checkpoint_failed", "%s: %s" % (job.get("id"), error_line(exc)))
 
     def _last_assistant_text(self, job, prefer_verdict=False):
         """The text of the last assistant message with text in this run's stream; "" when there is none. With
@@ -3389,7 +3486,8 @@ class JobManager:
             }, 0o600)
             return [sys.executable, str(Path(__file__).resolve()), "--openai-worker", str(request_path)]
         atomic_json(request_path, {"url": self.ollama_url, "model": job["model"], "prompt": prompt,
-                                   "instructions": job.get("instructions") or ""}, 0o600)
+                                   "instructions": job.get("instructions") or "",
+                                   "keep_alive": self.keep_alive_for(job)}, 0o600)
         return [sys.executable, str(Path(__file__).resolve()), "--ollama-worker", str(request_path)]
 
     def _launch(self, job, prompt, allowed_tools, resume):
@@ -3865,8 +3963,7 @@ class ModelManager:
             raise HttpError(400, "invalid seed")
         if "think" in value and not isinstance(value["think"], bool):
             raise HttpError(400, "invalid think")
-        if "keep_alive" in value and (not isinstance(value["keep_alive"], str)
-                                      or not KEEP_ALIVE.fullmatch(value["keep_alive"])):
+        if "keep_alive" in value and not valid_keep_alive(value["keep_alive"]):
             raise HttpError(400, "invalid keep_alive")
         return dict(value)
 
@@ -4747,6 +4844,7 @@ def ollama_worker(request_path):
         "model": request_data.get("model"),
         "messages": messages,
         "stream": False,
+        "keep_alive": request_data.get("keep_alive", "30m"),
     }).encode("utf-8")
     request = urllib.request.Request(
         request_data.get("url", "").rstrip("/") + "/api/chat", data=payload,

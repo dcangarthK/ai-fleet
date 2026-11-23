@@ -45,6 +45,16 @@ print(json.dumps({{"type": "result", "subtype": "error_max_turns", "session_id":
 sys.exit(1)
 '''
 
+MAX_TURNS_WIP = r'''#!{python}
+import json, sys
+sys.stdin.read()
+open("agent-change.txt", "w").write("partial work\n")
+print(json.dumps({{"type": "assistant", "message": {{"id": "a", "content": [{{"type": "text", "text": "partly done; next run should continue"}}]}}}}))
+print(json.dumps({{"type": "result", "subtype": "error_max_turns", "session_id": "s1", "num_turns": 3,
+                   "permission_denials": []}}))
+sys.exit(1)
+'''
+
 
 class CapsHelpers:
     """Fake-claude helpers shared by Caps and Continuation (a mixin, so tests are not collected twice)."""
@@ -136,6 +146,29 @@ class Caps(CapsHelpers, Base):
         (folder / "events.jsonl").write_text(json.dumps({"type": "rate_limit_event", "rate_limit_info": {
             "status": "allowed", "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": 1}}}}) + "\n")
         self.assertEqual(self.m.claude_usage(), {})
+
+
+class WipCheckpoint(CapsHelpers, Base):
+    def test_capped_worktree_commits_progress_and_agent_tail(self):
+        self.fake(MAX_TURNS_WIP)
+        repo = self.code / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "initial.txt").write_text("initial\n")
+        subprocess.run(["git", "add", "initial.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+        job = self.start(self.body(id="cap-wip", repo=str(repo), worktree=True))
+        self.wait(job)
+        cwd = Path(job["cwd"])
+        self.assertEqual("capped", job["state"])
+        self.assertEqual("WIP checkpoint: capped (max_turns)", subprocess.run(
+            ["git", "log", "-1", "--format=%s"], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip())
+        self.assertEqual("partial work\n", (cwd / "agent-change.txt").read_text())
+        progress = (cwd / "PROGRESS.md").read_text()
+        self.assertIn("agent-change.txt", progress)
+        self.assertIn("partly done; next run should continue", progress)
 
 
 class Watch(Base):

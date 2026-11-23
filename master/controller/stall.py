@@ -18,6 +18,7 @@ import time
 from fastapi import HTTPException
 
 import handoff
+import merge_close
 import tasks
 from events import emit
 from store import db
@@ -281,3 +282,7 @@ async def sweep(now: float | None = None) -> None:
                                          now=now)
         except Exception as exc:
             print(f"stall reroute of {task_id} failed: {exc!r}")
+    try:  # plan 2.4: review tasks whose branch is merged into main close themselves
+        await merge_close.sweep()
+    except Exception as exc:
+        print(f"merge close pass failed: {exc!r}")

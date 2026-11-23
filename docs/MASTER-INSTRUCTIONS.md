@@ -19,7 +19,7 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
 - **Auto-compact at 200,000 tokens.** Every profile's settings.json sets `autoCompactWindow: 200000` and
   `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` (the documented minimum is 100,000).
 - **One chat per batch.** State lives in fleet.db and the stored plan, not in chat. Open with `get_plan()`, close
-  with `put_plan(...)`, start the next batch fresh. Every turn re-reads the whole conversation: on 2026-11-16 one
+  with `put_plan(...)`, and use a fresh session per batch. Every turn re-reads the whole conversation: on 2026-11-16 one
   orchestrator session took 107 M of 186 M cache-read tokens, 57% (`docs/TOKEN-AUDIT-2026-11-16.md` 1.2).
   `wait_tasks` is event-based; it and `task_status` return a trimmed view, `full=True` for everything.
   Pipeline steps: `fleet-batch` skill (`.claude/skills/fleet-batch/SKILL.md`, if present in your checkout).

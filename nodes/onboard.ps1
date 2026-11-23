@@ -2456,6 +2456,7 @@ class JobManager:
         return (started_epoch(job) or time.time()) + minutes * 60
 
     def refresh(self, job):
+        checkpoint = None
         with self.lock:
             if job.get("state") != "running" or job.get("capping"):
                 return  # a capped job is being stopped and resumed by its monitor (_cap_stop)
@@ -2482,20 +2483,37 @@ class JobManager:
             job["ended_at"] = now()
             if job.pop("max_turns_hit", False):
                 # The CLI's own --max-turns ended the run: a cap, not a failure (spec Part H 3.2).
-                self._mark_capped(job, {"reason": "max_turns", "limit": job.get("max_turns"),
-                                        "turns": job.get("num_turns"), "stop": "cli"})
+                checkpoint = ("capped", {"reason": "max_turns", "limit": job.get("max_turns"),
+                                           "turns": job.get("num_turns"), "stop": "cli"})
+                job["capping"] = True
             else:
                 if self._usage_limit_hit(job):
-                    self._wip_checkpoint(job, "usage limit")
-                job["state"] = "exited"
+                    checkpoint = ("usage", None)
+                    job["capping"] = True
+                else:
+                    job["state"] = "exited"
             self._save(job)
-            if job["state"] == "capped":
+            if checkpoint is not None:
+                pass
+            elif job["state"] == "capped":
                 return
-            if exit_code == 0 and job.get("gate"):
+            elif exit_code == 0 and job.get("gate"):
                 self._start_gate(job)
             elif job.get("gate"):
                 job["gate"]["state"] = "skipped"
                 self._save(job)
+        if checkpoint is None:
+            return
+        kind, cap = checkpoint
+        summary = self._last_assistant_text(job, prefer_verdict=cap and cap.get("reason") == "loop")
+        self._wip_checkpoint(job, "capped (%s)" % cap.get("reason", "unknown") if cap else "usage limit", summary)
+        with self.lock:
+            job.pop("capping", None)
+            if cap:
+                self._mark_capped(job, cap, summary)
+            else:
+                job["state"] = "exited"
+            self._save(job)
 
     @staticmethod
     def _hit_max_turns(lines):
@@ -2511,13 +2529,12 @@ class JobManager:
                 return True
         return False
 
-    def _mark_capped(self, job, cap):
+    def _mark_capped(self, job, cap, summary=None):
         """Settle a job as `capped` (Part H 3.2): not a failure. The handoff summary (the model's last text) is saved
         to handoff.md in the job dir and becomes the job result. The worktree is left as it is, so uncommitted work
         stays for the next session."""
         loop = cap.get("reason") == "loop"
-        summary = self._last_assistant_text(job, prefer_verdict=loop)
-        self._wip_checkpoint(job, "capped (%s)" % cap.get("reason", "unknown"), summary)
+        summary = summary if summary is not None else self._last_assistant_text(job, prefer_verdict=loop)
         if summary:
             words = summary.split()
             if len(words) > 300 and not loop:  # a loop cut keeps the full text (it may hold a review verdict)
@@ -2547,6 +2564,7 @@ class JobManager:
         behaviour as the explicit checkpoint endpoint, and never pushes.
         """
         try:
+            self._settle_group(job)  # may wait; callers invoke this outside self.lock
             message_tail = (summary or self._last_assistant_text(job) or job.get("result") or "").strip()[-2000:]
             result = self._checkpoint_worktree(job, "WIP checkpoint: " + str(reason), message_tail,
                                                 allow_running=True)
@@ -2751,9 +2769,13 @@ class JobManager:
         with self.lock:
             self._parse_events_safe(job)
             job.pop("max_turns_hit", None)
-            job.pop("capping", None)
             job["exit_code"] = None
-            self._mark_capped(job, {**cap, "stop": stop})
+            summary = self._last_assistant_text(job, prefer_verdict=cap.get("reason") == "loop")
+        settled_cap = {**cap, "stop": stop}
+        self._wip_checkpoint(job, "capped (%s)" % settled_cap.get("reason", "unknown"), summary)
+        with self.lock:
+            job.pop("capping", None)
+            self._mark_capped(job, settled_cap, summary)
             self._save(job)
 
     def _stop_run(self, job):
@@ -2887,7 +2909,12 @@ class JobManager:
     def _settle_group(self, job):
         """Wait for a stopped job's group to exit. Call without self.lock: it sleeps up to 1.5 s."""
         if job.get("state") != "running" and job.get("group_gone") is not True and self._group_ok(job):
-            self._wait_group_gone(job.get("pid"), 1.5)
+            job["group_gone"] = self._wait_group_gone(job.get("pid"), 1.5)
+        elif (job.get("state") != "running" and job.get("group_gone") is None
+              and job.get("pgid") == job.get("pid") and not group_alive(job.get("pid"))):
+            # The recorded leader has gone and its process group is absent, so a later
+            # resume need not fail closed merely because proc_start can no longer inspect it.
+            job["group_gone"] = True
 
     def _refuse_if_group_alive(self, job):
         if self._old_group_alive(job, wait=0):
@@ -3640,7 +3667,6 @@ class JobManager:
         cwd = job.get("cwd")
         if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
             raise HttpError(409, "job has no worktree")
-        self._settle_group(job)
         if self._group_ok(job) and group_alive(job.get("pid")):
             raise HttpError(409, "the job's process group is still alive")
         branch = "fleet/" + job["id"]

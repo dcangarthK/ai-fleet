@@ -271,7 +271,8 @@ GATE_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 GATE_ARG = re.compile(r"^[A-Za-z0-9_./:=@+,-]{1,200}$")
 MODEL_REF = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$")
 DERIVED_MODEL = re.compile(r"^fleet-[a-z0-9][a-z0-9.-]{0,60}$")
-KEEP_ALIVE = re.compile(r"^[0-9]+(?:ms|s|m|h)$")
+KEEP_ALIVE = re.compile(r"^(?:[0-9]+(?:ms|s|m|h))+$")
+KEEP_ALIVE_DIGITS = 9
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\(.{0,200}\))?$")
 FINAL_OPERATION_STATES = {"ready", "removed", "failed", "blocked", "cancelled"}
 JOB_REQUEST_KEYS = {
@@ -289,7 +290,8 @@ PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 PROFILE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HANDOFF_BRANCH = re.compile(r"^fleet/t-[0-9a-f]{8}$")
 # Never committed by a checkpoint (matched against each path's file name).
-CHECKPOINT_SECRET_GLOBS = (".env*", "*.pem", "*.key", "id_*", "*credentials*")
+CHECKPOINT_SECRET_GLOBS = (".env*", "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", ".npmrc", ".netrc",
+                           "id_*", "*credentials*", "*secret*")
 EFFORTS = ("low", "medium", "high")
 BUILTIN_DENIED = (
     ".ssh", ".aws", ".gnupg", ".config/gcloud", ".kube", ".docker", "Library/Keychains",
@@ -612,10 +614,25 @@ def atomic_json(path, value, mode=None):
 
 def read_json(path, default=None):
     try:
-        with open(path, encoding="utf-8") as handle:
+        # Node owners commonly edit runner.json with Windows tools, which may add a BOM.
+        with open(path, encoding="utf-8-sig") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
+    except OSError:
         return default
+    except (ValueError, UnicodeError) as exc:
+        # A bad state/config file must be visible in the service log; silently choosing a
+        # default can otherwise widen a node's effective policy without an operator noticing.
+        print("could not parse JSON %s: %s" % (path, exc), file=sys.stderr)
+        return default
+
+
+def valid_keep_alive(value):
+    """Ollama duration syntax, or a bounded JSON integer number of seconds."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value >= -1 and len(str(abs(value))) <= KEEP_ALIVE_DIGITS
+    if not isinstance(value, str) or value == "-1" or not KEEP_ALIVE.fullmatch(value):
+        return value == "-1"
+    return all(len(digits) <= KEEP_ALIVE_DIGITS for digits in re.findall(r"[0-9]+", value))
 
 
 ERROR_LINE = re.compile(r"^\s*error\b\s*[:\-]", re.IGNORECASE)
@@ -1490,6 +1507,30 @@ class JobManager:
         disk = models.get("disk_reserve_gb", 8)
         ram = models.get("ram_reserve_gb", 4)
         loaded = models.get("max_loaded", 1)
+        residency = models.get("keep_alive", {})
+        if not isinstance(residency, dict):
+            residency = {}
+
+        def keep_alive_map(name, value):
+            if not isinstance(value, dict):
+                if value is not None:
+                    print("runner.json models.keep_alive.%s ignored: expected an object" % name, file=sys.stderr)
+                return {}
+            out = {}
+            for key, duration in value.items():
+                if isinstance(key, str) and valid_keep_alive(duration):
+                    out[key] = duration
+                else:
+                    print("runner.json models.keep_alive.%s[%r] ignored: invalid keep_alive %r" %
+                          (name, key, duration), file=sys.stderr)
+            return out
+
+        default_keep_alive = residency.get("default", "30m")
+        if not valid_keep_alive(default_keep_alive):
+            print("runner.json models.keep_alive.default ignored: invalid keep_alive %r" % default_keep_alive,
+                  file=sys.stderr)
+            default_keep_alive = "30m"
+
         self.models_config = {
             "remote_management": remote if isinstance(remote, bool) else False,
             "disk_reserve_gb": (float(disk) if isinstance(disk, (int, float)) and not isinstance(disk, bool)
@@ -1497,6 +1538,14 @@ class JobManager:
             "ram_reserve_gb": (float(ram) if isinstance(ram, (int, float)) and not isinstance(ram, bool)
                                and math.isfinite(ram) and ram >= 0 else 4),
             "max_loaded": loaded if isinstance(loaded, int) and not isinstance(loaded, bool) and loaded > 0 else 1,
+            # Ollama controls actual concurrency. max_loaded_models is deliberately
+            # informational only; it documents the intended node capacity.
+            "max_loaded_models": models.get("max_loaded_models"),
+            "keep_alive": {
+                "default": default_keep_alive,
+                "roles": keep_alive_map("roles", residency.get("roles")),
+                "models": keep_alive_map("models", residency.get("models")),
+            },
         }
         engines = config.get("engines") if isinstance(config.get("engines"), dict) else {}
         dmr = engines.get("dmr") if isinstance(engines.get("dmr"), dict) else {}
@@ -1557,6 +1606,15 @@ class JobManager:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
+
+    def keep_alive_for(self, job):
+        """The node-local residency value for an Ollama job; a model override wins."""
+        residency = self.models_config["keep_alive"]
+        model = job.get("model")
+        role = job.get("kind")
+        return (residency["models"].get(model)
+                or residency["roles"].get(role)
+                or residency["default"])
 
     def check_path(self, value, policy=None):
         expanded = os.path.expanduser(value) if isinstance(value, str) else ""
@@ -2398,6 +2456,7 @@ class JobManager:
         return (started_epoch(job) or time.time()) + minutes * 60
 
     def refresh(self, job):
+        checkpoint = None
         with self.lock:
             if job.get("state") != "running" or job.get("capping"):
                 return  # a capped job is being stopped and resumed by its monitor (_cap_stop)
@@ -2424,18 +2483,37 @@ class JobManager:
             job["ended_at"] = now()
             if job.pop("max_turns_hit", False):
                 # The CLI's own --max-turns ended the run: a cap, not a failure (spec Part H 3.2).
-                self._mark_capped(job, {"reason": "max_turns", "limit": job.get("max_turns"),
-                                        "turns": job.get("num_turns"), "stop": "cli"})
+                checkpoint = ("capped", {"reason": "max_turns", "limit": job.get("max_turns"),
+                                           "turns": job.get("num_turns"), "stop": "cli"})
+                job["capping"] = True
             else:
-                job["state"] = "exited"
+                if self._usage_limit_hit(job):
+                    checkpoint = ("usage", None)
+                    job["capping"] = True
+                else:
+                    job["state"] = "exited"
             self._save(job)
-            if job["state"] == "capped":
+            if checkpoint is not None:
+                pass
+            elif job["state"] == "capped":
                 return
-            if exit_code == 0 and job.get("gate"):
+            elif exit_code == 0 and job.get("gate"):
                 self._start_gate(job)
             elif job.get("gate"):
                 job["gate"]["state"] = "skipped"
                 self._save(job)
+        if checkpoint is None:
+            return
+        kind, cap = checkpoint
+        summary = self._last_assistant_text(job, prefer_verdict=cap and cap.get("reason") == "loop")
+        self._wip_checkpoint(job, "capped (%s)" % cap.get("reason", "unknown") if cap else "usage limit", summary)
+        with self.lock:
+            job.pop("capping", None)
+            if cap:
+                self._mark_capped(job, cap, summary)
+            else:
+                job["state"] = "exited"
+            self._save(job)
 
     @staticmethod
     def _hit_max_turns(lines):
@@ -2451,12 +2529,12 @@ class JobManager:
                 return True
         return False
 
-    def _mark_capped(self, job, cap):
+    def _mark_capped(self, job, cap, summary=None):
         """Settle a job as `capped` (Part H 3.2): not a failure. The handoff summary (the model's last text) is saved
         to handoff.md in the job dir and becomes the job result. The worktree is left as it is, so uncommitted work
         stays for the next session."""
         loop = cap.get("reason") == "loop"
-        summary = self._last_assistant_text(job, prefer_verdict=loop)
+        summary = summary if summary is not None else self._last_assistant_text(job, prefer_verdict=loop)
         if summary:
             words = summary.split()
             if len(words) > 300 and not loop:  # a loop cut keeps the full text (it may hold a review verdict)
@@ -2469,6 +2547,34 @@ class JobManager:
                     "result": trim(summary or job.get("result") or "capped before any summary was written")})
         if job.get("gate"):
             job["gate"]["state"] = "skipped"
+
+    @staticmethod
+    def _usage_limit_hit(job):
+        """Whether this failed run ended because its provider quota was exhausted."""
+        if job.get("exit_code") == 0:
+            return False
+        if re.search(r"\b(?:usage|rate)[ _-]*limit\b", str(job.get("error") or ""), re.IGNORECASE):
+            return True
+        return bool((job.get("rate_limit") or {}).get("rejected_until"))
+
+    def _wip_checkpoint(self, job, reason, summary=""):
+        """Commit a capped/limited worktree and durable handoff note before it settles.
+
+        This is intentionally local-only: it uses the same disabled hooks and signing
+        behaviour as the explicit checkpoint endpoint, and never pushes.
+        """
+        try:
+            self._settle_group(job)  # may wait; callers invoke this outside self.lock
+            message_tail = (summary or self._last_assistant_text(job) or job.get("result") or "").strip()[-2000:]
+            result = self._checkpoint_worktree(job, "WIP checkpoint: " + str(reason), message_tail,
+                                                allow_running=True)
+            if result["committed"]:
+                self.audit("wip_checkpoint", "job %s checkpointed: %s (%d paths left out)" %
+                           (job["id"], reason, len(result["excluded"])))
+        except HttpError as exc:
+            self.audit("wip_checkpoint_failed", "%s: %s" % (job.get("id"), error_line(exc.detail)))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            self.audit("wip_checkpoint_failed", "%s: %s" % (job.get("id"), error_line(exc)))
 
     def _last_assistant_text(self, job, prefer_verdict=False):
         """The text of the last assistant message with text in this run's stream; "" when there is none. With
@@ -2663,9 +2769,13 @@ class JobManager:
         with self.lock:
             self._parse_events_safe(job)
             job.pop("max_turns_hit", None)
-            job.pop("capping", None)
             job["exit_code"] = None
-            self._mark_capped(job, {**cap, "stop": stop})
+            summary = self._last_assistant_text(job, prefer_verdict=cap.get("reason") == "loop")
+        settled_cap = {**cap, "stop": stop}
+        self._wip_checkpoint(job, "capped (%s)" % settled_cap.get("reason", "unknown"), summary)
+        with self.lock:
+            job.pop("capping", None)
+            self._mark_capped(job, settled_cap, summary)
             self._save(job)
 
     def _stop_run(self, job):
@@ -2799,7 +2909,12 @@ class JobManager:
     def _settle_group(self, job):
         """Wait for a stopped job's group to exit. Call without self.lock: it sleeps up to 1.5 s."""
         if job.get("state") != "running" and job.get("group_gone") is not True and self._group_ok(job):
-            self._wait_group_gone(job.get("pid"), 1.5)
+            job["group_gone"] = self._wait_group_gone(job.get("pid"), 1.5)
+        elif (job.get("state") != "running" and job.get("group_gone") is None
+              and job.get("pgid") == job.get("pid") and not group_alive(job.get("pid"))):
+            # The recorded leader has gone and its process group is absent, so a later
+            # resume need not fail closed merely because proc_start can no longer inspect it.
+            job["group_gone"] = True
 
     def _refuse_if_group_alive(self, job):
         if self._old_group_alive(job, wait=0):
@@ -3389,7 +3504,8 @@ class JobManager:
             }, 0o600)
             return [sys.executable, str(Path(__file__).resolve()), "--openai-worker", str(request_path)]
         atomic_json(request_path, {"url": self.ollama_url, "model": job["model"], "prompt": prompt,
-                                   "instructions": job.get("instructions") or ""}, 0o600)
+                                   "instructions": job.get("instructions") or "",
+                                   "keep_alive": self.keep_alive_for(job)}, 0o600)
         return [sys.executable, str(Path(__file__).resolve()), "--ollama-worker", str(request_path)]
 
     def _launch(self, job, prompt, allowed_tools, resume):
@@ -3540,9 +3656,77 @@ class JobManager:
 
     @staticmethod
     def _secret_path(relative, denied):
-        name = relative.rsplit("/", 1)[-1]
-        return (any(fnmatch.fnmatch(name, pattern) for pattern in CHECKPOINT_SECRET_GLOBS)
-                or any(fnmatch.fnmatch(relative, pattern) for pattern in denied))
+        name, folded = relative.rsplit("/", 1)[-1].casefold(), relative.casefold()
+        return (any(fnmatch.fnmatch(name, pattern.casefold()) for pattern in CHECKPOINT_SECRET_GLOBS)
+                or any(fnmatch.fnmatch(folded, pattern.casefold()) for pattern in denied))
+
+    def _checkpoint_guard(self, job, allow_running=False):
+        """Return a verified worktree/branch, refusing unsafe checkpoint targets."""
+        if not allow_running and job.get("state") == "running":
+            raise HttpError(409, "job is running")
+        cwd = job.get("cwd")
+        if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
+            raise HttpError(409, "job has no worktree")
+        if self._group_ok(job) and group_alive(job.get("pid")):
+            raise HttpError(409, "the job's process group is still alive")
+        branch = "fleet/" + job["id"]
+
+        def git(*args, check=True):
+            out = subprocess.run(["git", "-C", cwd, "-c", "core.hooksPath=/dev/null",
+                                  "-c", "core.fsmonitor=false", *args], capture_output=True, text=True,
+                                 errors="replace", timeout=120)
+            if check and out.returncode:
+                raise HttpError(500, trim(out.stderr or "git %s failed" % args[0], 500))
+            return out
+
+        head = git("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
+        if head != "refs/heads/" + branch or job.get("branch") != branch:
+            raise HttpError(409, "worktree is not on its own branch %s" % branch)
+        git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
+        for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
+            if (git_dir / name).exists():
+                raise HttpError(409, "worktree is mid-merge, mid-rebase or locked")
+        return cwd, branch, git
+
+    def _checkpoint_worktree(self, job, message, tail=None, allow_running=False):
+        """Stage safe WIP, optionally add an untracked progress note, and commit it."""
+        cwd, branch, git = self._checkpoint_guard(job, allow_running)
+        git("add", "-A")
+        # Keep porcelain machine-readable: paths can contain whitespace and newlines.
+        status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        status_paths = [entry[3:] for entry in status.stdout.split("\0") if len(entry) >= 4]
+        staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+        denied = []
+        for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
+            full = os.path.realpath(os.path.expanduser(path))
+            if self._within(full, cwd):
+                denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
+        excluded = sorted(path for path in staged if self._secret_path(path, denied))
+        if excluded:
+            git("--literal-pathspecs", "reset", "-q", "--", *excluded)
+        staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+        if not staged or not status_paths:
+            return {"sha": git("rev-parse", "HEAD").stdout.strip(), "committed": False,
+                    "excluded": excluded, "branch": branch, "stat": ""}
+        progress = Path(cwd) / "FLEET-PROGRESS.md"
+        tracked = git("ls-files", "--error-unmatch", "--", "FLEET-PROGRESS.md", check=False).returncode == 0
+        if tail is not None and not tracked and not progress.exists():
+            lines = ["# Fleet progress", "", "## Changed files", ""]
+            lines.extend("- " + path for path in staged)
+            lines.extend(["", "## Agent message tail", "", error_line(tail, 2000) if tail else "No assistant message was recorded.", ""])
+            progress.write_text("\n".join(lines), encoding="utf-8")
+            git("add", "--", "FLEET-PROGRESS.md")
+        committed = subprocess.run(
+            ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+             "-c", "commit.gpgsign=false", "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
+             "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", message],
+            capture_output=True, text=True, errors="replace", timeout=120)
+        if committed.returncode:
+            git("reset", "-q", check=False)
+            raise HttpError(500, trim(committed.stderr or "checkpoint commit failed", 500))
+        sha = git("rev-parse", "HEAD").stdout.strip()
+        stat = git("show", "--stat", "--format=", sha).stdout
+        return {"sha": sha, "committed": True, "excluded": excluded, "branch": branch, "stat": trim(stat, 4000)}
 
     def checkpoint(self, job, body=None):
         """Commit a stopped job's uncommitted work on its own branch, for a handoff (docs/SPEC-limit-handoff.md
@@ -3553,54 +3737,11 @@ class JobManager:
         self._settle_group(job)
         with self.lock:
             self.refresh(job)
-            if job["state"] == "running":
-                raise HttpError(409, "job is running")
-            self._refuse_if_group_alive(job)
-            cwd = job.get("cwd")
-            if not job.get("worktree") or not cwd or not Path(cwd).is_dir():
-                raise HttpError(409, "job has no worktree")
-            branch = "fleet/" + job["id"]
-
-            def git(*args, check=True):
-                out = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, errors="replace",
-                                     timeout=120)
-                if check and out.returncode:
-                    raise HttpError(500, trim(out.stderr or "git %s failed" % args[0], 500))
-                return out
-
-            head = git("symbolic-ref", "-q", "HEAD", check=False).stdout.strip()
-            if head != "refs/heads/" + branch or job.get("branch") != branch:
-                raise HttpError(409, "worktree is not on its own branch %s" % branch)
-            git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
-            for name in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
-                if (git_dir / name).exists():
-                    raise HttpError(409, "worktree is mid-merge, mid-rebase or locked")
-            denied = []
-            for path in ((job.get("policy") or {}).get("filesystem") or {}).get("denied") or []:
-                full = os.path.realpath(os.path.expanduser(path))
-                if self._within(full, cwd):
-                    denied.append(os.path.relpath(full, os.path.realpath(cwd)).replace(os.sep, "/") + "*")
-            git("add", "-A")
-            staged = [p for p in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if p]
-            excluded = sorted(p for p in staged if self._secret_path(p, denied))
-            if excluded:
-                git("reset", "-q", "--", *excluded)
-            if not git("diff", "--cached", "--name-only").stdout.strip():
-                tip = git("rev-parse", "HEAD").stdout.strip()
-                return {"sha": tip, "committed": False, "excluded": excluded, "branch": branch, "stat": ""}
-            committed = subprocess.run(
-                ["git", "-C", cwd, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
-                 "-c", "user.name=AI Fleet", "-c", "user.email=fleet@localhost",
-                 "commit", "-q", "--no-verify", "--no-gpg-sign", "-m",
-                 "checkpoint: stopped at usage limit (%s)" % label],
-                capture_output=True, text=True, errors="replace", timeout=120)
-            if committed.returncode:
-                git("reset", "-q", check=False)
-                raise HttpError(500, trim(committed.stderr or "checkpoint commit failed", 500))
-            sha = git("rev-parse", "HEAD").stdout.strip()
-            stat = git("show", "--stat", "--format=", sha).stdout
-            self.audit("checkpoint", "job %s checkpointed (%d paths left out)" % (job["id"], len(excluded)))
-            return {"sha": sha, "committed": True, "excluded": excluded, "branch": branch, "stat": trim(stat, 4000)}
+            out = self._checkpoint_worktree(job, "checkpoint: stopped at usage limit (%s)" % label)
+            if out["committed"]:
+                self.audit("checkpoint", "job %s checkpointed (%d paths left out)" %
+                           (job["id"], len(out["excluded"])))
+            return out
 
     def log(self, job, offset):
         self.refresh(job)
@@ -3865,8 +4006,7 @@ class ModelManager:
             raise HttpError(400, "invalid seed")
         if "think" in value and not isinstance(value["think"], bool):
             raise HttpError(400, "invalid think")
-        if "keep_alive" in value and (not isinstance(value["keep_alive"], str)
-                                      or not KEEP_ALIVE.fullmatch(value["keep_alive"])):
+        if "keep_alive" in value and not valid_keep_alive(value["keep_alive"]):
             raise HttpError(400, "invalid keep_alive")
         return dict(value)
 
@@ -4747,6 +4887,7 @@ def ollama_worker(request_path):
         "model": request_data.get("model"),
         "messages": messages,
         "stream": False,
+        "keep_alive": request_data.get("keep_alive", "30m"),
     }).encode("utf-8")
     request = urllib.request.Request(
         request_data.get("url", "").rstrip("/") + "/api/chat", data=payload,

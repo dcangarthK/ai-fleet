@@ -2,7 +2,9 @@
 Run: python3 -m unittest -v tests/test_runner_models.py
 """
 import json
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,9 +15,11 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_runner as base  # noqa: E402
+from tests.test_runner_budget import runner  # noqa: E402
 
 GB = 1_000_000_000
 
@@ -124,6 +128,107 @@ def serve(handler):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+class RunnerConfig(unittest.TestCase):
+    def test_ollama_worker_request_uses_model_then_role_keep_alive(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            (fleet / "runner.json").write_text(json.dumps({
+                "models": {"keep_alive": {"default": "30m", "roles": {"review": "2h"},
+                                           "models": {"tiny:1b": "-1"}}}}))
+            saved = runner.find_agents
+            runner.find_agents = lambda _url: {"claude": None, "codex": None, "ollama": "ollama"}
+            try:
+                manager = runner.JobManager(fleet, "http://127.0.0.1:1")
+            finally:
+                runner.find_agents = saved
+            job = {"id": "local1", "agent": "ollama", "mode": "read-only", "runs": 1, "model": "tiny:1b",
+                   "kind": "review", "engine": "ollama", "instructions": ""}
+            (fleet / "jobs" / job["id"]).mkdir(parents=True)
+            manager._command(job, "hello", [], False)
+            path = fleet / "jobs" / job["id"] / "ollama-request.1.json"
+            request = json.loads(path.read_text())
+            self.assertEqual("-1", request["keep_alive"])
+            with mock.patch.object(runner.urllib.request, "urlopen") as open_url:
+                response = mock.MagicMock()
+                response.__enter__.return_value = io.BytesIO(b'{"message": {"content": "ok"}}')
+                open_url.return_value = response
+                self.assertEqual(0, runner.ollama_worker(path))
+            self.assertEqual("-1", json.loads(open_url.call_args.args[0].data)["keep_alive"])
+            job["model"] = "other:1b"
+            manager._command(job, "hello", [], False)
+            request = json.loads((fleet / "jobs" / job["id"] / "ollama-request.1.json").read_text())
+            self.assertEqual("2h", request["keep_alive"])
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
+
+    def test_runner_config_accepts_utf8_bom(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            path = fleet / "bom.json"
+            path.write_bytes(b"\xef\xbb\xbf{\"ok\": true}")
+            self.assertEqual({"ok": True}, runner.read_json(path))
+            self.assertEqual({"keep_alive": "-1"}, runner.ModelManager._params({"keep_alive": "-1"}))
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
+
+    def test_keep_alive_accepts_bounded_ints_and_compound_durations(self):
+        for value in (-1, 0, 30, "1h30m", "250ms1s"):
+            self.assertTrue(runner.valid_keep_alive(value), value)
+        for value in (True, -2, "1234567890s", "1minute", "-2"):
+            self.assertFalse(runner.valid_keep_alive(value), value)
+
+    def test_usage_limit_ignores_result_text_and_uses_error_or_event(self):
+        self.assertFalse(runner.JobManager._usage_limit_hit({"exit_code": 1, "result": "usage limit reached"}))
+        self.assertTrue(runner.JobManager._usage_limit_hit({"exit_code": 1, "error": "usage limit reached"}))
+        self.assertTrue(runner.JobManager._usage_limit_hit({"exit_code": 1,
+                                                            "rate_limit": {"rejected_until": 1}}))
+
+    def test_checkpoint_secret_globs_are_case_insensitive_and_extended(self):
+        for path in ("CERT.P12", "keys/CLIENT.PFX", "app.KEYSTORE", ".NPMRC", ".NETRC", "mySecret.txt"):
+            self.assertTrue(runner.JobManager._secret_path(path, []), path)
+
+    def test_wip_checkpoint_is_guarded_redacted_and_skips_secret_only_work(self):
+        fleet = Path(tempfile.mkdtemp())
+        try:
+            (fleet / "runner.json").write_text("{}")
+            saved = runner.find_agents
+            runner.find_agents = lambda _url: {"claude": None, "codex": None, "ollama": "ollama"}
+            try:
+                manager = runner.JobManager(fleet, "http://127.0.0.1:1")
+            finally:
+                runner.find_agents = saved
+            repo = fleet / "repo"
+            repo.mkdir()
+            for args in (("init", "-q", "-b", "main"), ("config", "user.email", "test@example.test"),
+                         ("config", "user.name", "Test")):
+                subprocess.run(["git", *args], cwd=repo, check=True)
+            (repo / "base.txt").write_text("base\n")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+            subprocess.run(["git", "checkout", "-qb", "fleet/wip1"], cwd=repo, check=True)
+            job = {"id": "wip1", "cwd": str(repo), "worktree": True, "branch": "fleet/wip1",
+                   "state": "exited", "pid": None, "group_gone": True, "policy": {}}
+            (repo / "work.txt").write_text("partial\n")
+            (repo / "CLIENT.P12").write_text("secret\n")
+            out = manager._checkpoint_worktree(job, "WIP checkpoint: capped", "bearer abc123")
+            self.assertTrue(out["committed"])
+            self.assertEqual(["CLIENT.P12"], out["excluded"])
+            progress = (repo / "FLEET-PROGRESS.md").read_text()
+            self.assertIn("work.txt", progress)
+            self.assertNotIn("CLIENT.P12", progress)
+            self.assertIn("[redacted]", progress)
+            wrong = job | {"branch": "fleet/other"}
+            with self.assertRaises(runner.HttpError):
+                manager._checkpoint_worktree(wrong, "WIP checkpoint: capped", "tail")
+            tip = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                 capture_output=True, text=True).stdout.strip()
+            self.assertFalse(manager._checkpoint_worktree(job, "WIP checkpoint: capped", "tail")["committed"])
+            self.assertEqual(tip, subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                                  capture_output=True, text=True).stdout.strip())
+        finally:
+            shutil.rmtree(fleet, ignore_errors=True)
 
 
 @unittest.skipUnless(base.loopback_bind_available(), "needs loopback sockets")

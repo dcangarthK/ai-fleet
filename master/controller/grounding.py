@@ -38,6 +38,30 @@ def check_quotes(quotes: list[str], context: str) -> tuple[int, int]:
     return valid, len(quotes) - valid
 
 
+_LOG_QUOTE = re.compile(r"`([^`\n]+)`|\"([^\"\n]+)\"|“([^”\n]+)”|^[ \t]*>[ \t]?(.+)$",
+                        re.MULTILINE)
+
+
+def check_log_quotes(answer: str, log_text: str) -> dict:
+    """Verify quoted/cited lines in a log summary appear verbatim (whitespace-normalised) in the log.
+
+    Quotes are backtick spans, double-quoted spans and ``>`` blockquote lines. Returns
+    ``{"ok", "checked", "unverified"}``; an answer with no quotes is ok with nothing checked."""
+    if not isinstance(answer, str):
+        return {"ok": True, "checked": 0, "unverified": []}
+    quotes: list[str] = []
+    seen: set[str] = set()
+    for match in _LOG_QUOTE.finditer(answer):
+        text = next(g for g in match.groups() if g is not None)
+        key = _normalise(text)
+        if key and key not in seen:
+            seen.add(key)
+            quotes.append(text.strip())
+    log = log_text if isinstance(log_text, str) else ""
+    unverified = [q for q in quotes if check_quotes([q], log)[0] == 0]
+    return {"ok": not unverified, "checked": len(quotes), "unverified": unverified}
+
+
 def _json_string_end(text: str, start: int) -> int | None:
     """Return the index of a JSON string's closing quote."""
     escaped = False

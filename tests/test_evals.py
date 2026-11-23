@@ -680,6 +680,27 @@ class ReportAndThinkTests(unittest.TestCase):
         self.assertEqual(set(merged["roles"]), {"coder", "reviewer_real", "fast"})
         self.assertEqual(merged["roles"]["fast"]["score"], 9.0)
 
+    def test_all_transport_error_run_keeps_prior_rows(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "results.json").write_text(json.dumps(_mixed_results()))
+            before = Path(tmp, "results.json").read_bytes()
+            model = json.loads(before)[0]["model"]
+            with (mock.patch.object(E, "chat", side_effect=ConnectionRefusedError("down")),
+                  mock.patch.object(E, "loaded_size_gb", return_value=None),
+                  mock.patch.object(E, "unload"),
+                  mock.patch.object(sys, "argv", ["run_evals.py", "--models", model, "--roles", "fast",
+                                                  "--out", tmp]),
+                  mock.patch("sys.stderr") as err):
+                E.main()
+            self.assertEqual(json.loads(Path(tmp, "results.json").read_text()), json.loads(before))
+            self.assertIn("WARNING", "".join(c.args[0] for c in err.write.call_args_list))
+
+    def test_all_transport_errors_helper(self):
+        self.assertTrue(E.all_transport_errors({"attempted": 2, "errors": ["a", "b"]}))
+        self.assertFalse(E.all_transport_errors({"attempted": 2, "errors": ["a"]}))
+        self.assertFalse(E.all_transport_errors({"attempted": 0, "errors": []}))
+
     def test_report_only_makes_no_model_calls(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

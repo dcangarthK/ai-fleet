@@ -486,7 +486,7 @@ def signal_decisions(role: dict) -> dict[str, dict]:
 
 def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
     res = {"model": model, "roles": {}, "latencies": [], "tps": [], "size_gb": None, "errors": [],
-           "evaluated_at": time.time()}
+           "evaluated_at": time.time(), "attempted": 0}
     for role in roles:
         scores, details, valid, pairs = [], [], [], []
         for case in load(role):
@@ -543,6 +543,7 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
                         details.append(row)
                         valid.append(False)
                 scores.append(s)
+                res["attempted"] += 1
                 for call_out in call_outputs:
                     res["latencies"].append(call_out["seconds"])
                     if call_out["tokens_per_s"]:
@@ -577,6 +578,11 @@ def eval_model(base: str, model: str, roles: list[str], repeat: int) -> dict:
     res["tokens_per_s"] = round(statistics.median(res["tps"]), 1) if res["tps"] else None
     res["fits_16gb"] = res["size_gb"] is not None and res["size_gb"] + HEADROOM_GB <= LAPTOP_GB
     return res
+
+
+def all_transport_errors(res: dict) -> bool:
+    """True when every attempted case failed on a transport/connection error (OSError in eval_model)."""
+    return bool(res.get("attempted")) and len(res.get("errors") or []) >= res["attempted"]
 
 
 def merge_result(old: dict | None, new: dict) -> dict:
@@ -780,7 +786,12 @@ def main() -> int:
             ap.error(f"models not served by DMR: {', '.join(missing)}")
     for model in wanted:
         print(f"== {model}", flush=True)
-        previous[model] = merge_result(previous.get(model), eval_model(base_url, model, roles, args.repeat))
+        new = eval_model(base_url, model, roles, args.repeat)
+        if all_transport_errors(new):
+            print(f"WARNING: every case for {model} failed on a transport error; "
+                  "keeping its existing results, writing no row", file=sys.stderr, flush=True)
+            continue
+        previous[model] = merge_result(previous.get(model), new)
     results = list(previous.values())
     if not args.report_only:
         (out / "results.json").write_text(json.dumps(results, indent=2))

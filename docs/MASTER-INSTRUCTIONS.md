@@ -18,15 +18,12 @@ the ai-fleet repo (`docs/MASTER-INSTRUCTIONS.md`); re-copy it to all three after
   a bug - fix them, don't add a third.
 - **Auto-compact at 200,000 tokens.** Every profile's settings.json sets `autoCompactWindow: 200000` and
   `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` (the documented minimum is 100,000).
-- **Orchestrator hygiene.** State lives in fleet.db and the stored plan, not in chat. Use a fresh session per batch,
-  started from the handoff summary. `wait_tasks` is event-based (no polling loop). `wait_tasks` and `task_status`
-  return state, verdict, findings and gate summary only; pass `full=True` for the whole output.
-- **One chat per batch, bounded by the plan.** Open a session with `get_plan()`, close it with `put_plan(...)`, and
-  start the next batch fresh from what you stored. Do not carry one conversation across several batches: every turn
-  re-reads the whole conversation, so a long orchestrator chat is the most expensive thing in the fleet. On
-  2026-11-16 a single orchestrator session accounted for 107 M of the day's 186 M cache-read tokens, 57% of the
-  total (`docs/TOKEN-AUDIT-2026-11-16.md` 1.2). The pipeline itself is written out in the `fleet-batch` skill
-  (`.claude/skills/fleet-batch/SKILL.md` in ai-fleet); follow it rather than re-deriving it in prose.
+- **One chat per batch.** State lives in fleet.db and the stored plan, not in chat. Open with `get_plan()`, close
+  with `put_plan(...)`, start the next batch fresh. Every turn re-reads the whole conversation: on 2026-11-16 one
+  orchestrator session took 107 M of 186 M cache-read tokens, 57% (`docs/TOKEN-AUDIT-2026-11-16.md` 1.2).
+  `wait_tasks` is event-based; it and `task_status` return a trimmed view, `full=True` for everything.
+  Pipeline steps: `fleet-batch` skill (`.claude/skills/fleet-batch/SKILL.md`, if present in your checkout).
+- Current plan: `docs/research/HYBRID-FLEET-PLAN-2026-11-23.md`.
 
 ## Fleet rules that apply everywhere
 - Work in ai-fleet follows the repo's CLAUDE.md (pipeline, paid-model budget, Fable never builds/fixes/tests).

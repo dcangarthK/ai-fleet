@@ -11,7 +11,8 @@ Copy into a project's CLAUDE.md (or ~/.claude/CLAUDE.md for all projects).
 | Fleet `reviewer` | `local-llm.review_diff` | Independent diff review |
 | Fleet `fast` | `local-llm.ask_model(role="fast")` | Summaries, triage, commit messages |
 
-Which machine and model hold each role changes: call `local-llm.fleet_status` at the start of a task.
+Current plan: `docs/research/HYBRID-FLEET-PLAN-2026-11-23.md`.
+Which machine and model hold each role changes: call `local-llm.fleet_status` once at the start of a batch.
 Roles marked "not routed" are unavailable; if a role you need is down, use Codex instead.
 Small nodes hold one model at a time: batch work per role, don't ping-pong roles on the same node.
 Change role assignments or drain nodes only when the user asks. Node approval is the user's job (dashboard).
@@ -30,6 +31,8 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
   req 3 handoff summary instead of carrying a long conversation.
 - Review with `task_diff` and `task_log`; steer with `message_task` (same session, keeps context).
 - `blocked` / `awaiting_approval` = the user must act in the dashboard. Tell them; never try to approve.
+- `batch_report(ids)` (plan P2.3, once shipped; until then UNVERIFIED) returns per-task models, commit, gate,
+  verdict, spend and limit hits in one call, for the per-task record and the spend report.
 - After merging a branch: `complete_task`, then `cleanup_task`.
 - Default mode `auto-edit`. Ask for `supervised` on unfamiliar repos; `full` only when the user says so.
 - **All work through the fleet** (docs/SPEC-live-monitor.md 2.2): every build, fix, review, test, merge or benchmark
@@ -47,14 +50,13 @@ Use the `local-llm` MCP task tools instead of running other agents by hand:
 2. **Tests first.** Write failing tests from the spec.
 3. **Build.** One writer per git worktree. Give the implementer the spec + only the files it needs.
 4. **Gate.** Tests, lint and typecheck must pass. Failing gate goes back to the builder, max 3 rounds, then escalate to the user.
-5. **Cross-review.** Claude's own reviews run as fleet tasks on a Claude profile, or are self-reported
-   (`report_activity`) when they can't be. Reviewer must differ from the builder:
-   Codex built → Claude (Fable/Sonnet); Claude/local built → a different Claude model, or Codex for
-   security-sensitive work. One paid reviewer per round (see Paid-model budget).
-   Reviewers see the diff read-only and never edit.
+5. **Cross-review.** Reviews run as fleet tasks (self-reported via `report_activity` only when they can't).
+   The reviewer is never the builder's model: Codex built → Claude (Fable/Sonnet); Claude/local built → a
+   different Claude model, or Codex for security-sensitive work. One paid reviewer per round (see Paid-model
+   budget). Reviewers see the diff read-only and never edit.
 6. **Resolve.** Fix high/medium issues, re-run the gate. Disagreements: tests decide; otherwise Claude decides and notes why.
-7. **Final.** Claude reviews the whole diff (as a fleet task, or self-reported), then summarizes: what changed,
-   who built, who reviewed, waivers, open risks.
+7. **Final.** Whole-branch review goes to Codex by default, once per batch of merges (Paid-model budget, rule 1),
+   unless the owner names another model. Then summarize: what changed, who built, who reviewed, waivers, open risks.
 
 ## Paid-model budget (Codex, Claude Opus/Fable, Sonnet)
 Paid models share account limits with the owner's own use. Spend them where they change the outcome.
@@ -72,8 +74,8 @@ machines and alerts.
 |---|---|---|
 | Builds, fix rounds | Sonnet | Opus/Codex only for hard or security-critical builds |
 | Merges, benchmark runs, commits, mechanical edits | Sonnet (or Haiku) | never Codex |
-| Review of a round | one reviewer, different from the builder: Fable or Sonnet | Codex for security-sensitive or design changes |
-| Re-review after fixes | the same reviewer, delta only | — |
+| Review of a round | one reviewer, different from the builder: Fable or Sonnet (Opus when the owner names it) | Codex for security-sensitive or design changes |
+| Re-review after fixes | the same reviewer, delta only (the controller sends the delta for pipelines) | — |
 | Final whole-branch review | Codex, once per batch of merges | — |
 | Summaries, triage, commit messages, drafts | local `fast`/`coder` | Haiku |
 
@@ -87,10 +89,9 @@ machines and alerts.
    `used_percent` and `resets_at`), not from parsed error text.
 1. **Codex is the scarcest model.** Use it for final reviews, security-sensitive reviews and hard builds only.
    Never use it for merges, benchmarks, availability checks or routine re-reviews.
-   It is also the *default* for a final review, and that direction gets forgotten under load: on 2026-11-16 three
-   final reviews were sent to Claude accounts that were at 100% of their five-hour window, each capping out before
-   reaching a verdict, while Codex sat at 5% (`docs/TOKEN-AUDIT-2026-11-16.md` 2.3). Check `fleet_status()` before
-   routing a final review, and send it to Codex unless the owner names another model for that task.
+   It is also the *default* for a final review (2026-11-16: three final reviews sent to capped Claude accounts
+   produced no verdict, `docs/TOKEN-AUDIT-2026-11-16.md` 2.3; `final_review` now has its own cap). Check
+   `fleet_status()` before routing one.
 2. **One reviewer per round.** A second paid reviewer only for security-sensitive changes or the final review.
 3. **Send less.**
    - Never put generated files (`ui/dist`, minified bundles, lockfiles, eval result JSON) in a prompt.
@@ -104,9 +105,8 @@ machines and alerts.
    on the harness-eval set, with tokens logged per run.
 6. **Don't ask agents to re-run the gate.** The runner runs the gate after every build. Ask a builder for one gate
    run, not two; fix flaky tests instead of re-running them.
-7. **No paid availability checks.** When a task fails on a usage limit, wait for the reset time in the error
-   (`resets_at`) and route the work to another model in the meantime. Never retry a limited model before its reset.
-8. **Concurrency.** At most one Codex job and two Claude jobs at a time per account. Queue the rest.
+7. **No paid availability checks.** Never probe a limited model before its `resets_at`. (Limit waits, rerouting,
+   queueing at concurrency limits and stall handoffs are server-side; the orchestrator does not do them. Plan 1.4.)
 9. **Batch reviews.** Hold small fixes and review them together, instead of starting one paid review per small change.
 10. **Report spend.** Each summary says which paid models ran, how many tasks each, and any limit hits.
 
@@ -114,12 +114,14 @@ machines and alerts.
 Known traps that have cost gate rounds. Check each before you commit:
 - Changed `nodes/runner.py`? Run `python3 nodes/build.py` to re-embed it in `onboard.sh` / `onboard.ps1`,
   and commit both. `test_onboard` fails otherwise.
-- Merging a branch that touched `nodes/onboard.sh` / `onboard.ps1`? Those embed the runner. Take main's copy
-  (`git checkout main -- nodes/onboard.sh nodes/onboard.ps1`), then re-run `nodes/build.py`. Never keep an
-  old branch's copy: it silently drops newer onboarding changes.
+- Merging a branch that touched `nodes/onboard.sh` / `onboard.ps1`? Those embed the runner. If the branch only
+  changed the embedded runner, take main's copy (`git checkout main -- nodes/onboard.sh nodes/onboard.ps1`) and
+  re-run `nodes/build.py`. If it also edited those scripts outside the runner, merge by hand, then re-run
+  `nodes/build.py` (HANDOVER.md §6a, AUDIT-C §4, 2026-11-19).
 - Tests run one file per process (see each test file's docstring and `scripts/gate.sh`). Don't diagnose failures
   from a combined run.
-- Don't run the gate yourself. The runner runs `fleet-gate` once after you finish.
+- Don't run `fleet-gate` yourself; the runner runs it once after you finish. Run only the targeted test file
+  for what you changed before claiming it works.
 - Commit on your task branch before you stop. Uncommitted work is lost to review.
 - Stay inside the task's files. Ask via the task (blocked) instead of guessing at scope.
 - A tool refused once (permission, review read-only mode) stays refused. Don't retry it; report and finish.

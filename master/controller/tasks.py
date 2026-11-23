@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from events import changed, emit, events_after, events_newest, last_event_id, snapshot
 import budget
@@ -1370,6 +1370,13 @@ class TaskIn(BaseModel):
     @classmethod
     def prompt_not_blank(cls, v: str) -> str:
         return v or ""
+
+    @model_validator(mode="after")
+    def legacy_prompt_not_blank(self):
+        """Keep pre-brief request validation (422) unchanged for legacy callers."""
+        if self.brief is None and not self.prompt.strip():
+            raise ValueError("prompt is empty")
+        return self
 
 
 class MessageIn(BaseModel):

@@ -10,7 +10,7 @@ uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m un
   tests/test_budget.py tests/test_limit_handoff.py tests/test_live.py tests/test_mcp_live.py tests/test_stall.py tests/test_dashboard_limits.py \
   tests/test_limit_reroute.py tests/test_admission_limit.py \
   tests/test_usage_watcher.py tests/test_capacity.py tests/test_networking_n2.py tests/test_relay_routing.py tests/test_cleanup_safety.py
-uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_leader.py tests/test_orchestrator_hygiene.py
+uv run -q --with fastapi --with uvicorn --with httpx --with 'mcp<2' python -m unittest tests/test_leader.py tests/test_orchestrator_hygiene.py tests/test_briefs_reviewer.py
 python3 -m unittest tests/test_batch.py
 python3 -m unittest nodes/worker/test_quiet_bash_g2.py
 python3 -m unittest tests/test_pipeline_blocked.py

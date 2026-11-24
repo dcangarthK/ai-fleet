@@ -92,6 +92,26 @@ class BriefRouteTests(ControllerCase):
         self.assertEqual(listed[with_brief]["cost_source"], "result")
         self.assertIsNone(listed[plain]["brief"])
 
+    def test_cost_source_fallback_order(self):
+        tid = self.task(kind="draft")["id"]
+
+        def seen():
+            single = self.c.get(f"/api/tasks/{tid}", headers=W).json()["cost_source"]
+            listed = {t["id"]: t for t in self.c.get("/api/tasks", headers=W).json()}[tid]["cost_source"]
+            self.assertEqual(single, listed)  # the one-row query and the preloaded context agree
+            return single
+
+        self.assertIsNone(seen())  # nothing recorded
+        with db() as c:
+            c.execute("UPDATE tasks SET usage=? WHERE id=?", (json.dumps({"cost_source": "transcript"}), tid))
+        self.assertEqual(seen(), "transcript")  # the usage blob, no usage rows yet
+        with db() as c:
+            # Inserted out of order: the highest run wins, not the last row written.
+            for run, source in ((2, "reported"), (1, "estimated"), (3, "result")):
+                c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",
+                          (time.time(), tid, run, "claude", source))
+        self.assertEqual(seen(), "result")
+
     def test_legacy_prompt_path_still_works(self):
         task = self.task(kind="draft", prompt="legacy prompt")
         self.assertEqual(task["prompt"], "legacy prompt")

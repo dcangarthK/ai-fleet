@@ -175,6 +175,7 @@ def init_db() -> None:
                     c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         c.execute("CREATE INDEX IF NOT EXISTS tasks_parent ON tasks(parent_id)")
         c.execute("CREATE INDEX IF NOT EXISTS events_type_task ON events(type, task_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS agent_usage_task_run ON agent_usage(task_id, run)")
         _seed_models(c)
         _seed_notify_rules(c)
         c.execute("INSERT OR IGNORE INTO plan_state (id,revision) VALUES (1,0)")

@@ -1,7 +1,9 @@
 // Thin client for the controller API. Every call sends X-Fleet (the controller's CSRF check);
 // auth itself rides on the session cookie set by /login?token=…, exactly like the old dashboard.
 
-export type Mode = "read-only" | "supervised" | "auto-edit" | "full";
+import type { Brief } from "./decisions";
+
+export type Mode ="read-only" | "supervised" | "auto-edit" | "full";
 
 export type TaskState =
   | "queued" | "awaiting_approval" | "starting" | "working" | "blocked"
@@ -179,7 +181,7 @@ export interface Task {
   // Cost provenance and typed brief, when the controller returns them (the task row has `usage`; `brief` may be absent).
   usage?: { cost_source?: string | null; cost_usd?: number | null; model?: string | null } | null;
   cost_source?: string | null;
-  brief?: { goal?: string; files_allowed?: string[]; acceptance?: string[]; context_refs?: string[]; done_when?: string[]; gate?: string } | null;
+  brief?: Brief | null;
 }
 
 export interface UsageRow {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decisionKinds, extraEventText, filterDecisions, isShadowMismatch, shadowMismatchCount, brief, type Decision } from "./decisions";
+import { decisionKinds, extraEventText, filterDecisions, isShadowMismatch, shadowMismatchCount, shortValue, type Decision } from "./decisions";
 
 const d = (o: Partial<Decision>): Decision => ({ id: 1, task_id: "t", kind: "placement", inputs: null, candidates: null, rule: null, chosen: { node: "a" }, shadow_choice: null, ts: 1, ...o });
 
@@ -19,8 +19,8 @@ describe("decisions", () => {
     expect(filterDecisions(rows, {}).length).toBe(2);
   });
   it("shortens values", () => {
-    expect(brief(null)).toBe("—");
-    expect(brief("x".repeat(100), 10)).toHaveLength(10);
+    expect(shortValue(null)).toBe("—");
+    expect(shortValue("x".repeat(100), 10)).toHaveLength(10);
   });
   it("labels the new events", () => {
     expect(extraEventText("task.auto_close_failed", { title: "T", stage: "cleanup" })).toContain("failed at cleanup");

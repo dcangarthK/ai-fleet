@@ -59,7 +59,18 @@ class ControllerCase(unittest.TestCase):
         body = {"agent": "claude", "prompt": "add a hello function"} | kw
         r = self.c.post("/api/tasks", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
+        self.forget(r.json()["id"])
         return r.json()
+
+    def forget(self, *task_ids):
+        """Remove tasks (and their usage rows) at the end of the test: the controller database is shared with the
+        ControllerTests imported into this module, whose pipeline tests count the queued tasks on the fake runner."""
+        def drop():
+            with db() as c:
+                for task_id in task_ids:
+                    c.execute("DELETE FROM agent_usage WHERE task_id=?", (task_id,))
+                    c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        self.addCleanup(drop)
 
 
 class BriefRouteTests(ControllerCase):
@@ -70,9 +81,49 @@ class BriefRouteTests(ControllerCase):
                           "done_when": "test passes", "gate": "pytest"}}
         r = self.c.post("/api/tasks", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
+        self.forget(r.json()["id"])
         task = self.c.get(f"/api/tasks/{r.json()['id']}", headers=W).json()
         self.assertIn("# Build or fix", task["prompt"])
         self.assertEqual(task["placement"]["brief"]["files_allowed"], ["master/controller/tasks.py"])
+
+    def test_task_row_has_brief_and_cost_source(self):
+        body = {"agent": "claude", "kind": "build", "mode": "auto-edit", "prompt": "",
+                "brief": {"goal": "Add endpoint", "files_allowed": ["a.py"], "acceptance": ["ok"]}}
+        with_brief = self.c.post("/api/tasks", json=body, headers=W).json()["id"]
+        self.forget(with_brief)
+        plain = self.task(kind="draft")["id"]
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",
+                      (time.time(), with_brief, 1, "claude", "result"))
+        row = self.c.get(f"/api/tasks/{with_brief}", headers=W).json()
+        self.assertEqual(row["brief"]["files_allowed"], ["a.py"])
+        self.assertEqual(row["cost_source"], "result")
+        bare = self.c.get(f"/api/tasks/{plain}", headers=W).json()
+        self.assertIsNone(bare["brief"])
+        self.assertIsNone(bare["cost_source"])
+        listed = {t["id"]: t for t in self.c.get("/api/tasks", headers=W).json()}
+        self.assertEqual(listed[with_brief]["cost_source"], "result")
+        self.assertIsNone(listed[plain]["brief"])
+
+    def test_cost_source_fallback_order(self):
+        tid = self.task(kind="draft")["id"]
+
+        def seen():
+            single = self.c.get(f"/api/tasks/{tid}", headers=W).json()["cost_source"]
+            listed = {t["id"]: t for t in self.c.get("/api/tasks", headers=W).json()}[tid]["cost_source"]
+            self.assertEqual(single, listed)  # the one-row query and the preloaded context agree
+            return single
+
+        self.assertIsNone(seen())  # nothing recorded
+        with db() as c:
+            c.execute("UPDATE tasks SET usage=? WHERE id=?", (json.dumps({"cost_source": "transcript"}), tid))
+        self.assertEqual(seen(), "transcript")  # the usage blob, no usage rows yet
+        with db() as c:
+            # Inserted out of order: the highest run wins, not the last row written.
+            for run, source in ((2, "reported"), (1, "estimated"), (3, "result")):
+                c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",
+                          (time.time(), tid, run, "claude", source))
+        self.assertEqual(seen(), "result")
 
     def test_legacy_prompt_path_still_works(self):
         task = self.task(kind="draft", prompt="legacy prompt")

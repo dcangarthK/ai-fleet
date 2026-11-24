@@ -570,6 +570,19 @@ def task_view(row, ctx: "DisplayContext | None" = None) -> dict:
             t[field] = json.loads(t[field]) if t.get(field) else fallback
         except (TypeError, ValueError):
             t[field] = fallback
+    # The typed brief stored at spawn (placement.brief), or null; cost provenance of the latest run, else the
+    # usage blob's own, else null.
+    brief = (t["placement"] or {}).get("brief") if isinstance(t["placement"], dict) else None
+    t["brief"] = brief if isinstance(brief, dict) else None
+    if ctx is not None:
+        latest_source = ctx.cost_sources.get(t["id"])
+    else:
+        with db() as c:
+            latest = c.execute("SELECT cost_source FROM agent_usage WHERE task_id=? ORDER BY run DESC, id DESC LIMIT 1",
+                               (t["id"],)).fetchone()
+        latest_source = latest["cost_source"] if latest else None
+    t["cost_source"] = latest_source or (
+        t["usage"].get("cost_source") if isinstance(t["usage"], dict) else None) or None
     derive_reason(t)
     t["display"] = live_display(t, ctx=ctx)
     return t
@@ -585,6 +598,9 @@ class DisplayContext:
         with db() as c:
             rows = c.execute("SELECT id,parent_id,link,state,resolution,outcome,hidden,created_at,rowid AS rid FROM tasks").fetchall()
             self.limit_tasks = {r[0] for r in c.execute("SELECT DISTINCT task_id FROM agent_usage WHERE outcome='limit'")}
+            # Latest run's cost_source per task, loaded once (rows are in run order, the last one wins).
+            self.cost_sources = {r[0]: r[1] for r in c.execute(
+                "SELECT task_id, cost_source FROM agent_usage ORDER BY run, id")}
         self.items = {r["id"]: dict(r) for r in rows}
         self.retry_child: dict[str, str] = {}
         for r in sorted(rows, key=lambda r: (r["created_at"] or 0, r["rid"])):

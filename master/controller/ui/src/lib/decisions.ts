@@ -55,7 +55,7 @@ export function decisionRules(rows: Decision[]): string[] {
 }
 
 /** Short one-line text for a JSON value in a table cell. */
-export function brief(v: unknown, max = 80): string {
+export function shortValue(v: unknown, max = 80): string {
   if (!isSet(v)) return "—";
   const s = typeof v === "string" ? v : JSON.stringify(v);
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;

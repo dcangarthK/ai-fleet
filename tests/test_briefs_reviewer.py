@@ -59,7 +59,18 @@ class ControllerCase(unittest.TestCase):
         body = {"agent": "claude", "prompt": "add a hello function"} | kw
         r = self.c.post("/api/tasks", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
+        self.forget(r.json()["id"])
         return r.json()
+
+    def forget(self, *task_ids):
+        """Remove tasks (and their usage rows) at the end of the test: the controller database is shared with the
+        ControllerTests imported into this module, whose pipeline tests count the queued tasks on the fake runner."""
+        def drop():
+            with db() as c:
+                for task_id in task_ids:
+                    c.execute("DELETE FROM agent_usage WHERE task_id=?", (task_id,))
+                    c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        self.addCleanup(drop)
 
 
 class BriefRouteTests(ControllerCase):
@@ -70,6 +81,7 @@ class BriefRouteTests(ControllerCase):
                           "done_when": "test passes", "gate": "pytest"}}
         r = self.c.post("/api/tasks", json=body, headers=W)
         self.assertEqual(r.status_code, 200, r.text)
+        self.forget(r.json()["id"])
         task = self.c.get(f"/api/tasks/{r.json()['id']}", headers=W).json()
         self.assertIn("# Build or fix", task["prompt"])
         self.assertEqual(task["placement"]["brief"]["files_allowed"], ["master/controller/tasks.py"])
@@ -78,6 +90,7 @@ class BriefRouteTests(ControllerCase):
         body = {"agent": "claude", "kind": "build", "mode": "auto-edit", "prompt": "",
                 "brief": {"goal": "Add endpoint", "files_allowed": ["a.py"], "acceptance": ["ok"]}}
         with_brief = self.c.post("/api/tasks", json=body, headers=W).json()["id"]
+        self.forget(with_brief)
         plain = self.task(kind="draft")["id"]
         with db() as c:
             c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",

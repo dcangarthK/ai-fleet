@@ -570,6 +570,15 @@ def task_view(row, ctx: "DisplayContext | None" = None) -> dict:
             t[field] = json.loads(t[field]) if t.get(field) else fallback
         except (TypeError, ValueError):
             t[field] = fallback
+    # The typed brief stored at spawn (placement.brief), or null; cost provenance of the latest run, else the
+    # usage blob's own, else null.
+    brief = (t["placement"] or {}).get("brief") if isinstance(t["placement"], dict) else None
+    t["brief"] = brief if isinstance(brief, dict) else None
+    with db() as c:
+        latest = c.execute("SELECT cost_source FROM agent_usage WHERE task_id=? ORDER BY run DESC, id DESC LIMIT 1",
+                           (t["id"],)).fetchone()
+    t["cost_source"] = (latest["cost_source"] if latest else None) or (
+        t["usage"].get("cost_source") if isinstance(t["usage"], dict) else None) or None
     derive_reason(t)
     t["display"] = live_display(t, ctx=ctx)
     return t

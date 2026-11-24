@@ -192,7 +192,7 @@ function TaskBody({ task, busy, act, diff, loadDiff }: {
 
 /** Read-only reviewer suggestion (GET /api/tasks/{id}/propose-reviewer). */
 function SuggestedReviewer({ id }: { id: string }) {
-  const q = useQuery({ queryKey: ["propose-reviewer", id], queryFn: () => get<ReviewerProposal>(`/api/tasks/${id}/propose-reviewer`), retry: false });
+  const q = useQuery({ queryKey: ["propose-reviewer", id], queryFn: () => get<ReviewerProposal>(`/api/tasks/${encodeURIComponent(id)}/propose-reviewer`), retry: false });
   return (
     <>
       <h3>Suggested reviewer</h3>

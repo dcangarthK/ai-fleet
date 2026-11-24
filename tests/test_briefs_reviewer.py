@@ -74,6 +74,24 @@ class BriefRouteTests(ControllerCase):
         self.assertIn("# Build or fix", task["prompt"])
         self.assertEqual(task["placement"]["brief"]["files_allowed"], ["master/controller/tasks.py"])
 
+    def test_task_row_has_brief_and_cost_source(self):
+        body = {"agent": "claude", "kind": "build", "mode": "auto-edit", "prompt": "",
+                "brief": {"goal": "Add endpoint", "files_allowed": ["a.py"], "acceptance": ["ok"]}}
+        with_brief = self.c.post("/api/tasks", json=body, headers=W).json()["id"]
+        plain = self.task(kind="draft")["id"]
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",
+                      (time.time(), with_brief, 1, "claude", "result"))
+        row = self.c.get(f"/api/tasks/{with_brief}", headers=W).json()
+        self.assertEqual(row["brief"]["files_allowed"], ["a.py"])
+        self.assertEqual(row["cost_source"], "result")
+        bare = self.c.get(f"/api/tasks/{plain}", headers=W).json()
+        self.assertIsNone(bare["brief"])
+        self.assertIsNone(bare["cost_source"])
+        listed = {t["id"]: t for t in self.c.get("/api/tasks", headers=W).json()}
+        self.assertEqual(listed[with_brief]["cost_source"], "result")
+        self.assertIsNone(listed[plain]["brief"])
+
     def test_legacy_prompt_path_still_works(self):
         task = self.task(kind="draft", prompt="legacy prompt")
         self.assertEqual(task["prompt"], "legacy prompt")

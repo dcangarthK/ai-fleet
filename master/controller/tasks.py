@@ -574,7 +574,7 @@ def task_view(row, ctx: "DisplayContext | None" = None) -> dict:
     # usage blob's own, else null.
     brief = (t["placement"] or {}).get("brief") if isinstance(t["placement"], dict) else None
     t["brief"] = brief if isinstance(brief, dict) else None
-    if ctx is not None:
+    if ctx is not None and t["id"] in ctx.cost_loaded:
         latest_source = ctx.cost_sources.get(t["id"])
     else:
         with db() as c:
@@ -598,9 +598,9 @@ class DisplayContext:
         with db() as c:
             rows = c.execute("SELECT id,parent_id,link,state,resolution,outcome,hidden,created_at,rowid AS rid FROM tasks").fetchall()
             self.limit_tasks = {r[0] for r in c.execute("SELECT DISTINCT task_id FROM agent_usage WHERE outcome='limit'")}
-            # Latest run's cost_source per task, loaded once (rows are in run order, the last one wins).
-            self.cost_sources = {r[0]: r[1] for r in c.execute(
-                "SELECT task_id, cost_source FROM agent_usage ORDER BY run, id")}
+        # Latest run's cost_source, only for the tasks a list returns (load_cost_sources); others query singly.
+        self.cost_sources: dict[str, str | None] = {}
+        self.cost_loaded: set[str] = set()
         self.items = {r["id"]: dict(r) for r in rows}
         self.retry_child: dict[str, str] = {}
         for r in sorted(rows, key=lambda r: (r["created_at"] or 0, r["rid"])):
@@ -613,6 +613,17 @@ class DisplayContext:
             self._by_root.setdefault(self.roots[i], {})[i] = item
         self._rules: dict | None = None
         self._snapshots: dict[str, dict] = {}
+
+    def load_cost_sources(self, ids: list[str]) -> None:
+        """Latest run's cost_source for `ids` (chunked IN query; rows are in run order, the last one wins)."""
+        with db() as c:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                for r in c.execute(f"SELECT task_id, cost_source FROM agent_usage WHERE task_id IN ({marks}) "
+                                   "ORDER BY run, id", chunk):
+                    self.cost_sources[r[0]] = r[1]
+        self.cost_loaded.update(ids)
 
     def hidden(self, task_id: str) -> bool:
         """The task, or the root of its work item, is hidden."""
@@ -1483,7 +1494,9 @@ def list_tasks(state: str | None = None, parent_id: str | None = None, limit: in
         args.append(parent_id)
     ctx = DisplayContext()  # one load for every row's display
     with db() as c:
-        views = [task_view(r, ctx) for r in c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit))]
+        rows = c.execute(q + " ORDER BY created_at DESC LIMIT ?", (*args, limit)).fetchall()
+        ctx.load_cost_sources([r["id"] for r in rows])
+        views = [task_view(r, ctx) for r in rows]
         parents = {r["id"]: r["parent_id"] for r in c.execute("SELECT id,parent_id FROM tasks")}
     for view in views:
         view["root_id"] = root_in(parents, view["id"])

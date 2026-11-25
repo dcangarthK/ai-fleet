@@ -402,9 +402,11 @@ def chains(now: float, ctx: "tasks.DisplayContext | None" = None) -> list[dict]:
         members_by_root: dict[str, list[dict]] = {}
         for root in roots:
             # Full task views: each stage's label and tone come from the one display (tasks.live_display).
-            tree = [tasks.task_view(r, ctx) for r in c.execute(
+            tree_rows = c.execute(
                 "WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id) "
-                "SELECT * FROM tasks WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid", (root,))]
+                "SELECT * FROM tasks WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid", (root,)).fetchall()
+            ctx.load_cost_sources([r["id"] for r in tree_rows])
+            tree = [tasks.task_view(r, ctx) for r in tree_rows]
             members_by_root[root] = tree
     for p in pipelines:
         p["history"] = _json(p["history"]) or []

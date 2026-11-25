@@ -2474,6 +2474,31 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
     return items
 
 
+AUTOSAVE_SUBJECT = "fleet: work from task "
+NOISE_PREFIXES = (".vite/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/", "__pycache__/", "node_modules/")
+
+
+def _only_autosave_noise(repo: str, branch: str) -> bool:
+    """True when every commit on branch not in main is a runner autosave (cleanup commits leftover worktree files
+    after the merge) and the branch differs from main only in tool cache files. Any doubt returns False."""
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30)
+    try:
+        log = git("log", "--format=%s", "main.." + branch)
+        diff = git("diff", "--name-only", "main", branch)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if log.returncode or diff.returncode:
+        return False
+    subjects = [x for x in log.stdout.splitlines() if x]
+    if not subjects or not all(x.startswith(AUTOSAVE_SUBJECT) for x in subjects):
+        return False
+    files = [x for x in diff.stdout.splitlines() if x]
+    return all(f.startswith(NOISE_PREFIXES) or "/__pycache__/" in f for f in files)
+
+
 def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
     """(merged, reason). Merged = branch is an ancestor of the repo's main. Any failure to check counts as unmerged."""
     import subprocess
@@ -2487,6 +2512,8 @@ def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
     if out.returncode == 0:
         return True, "merged"
     if out.returncode == 1:
+        if _only_autosave_noise(repo, branch):
+            return True, "merged (only runner autosave of tool cache files is ahead)"
         return False, "branch is not merged into main"
     return False, "cannot check: " + (out.stderr.strip() or "git failed")[:200]
 
@@ -2509,7 +2536,7 @@ async def cleanup(task_id: str, force: bool = False) -> dict:
                 out.update({"branch_kept": True, "reason": "protected branch"})
             elif merged:
                 done = await asyncio.to_thread(
-                    subprocess.run, ["git", "-C", task["repo"], "branch", "-d", branch],
+                    subprocess.run, ["git", "-C", task["repo"], "branch", "-D" if "autosave" in reason else "-d", branch],
                     capture_output=True, text=True, timeout=30)
                 if done.returncode:
                     out.update({"branch_kept": True, "reason": "delete failed: " + done.stderr.strip()[:200]})

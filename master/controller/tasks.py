@@ -2554,10 +2554,11 @@ async def posture_check(node: str) -> dict:
             stored = json.loads(current["runner"]) if current and current["runner"] else None
         except (ValueError, TypeError):
             stored = None
-        if isinstance(stored, dict):
-            stored["firewall"] = firewall
-            stored["firewall_seen_at"] = time.time()  # this controller's clock; live.firewall_view ages from it
-            c.execute("UPDATE nodes SET runner=? WHERE id=?", (json.dumps(stored), row["id"]))
+        if not isinstance(stored, dict):
+            stored = {}  # no poll has stored health yet: keep the fresh posture instead of dropping it
+        stored["firewall"] = firewall
+        stored["firewall_seen_at"] = time.time()  # this controller's clock; live.firewall_view ages from it
+        c.execute("UPDATE nodes SET runner=? WHERE id=?", (json.dumps(stored), row["id"]))
     return {"node": row["id"], "firewall": firewall}
 
 

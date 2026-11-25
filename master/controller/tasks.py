@@ -2481,7 +2481,10 @@ CACHE_DIRS = (".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache
 def _is_noise_path(repo: str, path: str) -> bool:
     """A cache dir at any depth, or a path the repo's .gitignore ignores."""
     import subprocess
-    if any(part in CACHE_DIRS for part in path.split("/")[:-1]):
+    parts = path.split("/")
+    if "node_modules" in parts:  # never noise, even when gitignored: it can hold unsaved work
+        return False
+    if any(part in CACHE_DIRS for part in parts[:-1]):
         return True
     try:
         return subprocess.run(["git", "-C", repo, "check-ignore", "-q", "--no-index", "--", path],

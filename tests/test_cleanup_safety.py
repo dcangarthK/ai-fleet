@@ -154,7 +154,21 @@ class ControllerCleanup(unittest.TestCase):
         self.assertTrue(self.branch_exists())
 
     def test_autosave_of_node_modules_kept(self):
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "ignore node_modules")
         self._merge_then_autosave("node_modules/x.js")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
+    def test_single_autosave_with_cache_and_real_file_kept(self):
+        self._merge_then_autosave(".vite/r.json")
+        git(self.repo, "checkout", "-q", "fleet/t-2")
+        (self.repo / "real.py").write_text("x")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "--amend", "-q", "--no-edit")
+        git(self.repo, "checkout", "-q", "main")
         out = asyncio.run(tasks.cleanup("t-2"))
         self.assertTrue(out["branch_kept"])
         self.assertTrue(self.branch_exists())

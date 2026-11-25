@@ -2475,19 +2475,31 @@ def work_items(limit: int = 50, include_hidden: int = 0) -> list[dict]:
 
 
 AUTOSAVE_SUBJECT = "fleet: work from task "
-NOISE_PREFIXES = (".vite/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/", "__pycache__/", "node_modules/")
+CACHE_DIRS = (".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__")
+
+
+def _is_noise_path(repo: str, path: str) -> bool:
+    """A cache dir at any depth, or a path the repo's .gitignore ignores."""
+    import subprocess
+    if any(part in CACHE_DIRS for part in path.split("/")[:-1]):
+        return True
+    try:
+        return subprocess.run(["git", "-C", repo, "check-ignore", "-q", "--no-index", "--", path],
+                              capture_output=True, text=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _only_autosave_noise(repo: str, branch: str) -> bool:
     """True when every commit on branch not in main is a runner autosave (cleanup commits leftover worktree files
-    after the merge) and the branch differs from main only in tool cache files. Any doubt returns False."""
+    after the merge) and those commits touch only cache or ignored files. Any doubt returns False."""
     import subprocess
 
     def git(*args):
         return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=30)
     try:
         log = git("log", "--format=%s", "main.." + branch)
-        diff = git("diff", "--name-only", "main", branch)
+        diff = git("diff", "--name-only", "main..." + branch)
     except (OSError, subprocess.SubprocessError):
         return False
     if log.returncode or diff.returncode:
@@ -2496,26 +2508,35 @@ def _only_autosave_noise(repo: str, branch: str) -> bool:
     if not subjects or not all(x.startswith(AUTOSAVE_SUBJECT) for x in subjects):
         return False
     files = [x for x in diff.stdout.splitlines() if x]
-    return all(f.startswith(NOISE_PREFIXES) or "/__pycache__/" in f for f in files)
+    return bool(files) and all(_is_noise_path(repo, f) for f in files)
 
 
-def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
-    """(merged, reason). Merged = branch is an ancestor of the repo's main. Any failure to check counts as unmerged."""
+def _branch_merged_ex(repo: str | None, branch: str | None) -> tuple[bool, str, bool]:
+    """(merged, reason, force_delete). Merged = branch is an ancestor of the repo's main, or only a runner autosave
+    of cache files is ahead of it (force_delete=True: `git branch -d` would refuse). Failure to check = unmerged."""
     import subprocess
     if not repo or not branch or not Path(repo).is_dir():
-        return False, "cannot check: repo or branch not available on the controller"
+        return False, "cannot check: repo or branch not available on the controller", False
     try:
         out = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"],
                              capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, "cannot check: %s" % exc
+        return False, "cannot check: %s" % exc, False
     if out.returncode == 0:
-        return True, "merged"
+        return True, "merged", False
     if out.returncode == 1:
         if _only_autosave_noise(repo, branch):
-            return True, "merged (only runner autosave of tool cache files is ahead)"
+            return True, "merged (only a runner autosave of cache files is ahead)", True
+        return False, "branch is not merged into main", False
+    return False, "cannot check: " + (out.stderr.strip() or "git failed")[:200], False
+
+
+def _branch_merged(repo: str | None, branch: str | None) -> tuple[bool, str]:
+    """(merged, reason), strict ancestry only. Kept 2-valued for merge_close.py, which unpacks two values."""
+    merged, reason, force_delete = _branch_merged_ex(repo, branch)
+    if force_delete:
         return False, "branch is not merged into main"
-    return False, "cannot check: " + (out.stderr.strip() or "git failed")[:200]
+    return merged, reason
 
 
 @router.post("/api/tasks/{task_id}/cleanup")
@@ -2530,13 +2551,13 @@ async def cleanup(task_id: str, force: bool = False) -> dict:
         if not force:
             import subprocess
             branch = task.get("branch") or "fleet/" + task_id
-            merged, reason = await asyncio.to_thread(_branch_merged, task.get("repo"), branch)
+            merged, reason, force_delete = await asyncio.to_thread(_branch_merged_ex, task.get("repo"), branch)
             out = dict(out)
             if branch in ("main", "master"):  # never delete the trunk, whatever the task row says
                 out.update({"branch_kept": True, "reason": "protected branch"})
             elif merged:
                 done = await asyncio.to_thread(
-                    subprocess.run, ["git", "-C", task["repo"], "branch", "-D" if "autosave" in reason else "-d", branch],
+                    subprocess.run, ["git", "-C", task["repo"], "branch", "-D" if force_delete else "-d", branch],
                     capture_output=True, text=True, timeout=30)
                 if done.returncode:
                     out.update({"branch_kept": True, "reason": "delete failed: " + done.stderr.strip()[:200]})

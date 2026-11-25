@@ -133,6 +133,32 @@ class ControllerCleanup(unittest.TestCase):
         self.assertTrue(out["branch_kept"])
         self.assertTrue(self.branch_exists())
 
+    def test_autosave_after_main_moved_on_removed(self):
+        self._merge_then_autosave("ui/.vite/vitest/results.json")
+        (self.repo / "later.txt").write_text("l")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "main moves on")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertFalse(out["branch_kept"])
+        self.assertFalse(self.branch_exists())
+
+    def test_autosave_plus_unmerged_commit_kept(self):
+        self._merge_then_autosave(".vite/r.json")
+        git(self.repo, "checkout", "-q", "fleet/t-2")
+        (self.repo / "real.py").write_text("x")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "real work")
+        git(self.repo, "checkout", "-q", "main")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
+    def test_autosave_of_node_modules_kept(self):
+        self._merge_then_autosave("node_modules/x.js")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
     def test_force_keeps_old_behaviour(self):
         git(self.repo, "branch", "fleet/t-2")
         out = asyncio.run(tasks.cleanup("t-2", force=True))

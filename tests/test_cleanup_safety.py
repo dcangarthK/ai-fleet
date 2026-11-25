@@ -97,6 +97,82 @@ class ControllerCleanup(unittest.TestCase):
         out = asyncio.run(tasks.cleanup("t-2"))
         self.assertTrue(out["branch_kept"])
 
+    def test_multi_commit_no_ff_merge_removed(self):
+        git(self.repo, "checkout", "-q", "-b", "fleet/t-2")
+        for n in ("a", "b", "c"):
+            (self.repo / (n + ".txt")).write_text(n)
+            git(self.repo, "add", "-A")
+            git(self.repo, "commit", "-q", "-m", n)
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "--no-ff", "-q", "-m", "merge", "fleet/t-2")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertFalse(out["branch_kept"])
+        self.assertFalse(self.branch_exists())
+
+    def _merge_then_autosave(self, path):
+        git(self.repo, "checkout", "-q", "-b", "fleet/t-2")
+        git(self.repo, "commit", "--allow-empty", "-q", "-m", "work")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "--no-ff", "-q", "-m", "merge", "fleet/t-2")
+        git(self.repo, "checkout", "-q", "fleet/t-2")
+        (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / path).write_text("x")
+        git(self.repo, "add", "-A", "-f")  # -f: the path may be gitignored; force it in
+        git(self.repo, "commit", "-q", "-m", "fleet: work from task t-2")
+        git(self.repo, "checkout", "-q", "main")
+
+    def test_autosave_of_cache_file_after_merge_removed(self):
+        self._merge_then_autosave(".vite/vitest/results.json")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertFalse(out["branch_kept"])
+        self.assertFalse(self.branch_exists())
+
+    def test_autosave_of_real_file_after_merge_kept(self):
+        self._merge_then_autosave("src/new.py")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
+    def test_autosave_after_main_moved_on_removed(self):
+        self._merge_then_autosave("ui/.vite/vitest/results.json")
+        (self.repo / "later.txt").write_text("l")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "main moves on")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertFalse(out["branch_kept"])
+        self.assertFalse(self.branch_exists())
+
+    def test_autosave_plus_unmerged_commit_kept(self):
+        self._merge_then_autosave(".vite/r.json")
+        git(self.repo, "checkout", "-q", "fleet/t-2")
+        (self.repo / "real.py").write_text("x")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "real work")
+        git(self.repo, "checkout", "-q", "main")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
+    def test_autosave_of_node_modules_kept(self):
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "ignore node_modules")
+        self._merge_then_autosave("node_modules/x.js")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
+    def test_single_autosave_with_cache_and_real_file_kept(self):
+        self._merge_then_autosave(".vite/r.json")
+        git(self.repo, "checkout", "-q", "fleet/t-2")
+        (self.repo / "real.py").write_text("x")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "--amend", "-q", "--no-edit")
+        git(self.repo, "checkout", "-q", "main")
+        out = asyncio.run(tasks.cleanup("t-2"))
+        self.assertTrue(out["branch_kept"])
+        self.assertTrue(self.branch_exists())
+
     def test_force_keeps_old_behaviour(self):
         git(self.repo, "branch", "fleet/t-2")
         out = asyncio.run(tasks.cleanup("t-2", force=True))

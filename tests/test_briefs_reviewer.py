@@ -125,6 +125,53 @@ class BriefRouteTests(ControllerCase):
                           (time.time(), tid, run, "claude", source))
         self.assertEqual(seen(), "result")
 
+    def test_preloaded_context_avoids_per_task_cost_query(self):
+        import tasks
+        import ui_api
+        tid = self.task(kind="draft")["id"]
+        with db() as c:
+            c.execute("INSERT INTO agent_usage (ts,task_id,run,agent,cost_source) VALUES (?,?,?,?,?)",
+                      (time.time(), tid, 1, "claude", "reported"))
+            rows = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchall()
+        real_db = tasks.db
+        single = []
+
+        class Spy:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, sql, *a):
+                if "FROM agent_usage WHERE task_id=?" in sql:
+                    single.append(sql)
+                return self.conn.execute(sql, *a)
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+        class SpyDb:
+            def __enter__(self):
+                self.cm = real_db()
+                return Spy(self.cm.__enter__())
+
+            def __exit__(self, *a):
+                return self.cm.__exit__(*a)
+
+        ctx = tasks.DisplayContext()
+        ctx.load_cost_sources([tid])
+        with patch.object(tasks, "db", SpyDb):
+            view = tasks.task_view(rows[0], ctx)
+        self.assertEqual(view["cost_source"], "reported")
+        self.assertEqual(single, [])  # preloaded: no per-row query
+        with patch.object(tasks, "db", SpyDb):
+            tasks.task_view(rows[0])  # control: without a preload the spy sees the single-row query
+        self.assertEqual(len(single), 1)
+        # The work-item path preloads too (ui_api._work_members -> task_view with a loaded context).
+        single.clear()
+        with patch.object(tasks, "db", SpyDb):
+            members = ui_api._work_members(tid)
+        self.assertEqual(members[0]["cost_source"], "reported")
+        self.assertEqual(single, [])
+
     def test_legacy_prompt_path_still_works(self):
         task = self.task(kind="draft", prompt="legacy prompt")
         self.assertEqual(task["prompt"], "legacy prompt")

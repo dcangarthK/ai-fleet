@@ -41,7 +41,9 @@ def _work_members(root_id: str) -> list[dict]:
         rows = c.execute(
             "WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id) "
             "SELECT * FROM tasks WHERE id IN (SELECT id FROM tree) ORDER BY created_at, rowid", (root_id,)).fetchall()
-    return [tasks.task_view(r) for r in rows]
+    ctx = tasks.DisplayContext()
+    ctx.load_cost_sources([r["id"] for r in rows])
+    return [tasks.task_view(r, ctx) for r in rows]
 
 
 def _token_totals(task_id: str) -> dict | None:
@@ -169,7 +171,10 @@ def lineage(since: float | None = None, until: float | None = None, root: str | 
                 "SELECT * FROM tasks WHERE created_at<=? AND (ended_at IS NULL OR ended_at>=?) "
                 "ORDER BY created_at DESC, rowid DESC LIMIT ?", (end, start, LINEAGE_MAX_TASKS + 1)).fetchall()
         truncated = len(rows) > LINEAGE_MAX_TASKS
-        members = [tasks.task_view(r) for r in reversed(rows[:LINEAGE_MAX_TASKS])]
+        shown = list(reversed(rows[:LINEAGE_MAX_TASKS]))
+        ctx = tasks.DisplayContext()
+        ctx.load_cost_sources([r["id"] for r in shown])
+        members = [tasks.task_view(r, ctx) for r in shown]
     ids = {t["id"] for t in members}
     with db() as c:
         roots = {t["id"]: task_root(c, t["id"]) for t in members}

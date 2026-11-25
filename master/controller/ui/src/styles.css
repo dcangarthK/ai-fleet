@@ -389,6 +389,9 @@ td.wrap { overflow-wrap: anywhere; word-break: break-word; }
   border-radius: 3px; background: var(--sunken); border: 1px solid var(--line); color: var(--ink-2); overflow-wrap: anywhere;
 }
 
+.tag.tone-warn { color: var(--warn); }
+.shadow-mismatch, .tbl tr.shadow-mismatch td { background: var(--warn-soft); }
+
 .tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button {

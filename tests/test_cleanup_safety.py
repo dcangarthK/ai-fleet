@@ -117,7 +117,7 @@ class ControllerCleanup(unittest.TestCase):
         git(self.repo, "checkout", "-q", "fleet/t-2")
         (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
         (self.repo / path).write_text("x")
-        git(self.repo, "add", "-A")
+        git(self.repo, "add", "-A", "-f")  # -f: the path may be gitignored; force it in
         git(self.repo, "commit", "-q", "-m", "fleet: work from task t-2")
         git(self.repo, "checkout", "-q", "main")
 

@@ -258,6 +258,22 @@ class CheckNow(unittest.TestCase):
             stored = json.loads(c.execute("SELECT runner FROM nodes WHERE id='master'").fetchone()["runner"] or "{}")
         self.assertEqual(stored.get("firewall", {}).get("status"), "warn")
 
+    def test_check_now_stores_the_posture_when_no_poll_has_stored_health(self):
+        deadline = time.time() + 5
+        while time.time() < deadline and not tasks.node_rows():
+            time.sleep(0.05)
+
+        async def no_health(*a, **k):
+            return None  # a failed poll only bumps runner_fails; it never writes nodes.runner
+        with mock.patch.object(tasks, "runner_health", no_health):
+            with db() as c:
+                c.execute("UPDATE nodes SET runner=NULL WHERE id='master'")
+            r = self.c.post("/api/nodes/master/posture/check", headers=W)
+            self.assertEqual(r.status_code, 200, r.text)
+            with db() as c:
+                raw = c.execute("SELECT runner FROM nodes WHERE id='master'").fetchone()["runner"]
+        self.assertEqual(json.loads(raw or "{}").get("firewall", {}).get("status"), "warn")
+
     def test_no_endpoint_applies_a_change(self):
         paths = {route.path for route in controller.app.routes if hasattr(route, "path")}
         for path in paths:

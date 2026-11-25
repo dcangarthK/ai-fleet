@@ -240,6 +240,11 @@ class CheckNow(unittest.TestCase):
     def setUp(self):
         FakeRunner.calls.clear()
         FakeRunner.posture = dict(GOOD, status="warn", details=["no host firewall enabled"])
+        # The master poll rewrites nodes.runner from /health; a real runner reports its firewall there, so the fake
+        # must too, or a poll landing between the check and the read erases the stored result.
+        saved = FakeRunner.health_extra
+        FakeRunner.health_extra = {**saved, "firewall": FakeRunner.posture}
+        self.addCleanup(setattr, FakeRunner, "health_extra", saved)
 
     def test_check_now_asks_for_a_read_only_refresh_and_returns_the_cleaned_object(self):
         deadline = time.time() + 5
